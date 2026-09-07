@@ -202,7 +202,7 @@ impl AppState {
         self.active_tab_idx = self.sessions.len() - 1;
         self.active_view = ActiveView::Terminal;
 
-        // Auto sync SFTP right pane to this SSH profile
+        // Automatically point SFTP pane to this SSH profile
         self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(profile.clone()));
 
         self.persist_sessions();
@@ -337,6 +337,13 @@ impl eframe::App for AppState {
                                                 if ui.selectable_label(is_active, label_text).clicked() {
                                                     self.active_tab_idx = i;
                                                     self.active_view = ActiveView::Terminal;
+
+                                                    // Auto update SFTP target if SSH tab is chosen
+                                                    if let SessionType::Ssh { profile_id } = &session.session_type {
+                                                        if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
+                                                            self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
+                                                        }
+                                                    }
                                                 }
                                                 if self.sessions.len() > 1 && ui.small_button("×").clicked() {
                                                     tab_to_close = Some(i);
@@ -770,7 +777,7 @@ impl eframe::App for AppState {
 
                         ui.add_space(10.0);
 
-                        // 2 Columns: Left Pane (e.g. Local) vs Right Pane (e.g. Remote SSH)
+                        // 2 Columns: Left Pane vs Right Pane
                         ui.columns(2, |cols| {
                             // Left Pane
                             card_frame().show(&mut cols[0], |ui| {

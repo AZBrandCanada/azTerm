@@ -28,6 +28,7 @@ pub struct PaneBrowser {
     pub selected_item: Option<String>,
     pub is_loading: bool,
     pub error_message: Option<String>,
+    pub last_socket_state: bool,
     rx: Option<Receiver<Result<Vec<FileEntry>, String>>>,
 }
 
@@ -45,6 +46,7 @@ impl PaneBrowser {
             selected_item: None,
             is_loading: false,
             error_message: None,
+            last_socket_state: false,
             rx: None,
         };
         pane.refresh();
@@ -61,6 +63,7 @@ impl PaneBrowser {
             SftpTarget::RemoteSsh(_) => ".".to_string(),
         };
         self.selected_item = None;
+        self.last_socket_state = false;
         self.refresh();
     }
 
@@ -149,7 +152,7 @@ impl PaneBrowser {
             cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
             cmd.arg("-o").arg("ControlPersist=10m");
             cmd.arg("-o").arg("BatchMode=yes");
-            cmd.arg("-o").arg("ConnectTimeout=5");
+            cmd.arg("-o").arg("ConnectTimeout=3");
         }
 
         cmd.arg("-p").arg(profile.port.to_string());
@@ -178,8 +181,8 @@ impl PaneBrowser {
         let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            if stderr.contains("Permission denied") && !socket_path.exists() {
-                return Err("Please connect to the SSH Terminal first to authenticate session.".to_string());
+            if !socket_path.exists() {
+                return Err("Waiting for SSH login in terminal...".to_string());
             }
             return Err(stderr);
         }
@@ -212,12 +215,30 @@ impl PaneBrowser {
     }
 
     pub fn poll(&mut self) {
+        // Auto-detect when SSH connection is established in terminal
+        if let SftpTarget::RemoteSsh(profile) = &self.target {
+            let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+            let is_connected = socket_path.exists();
+
+            if is_connected && (!self.last_socket_state || (self.entries.is_empty() && !self.is_loading)) {
+                self.last_socket_state = true;
+                self.refresh();
+            } else if !is_connected && self.last_socket_state {
+                self.last_socket_state = false;
+            }
+        }
+
         if let Some(ref rx) = self.rx {
             if let Ok(res) = rx.try_recv() {
                 self.is_loading = false;
                 match res {
-                    Ok(entries) => self.entries = entries,
-                    Err(err) => self.error_message = Some(err),
+                    Ok(entries) => {
+                        self.entries = entries;
+                        self.error_message = None;
+                    }
+                    Err(err) => {
+                        self.error_message = Some(err);
+                    }
                 }
             }
         }
@@ -262,7 +283,7 @@ impl PaneBrowser {
             if self.is_loading {
                 ui.label(egui::RichText::new("Loading directory contents...").small().color(COLOR_ACCENT));
             } else if let Some(ref err) = self.error_message {
-                ui.label(egui::RichText::new(format!("Error: {}", err)).small().color(COLOR_DANGER));
+                ui.label(egui::RichText::new(err).small().color(if err.contains("Waiting") { COLOR_ACCENT } else { COLOR_DANGER }));
             }
 
             ui.separator();
