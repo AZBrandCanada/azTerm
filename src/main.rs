@@ -166,7 +166,6 @@ impl AppState {
     }
 
     fn handle_ssh_url_launch(&mut self, url: &str, ctx: egui::Context) {
-        // Parse ssh://user@host:port
         let clean = url.trim_start_matches("ssh://").trim_start_matches("sftp://");
         let (user_host, port_str) = if let Some((uh, p)) = clean.split_once(':') {
             (uh, p)
@@ -1103,7 +1102,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1160.0, 740.0])
-            .with_title("AZTerm"),
+            .with_title("AZTerm")
+            .with_app_id("azterm"),
         ..Default::default()
     };
     eframe::run_native(

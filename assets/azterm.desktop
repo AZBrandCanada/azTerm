@@ -10,6 +10,7 @@ Categories=System;TerminalEmulator;Network;FileTransfer;
 Keywords=terminal;ssh;sftp;shell;console;command;
 MimeType=x-scheme-handler/ssh;x-scheme-handler/sftp;x-scheme-handler/terminal;
 StartupNotify=true
+StartupWMClass=azterm
 Actions=NewWindow;OpenSFTP;
 
 [Desktop Action NewWindow]
