@@ -2,6 +2,9 @@
 name = "azterm"
 version = "0.1.0"
 edition = "2021"
+description = "Fast, modern native cross-platform terminal, SSH profile manager, and SFTP client"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/azTerm/azTerm"
 
 [dependencies]
 eframe = { version = "0.28", default-features = true }
@@ -12,3 +15,18 @@ serde_json = "1.0"
 chrono = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 arboard = "3.4"
+
+[package.metadata.deb]
+name = "azterm"
+maintainer = "AZTerm Developers"
+copyright = "2026 AZTerm"
+license-file = ["LICENSE", "4"]
+extended-description = "A fast, lightweight GPU-accelerated terminal emulator, SSH bookmark manager, and SFTP client written in pure Rust."
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/azterm", "usr/bin/azterm", "755"],
+    ["assets/azterm.desktop", "usr/share/applications/azterm.desktop", "644"],
+    ["assets/azterm.svg", "usr/share/icons/hicolor/scalable/apps/azterm.svg", "644"],
+]
