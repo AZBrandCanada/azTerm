@@ -2,7 +2,7 @@ use crate::db::Database;
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -12,7 +12,7 @@ pub enum SshAuthType {
     PastedKey { key_id: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshProfile {
     pub id: String,
     pub name: String,
@@ -39,13 +39,25 @@ impl SshProfile {
     }
 
     pub fn to_command(&self) -> CommandBuilder {
+        let socket_dir = SshStore::sockets_dir();
+        let socket_path = socket_dir.join(format!("{}.sock", self.id));
+
         let mut cmd = CommandBuilder::new("ssh");
+
+        // Enable SSH Connection Multiplexing so SFTP shares this authenticated session
+        cmd.arg("-o");
+        cmd.arg("ControlMaster=auto");
+        cmd.arg("-o");
+        cmd.arg(format!("ControlPath={}", socket_path.to_string_lossy()));
+        cmd.arg("-o");
+        cmd.arg("ControlPersist=10m");
         cmd.arg("-p");
         cmd.arg(self.port.to_string());
 
         match &self.auth_type {
             SshAuthType::KeyFile(path) => {
                 if !path.trim().is_empty() {
+                    SshStore::ensure_secure_permissions(path);
                     cmd.arg("-i");
                     cmd.arg(path.trim());
                 }
@@ -53,6 +65,7 @@ impl SshProfile {
             SshAuthType::PastedKey { key_id } => {
                 let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
                 if key_path.exists() {
+                    SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
                     cmd.arg("-i");
                     cmd.arg(key_path.to_string_lossy().to_string());
                 }
@@ -85,7 +98,33 @@ impl SshStore {
     }
 
     pub fn keys_dir() -> PathBuf {
-        Self::base_dir().join("keys")
+        let dir = Self::base_dir().join("keys");
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    pub fn sockets_dir() -> PathBuf {
+        let dir = Self::base_dir().join("sockets");
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    pub fn ensure_secure_permissions(path_str: &str) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p = Path::new(path_str);
+            if p.exists() {
+                if let Ok(meta) = fs::metadata(p) {
+                    let mut perms = meta.permissions();
+                    let mode = perms.mode() & 0o777;
+                    if mode != 0o600 && mode != 0o400 {
+                        perms.set_mode(0o600);
+                        let _ = fs::set_permissions(p, perms);
+                    }
+                }
+            }
+        }
     }
 
     pub fn load() -> Self {
@@ -143,25 +182,14 @@ impl SshStore {
 
     pub fn save_pasted_key(key_id: &str, content: &str) -> std::io::Result<PathBuf> {
         let dir = Self::keys_dir();
-        fs::create_dir_all(&dir)?;
         let key_file = dir.join(format!("{}.pem", key_id));
         fs::write(&key_file, content.trim())?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&key_file)?.permissions();
-            perms.set_mode(0o600);
-            fs::set_permissions(&key_file, perms)?;
-        }
-
+        Self::ensure_secure_permissions(&key_file.to_string_lossy());
         Ok(key_file)
     }
 
     pub fn generate_ed25519_keypair(name: &str) -> Result<(String, String), String> {
         let dir = Self::keys_dir();
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
         let key_path = dir.join(format!("id_ed25519_{}", name));
         let pub_path = dir.join(format!("id_ed25519_{}.pub", name));
 
@@ -186,15 +214,7 @@ impl SshStore {
             return Err(String::from_utf8_lossy(&output.stderr).to_string());
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(&key_path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o600);
-                let _ = fs::set_permissions(&key_path, perms);
-            }
-        }
+        Self::ensure_secure_permissions(&key_path.to_string_lossy());
 
         let pub_key = fs::read_to_string(&pub_path).map_err(|e| e.to_string())?;
         let priv_key_path = key_path.to_string_lossy().to_string();

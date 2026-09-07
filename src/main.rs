@@ -9,7 +9,7 @@ use db::{Database, SavedSessionState};
 use eframe::egui;
 use portable_pty::CommandBuilder;
 use settings::{AppSettings, BackspaceSequence};
-use sftp::SftpBrowser;
+use sftp::{SftpManager, SftpTarget};
 use ssh::{SshAuthType, SshProfile, SshStore};
 use terminal::{SessionType, TerminalSession};
 use theme::*;
@@ -41,7 +41,7 @@ struct AppState {
     settings: AppSettings,
     ssh_store: SshStore,
     sessions: Vec<TerminalSession>,
-    sftp: SftpBrowser,
+    sftp: SftpManager,
     active_tab_idx: usize,
     next_tab_id: usize,
     active_view: ActiveView,
@@ -81,7 +81,7 @@ impl AppState {
             settings,
             ssh_store,
             sessions: Vec::new(),
-            sftp: SftpBrowser::new(),
+            sftp: SftpManager::new(),
             active_tab_idx: 0,
             next_tab_id: 1,
             active_view: ActiveView::Terminal,
@@ -201,7 +201,24 @@ impl AppState {
         self.sessions.push(session);
         self.active_tab_idx = self.sessions.len() - 1;
         self.active_view = ActiveView::Terminal;
+
+        // Auto sync SFTP right pane to this SSH profile
+        self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(profile.clone()));
+
         self.persist_sessions();
+    }
+
+    fn sync_sftp_with_active_session(&mut self) {
+        if let Some(session) = self.sessions.get(self.active_tab_idx) {
+            if let SessionType::Ssh { profile_id } = &session.session_type {
+                if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
+                    let target = SftpTarget::RemoteSsh(prof.clone());
+                    if self.sftp.right_pane.target != target {
+                        self.sftp.right_pane.set_target(target);
+                    }
+                }
+            }
+        }
     }
 
     fn open_create_profile_modal(&mut self) {
@@ -251,6 +268,9 @@ impl eframe::App for AppState {
         for s in &mut self.sessions {
             s.poll_updates(&self.settings);
         }
+
+        // Live sync active tab SSH profile with SFTP pane
+        self.sync_sftp_with_active_session();
 
         // Top Navigation Bar
         egui::TopBottomPanel::top("top_nav")
@@ -338,7 +358,7 @@ impl eframe::App for AppState {
                 });
             });
 
-        // Bottom Status Bar with SFTP Split Toggle & Toast
+        // Bottom Status Bar
         egui::TopBottomPanel::bottom("bottom_status_bar")
             .frame(egui::Frame::none().fill(COLOR_BG_PANEL).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
             .show(ctx, |ui| {
@@ -353,7 +373,6 @@ impl eframe::App for AppState {
 
                     ui.separator();
 
-                    // SFTP Drawer Toggle Button
                     let sftp_btn_text = if self.settings.show_sftp_split_view {
                         "SFTP Drawer: OPEN"
                     } else {
@@ -367,6 +386,11 @@ impl eframe::App for AppState {
                         } else {
                             "SFTP split panel closed"
                         });
+                    }
+
+                    if let Some(ref status) = self.sftp.transfer_status {
+                        ui.separator();
+                        ui.label(egui::RichText::new(status).small().color(COLOR_ACCENT));
                     }
 
                     // Toast Feedback Message
@@ -455,7 +479,7 @@ impl eframe::App for AppState {
                 });
         }
 
-        // Profile Modal Window (Create / Edit)
+        // Profile Modal Window
         if self.show_profile_modal {
             let modal_title = if self.editing_profile_id.is_some() {
                 "Edit SSH Profile"
@@ -522,6 +546,7 @@ impl eframe::App for AppState {
                             if ui.button("Save Profile").clicked() {
                                 let port = self.new_ssh_port.parse().unwrap_or(22);
                                 let auth_type = if self.new_ssh_auth_choice == 1 && !self.new_ssh_key_path.trim().is_empty() {
+                                    SshStore::ensure_secure_permissions(&self.new_ssh_key_path);
                                     SshAuthType::KeyFile(self.new_ssh_key_path.clone())
                                 } else if self.new_ssh_auth_choice == 2 && !self.new_ssh_pasted_key.trim().is_empty() {
                                     let key_id = format!("{}_{}", self.new_ssh_host, port);
@@ -570,9 +595,16 @@ impl eframe::App for AppState {
                                 session.render(&mut columns[0], &self.settings, &mut toast);
                             }
                             card_frame().show(&mut columns[1], |ui| {
-                                ui.heading("SFTP Sync Explorer");
+                                ui.horizontal(|ui| {
+                                    ui.heading("SFTP Sync Pane");
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.button("Upload Selected").clicked() {
+                                            self.sftp.upload_selected();
+                                        }
+                                    });
+                                });
                                 ui.separator();
-                                self.sftp.render(ui);
+                                self.sftp.right_pane.render(ui);
                             });
                         });
                     } else if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
@@ -617,7 +649,7 @@ impl eframe::App for AppState {
                                 let mut delete_idx: Option<usize> = None;
                                 let mut connect_profile: Option<SshProfile> = None;
                                 let mut edit_profile: Option<SshProfile> = None;
-                                let mut open_sftp = false;
+                                let mut sftp_profile: Option<SshProfile> = None;
 
                                 for (idx, profile) in profiles.iter().enumerate() {
                                     card_frame().show(ui, |ui| {
@@ -646,7 +678,7 @@ impl eframe::App for AppState {
                                                     edit_profile = Some(profile.clone());
                                                 }
                                                 if ui.button("SFTP").clicked() {
-                                                    open_sftp = true;
+                                                    sftp_profile = Some(profile.clone());
                                                 }
                                                 if ui.button("Connect").clicked() {
                                                     connect_profile = Some(profile.clone());
@@ -664,7 +696,8 @@ impl eframe::App for AppState {
                                 if let Some(p) = edit_profile {
                                     self.open_edit_profile_modal(&p);
                                 }
-                                if open_sftp {
+                                if let Some(p) = sftp_profile {
+                                    self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(p));
                                     self.active_view = ActiveView::SftpBrowser;
                                 }
                                 if let Some(profile) = connect_profile {
@@ -717,16 +750,83 @@ impl eframe::App for AppState {
                 }
                 ActiveView::SftpBrowser => {
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.add_space(14.0);
+                        ui.add_space(10.0);
+
+                        // Dual Pane Action Toolbar
                         card_frame().show(ui, |ui| {
-                            self.sftp.render(ui);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Dual-Session SFTP File Transfer").strong().color(COLOR_ACCENT));
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("Download (Right -> Left)").clicked() {
+                                        self.sftp.download_selected();
+                                    }
+                                    if ui.button("Upload (Left -> Right)").clicked() {
+                                        self.sftp.upload_selected();
+                                    }
+                                });
+                            });
+                        });
+
+                        ui.add_space(10.0);
+
+                        // 2 Columns: Left Pane (e.g. Local) vs Right Pane (e.g. Remote SSH)
+                        ui.columns(2, |cols| {
+                            // Left Pane
+                            card_frame().show(&mut cols[0], |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Left Pane:").strong());
+                                    let is_local = self.sftp.left_pane.target == SftpTarget::Local;
+                                    egui::ComboBox::from_id_source("left_pane_target_combo")
+                                        .selected_text(if is_local { "Local Filesystem" } else { "Remote SSH Target" })
+                                        .show_ui(ui, |ui| {
+                                            if ui.selectable_label(is_local, "Local Filesystem").clicked() {
+                                                self.sftp.left_pane.set_target(SftpTarget::Local);
+                                            }
+                                            for p in &self.ssh_store.profiles {
+                                                let is_this = self.sftp.left_pane.target == SftpTarget::RemoteSsh(p.clone());
+                                                if ui.selectable_label(is_this, format!("SSH: {}", p.name)).clicked() {
+                                                    self.sftp.left_pane.set_target(SftpTarget::RemoteSsh(p.clone()));
+                                                }
+                                            }
+                                        });
+                                });
+                                ui.separator();
+                                self.sftp.left_pane.render(ui);
+                            });
+
+                            // Right Pane
+                            card_frame().show(&mut cols[1], |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Right Pane:").strong());
+                                    let right_desc = match &self.sftp.right_pane.target {
+                                        SftpTarget::Local => "Local Filesystem".to_string(),
+                                        SftpTarget::RemoteSsh(p) => format!("SSH: {}", p.name),
+                                    };
+                                    egui::ComboBox::from_id_source("right_pane_target_combo")
+                                        .selected_text(right_desc)
+                                        .show_ui(ui, |ui| {
+                                            let is_local = self.sftp.right_pane.target == SftpTarget::Local;
+                                            if ui.selectable_label(is_local, "Local Filesystem").clicked() {
+                                                self.sftp.right_pane.set_target(SftpTarget::Local);
+                                            }
+                                            for p in &self.ssh_store.profiles {
+                                                let is_this = self.sftp.right_pane.target == SftpTarget::RemoteSsh(p.clone());
+                                                if ui.selectable_label(is_this, format!("SSH: {}", p.name)).clicked() {
+                                                    self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(p.clone()));
+                                                }
+                                            }
+                                        });
+                                });
+                                ui.separator();
+                                self.sftp.right_pane.render(ui);
+                            });
                         });
                     });
                 }
                 ActiveView::Settings => {
                     // Professional Sidebar + Settings Panel Layout
                     ui.columns(2, |columns| {
-                        // Left Settings Navigation Sidebar (Width ~210px)
                         columns[0].set_max_width(210.0);
                         columns[0].vertical(|ui| {
                             ui.add_space(10.0);
@@ -780,7 +880,6 @@ impl eframe::App for AppState {
                             }
                         });
 
-                        // Right Settings Content View (Wide structured rows)
                         columns[1].vertical(|ui| {
                             ui.add_space(10.0);
                             let mut changed = false;
@@ -921,7 +1020,7 @@ impl eframe::App for AppState {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 720.0])
+            .with_inner_size([1160.0, 740.0])
             .with_title("AZTerm"),
         ..Default::default()
     };

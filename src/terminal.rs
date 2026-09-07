@@ -287,205 +287,218 @@ impl TerminalSession {
         }
     }
 
+    fn render_auth_modal(&mut self, ctx: &egui::Context, toast: &mut Option<(String, std::time::Instant)>) {
+        let prompt = match self.active_auth_prompt.clone() {
+            Some(p) => p,
+            None => return,
+        };
+
+        egui::Area::new(egui::Id::new("center_auth_prompt"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(COLOR_BG_CARD)
+                    .stroke(egui::Stroke::new(1.5_f32, COLOR_ACCENT))
+                    .rounding(8.0)
+                    .inner_margin(egui::Margin::same(20.0))
+                    .show(ui, |ui| {
+                        ui.set_width(420.0);
+
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                egui::RichText::new(&prompt.title)
+                                    .strong()
+                                    .size(16.0)
+                                    .color(COLOR_ACCENT),
+                            );
+                        });
+                        ui.add_space(8.0);
+
+                        if !prompt.prompt_line.is_empty() {
+                            egui::Frame::none()
+                                .fill(COLOR_BG_PANEL)
+                                .rounding(4.0)
+                                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(&prompt.prompt_line)
+                                            .small()
+                                            .color(COLOR_TEXT_PRIMARY),
+                                    );
+                                });
+                            ui.add_space(8.0);
+                        }
+
+                        let label_text = if prompt.is_secret {
+                            "Enter Password / Passphrase:"
+                        } else {
+                            "Enter 6-Digit OTP / Token:"
+                        };
+                        ui.label(egui::RichText::new(label_text).small().color(COLOR_TEXT_MUTED));
+                        ui.add_space(4.0);
+
+                        let mut submit = false;
+
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            submit = true;
+                        }
+                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.active_auth_prompt = None;
+                        }
+
+                        ui.horizontal(|ui| {
+                            let edit = egui::TextEdit::singleline(&mut self.auth_input)
+                                .password(prompt.is_secret && !self.auth_show_secret)
+                                .desired_width(
+                                    ui.available_width()
+                                        - if prompt.is_secret { 65.0 } else { 0.0 },
+                                );
+                            let res = ui.add(edit);
+                            res.request_focus();
+
+                            if prompt.is_secret {
+                                if ui.button(if self.auth_show_secret { "Hide" } else { "Show" }).clicked() {
+                                    self.auth_show_secret = !self.auth_show_secret;
+                                }
+                            }
+                        });
+
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("Submit").strong()).clicked() {
+                                submit = true;
+                            }
+
+                            if !prompt.is_secret {
+                                if ui.button("Paste Clipboard").clicked() {
+                                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                                        if let Ok(text) = cb.get_text() {
+                                            self.auth_input = text.trim().to_string();
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Dismiss / Terminal").clicked() {
+                                    self.active_auth_prompt = None;
+                                }
+                            });
+                        });
+
+                        if submit {
+                            self.send_auth_response(&self.auth_input);
+                            self.auth_input.clear();
+                            self.active_auth_prompt = None;
+                            *toast = Some((
+                                "Authentication submitted".to_string(),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                    });
+            });
+    }
+
+    fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+        ctx.input(|i| {
+            for event in &i.events {
+                match event {
+                    egui::Event::Text(text) => {
+                        if !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
+                            self.send_input(text);
+                        }
+                    }
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } => {
+                        let mut bytes: Option<Vec<u8>> = None;
+                        if modifiers.ctrl {
+                            let ctrl_byte = match key {
+                                egui::Key::A => Some(1),
+                                egui::Key::B => Some(2),
+                                egui::Key::C => Some(3),
+                                egui::Key::D => Some(4),
+                                egui::Key::E => Some(5),
+                                egui::Key::F => Some(6),
+                                egui::Key::G => Some(7),
+                                egui::Key::H => Some(8),
+                                egui::Key::I => Some(9),
+                                egui::Key::J => Some(10),
+                                egui::Key::K => Some(11),
+                                egui::Key::L => Some(12),
+                                egui::Key::M => Some(13),
+                                egui::Key::N => Some(14),
+                                egui::Key::O => Some(15),
+                                egui::Key::P => Some(16),
+                                egui::Key::Q => Some(17),
+                                egui::Key::R => Some(18),
+                                egui::Key::S => Some(19),
+                                egui::Key::T => Some(20),
+                                egui::Key::U => Some(21),
+                                egui::Key::V => Some(22),
+                                egui::Key::W => Some(23),
+                                egui::Key::X => Some(24),
+                                egui::Key::Y => Some(25),
+                                egui::Key::Z => Some(26),
+                                _ => None,
+                            };
+                            if let Some(b) = ctrl_byte {
+                                bytes = Some(vec![b]);
+                            }
+                        } else {
+                            bytes = match key {
+                                egui::Key::Enter => Some(b"\r".to_vec()),
+                                egui::Key::Backspace => match settings.backspace_sequence {
+                                    BackspaceSequence::Delete127 => Some(b"\x7f".to_vec()),
+                                    BackspaceSequence::Backspace8 => Some(b"\x08".to_vec()),
+                                },
+                                egui::Key::Tab => Some(b"\t".to_vec()),
+                                egui::Key::Escape => Some(b"\x1b".to_vec()),
+                                egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
+                                egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
+                                egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
+                                egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
+                                egui::Key::Home => Some(b"\x1b[H".to_vec()),
+                                egui::Key::End => Some(b"\x1b[F".to_vec()),
+                                egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
+                                egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
+                                egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
+                                _ => None,
+                            };
+                        }
+
+                        if let Some(b) = bytes {
+                            if let Ok(mut w) = self.writer.lock() {
+                                let _ = w.write_all(&b);
+                                let _ = w.flush();
+                            }
+                        }
+                    }
+                    egui::Event::Paste(text) => {
+                        self.send_input(text);
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
         settings: &AppSettings,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        let has_modal = self.active_auth_prompt.is_some();
+        // 1. Auth modal (if active)
+        self.render_auth_modal(ui.ctx(), toast);
 
-        // 1. Floating Non-Blocking Center Authentication Modal
-        if let Some(prompt) = self.active_auth_prompt.clone() {
-            egui::Area::new(egui::Id::new("center_auth_prompt"))
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    egui::Frame::none()
-                        .fill(COLOR_BG_CARD)
-                        .stroke(egui::Stroke::new(1.5_f32, COLOR_ACCENT))
-                        .rounding(8.0)
-                        .inner_margin(egui::Margin::same(20.0))
-                        .show(ui, |ui| {
-                            ui.set_width(420.0);
-
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new(&prompt.title)
-                                        .strong()
-                                        .size(16.0)
-                                        .color(COLOR_ACCENT),
-                                );
-                            });
-                            ui.add_space(8.0);
-
-                            if !prompt.prompt_line.is_empty() {
-                                egui::Frame::none()
-                                    .fill(COLOR_BG_PANEL)
-                                    .rounding(4.0)
-                                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new(&prompt.prompt_line)
-                                                .small()
-                                                .color(COLOR_TEXT_PRIMARY),
-                                        );
-                                    });
-                                ui.add_space(8.0);
-                            }
-
-                            let label_text = if prompt.is_secret {
-                                "Enter Password / Passphrase:"
-                            } else {
-                                "Enter 6-Digit OTP / Token:"
-                            };
-                            ui.label(egui::RichText::new(label_text).small().color(COLOR_TEXT_MUTED));
-                            ui.add_space(4.0);
-
-                            let mut submit = false;
-                            ui.horizontal(|ui| {
-                                let edit = egui::TextEdit::singleline(&mut self.auth_input)
-                                    .password(prompt.is_secret && !self.auth_show_secret)
-                                    .desired_width(
-                                        ui.available_width()
-                                            - if prompt.is_secret { 65.0 } else { 0.0 },
-                                    );
-                                let res = ui.add(edit);
-                                res.request_focus();
-
-                                if res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                                    submit = true;
-                                }
-
-                                if prompt.is_secret {
-                                    if ui.button(if self.auth_show_secret { "Hide" } else { "Show" }).clicked() {
-                                        self.auth_show_secret = !self.auth_show_secret;
-                                    }
-                                }
-                            });
-
-                            ui.add_space(14.0);
-                            ui.horizontal(|ui| {
-                                if ui.button(egui::RichText::new("Submit").strong()).clicked() {
-                                    submit = true;
-                                }
-
-                                if !prompt.is_secret {
-                                    if ui.button("Paste Clipboard").clicked() {
-                                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                                            if let Ok(text) = cb.get_text() {
-                                                self.auth_input = text.trim().to_string();
-                                            }
-                                        }
-                                    }
-                                }
-
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Dismiss / Terminal").clicked() {
-                                        self.active_auth_prompt = None;
-                                    }
-                                });
-                            });
-
-                            if submit {
-                                self.send_auth_response(&self.auth_input);
-                                self.auth_input.clear();
-                                self.active_auth_prompt = None;
-                                *toast = Some((
-                                    "Authentication submitted".to_string(),
-                                    std::time::Instant::now(),
-                                ));
-                            }
-                        });
-                });
-        }
-
-        // 2. Standard Keyboard Routing (Only when no modal or text inputs have focus)
-        if !has_modal && !ui.ctx().wants_keyboard_input() {
-            ui.input(|i| {
-                for event in &i.events {
-                    match event {
-                        egui::Event::Text(text) => {
-                            if !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
-                                self.send_input(text);
-                            }
-                        }
-                        egui::Event::Key {
-                            key,
-                            pressed: true,
-                            modifiers,
-                            ..
-                        } => {
-                            let mut bytes: Option<Vec<u8>> = None;
-                            if modifiers.ctrl {
-                                let ctrl_byte = match key {
-                                    egui::Key::A => Some(1),
-                                    egui::Key::B => Some(2),
-                                    egui::Key::C => Some(3),
-                                    egui::Key::D => Some(4),
-                                    egui::Key::E => Some(5),
-                                    egui::Key::F => Some(6),
-                                    egui::Key::G => Some(7),
-                                    egui::Key::H => Some(8),
-                                    egui::Key::I => Some(9),
-                                    egui::Key::J => Some(10),
-                                    egui::Key::K => Some(11),
-                                    egui::Key::L => Some(12),
-                                    egui::Key::M => Some(13),
-                                    egui::Key::N => Some(14),
-                                    egui::Key::O => Some(15),
-                                    egui::Key::P => Some(16),
-                                    egui::Key::Q => Some(17),
-                                    egui::Key::R => Some(18),
-                                    egui::Key::S => Some(19),
-                                    egui::Key::T => Some(20),
-                                    egui::Key::U => Some(21),
-                                    egui::Key::V => Some(22),
-                                    egui::Key::W => Some(23),
-                                    egui::Key::X => Some(24),
-                                    egui::Key::Y => Some(25),
-                                    egui::Key::Z => Some(26),
-                                    _ => None,
-                                };
-                                if let Some(b) = ctrl_byte {
-                                    bytes = Some(vec![b]);
-                                }
-                            } else {
-                                bytes = match key {
-                                    egui::Key::Enter => Some(b"\r".to_vec()),
-                                    egui::Key::Backspace => match settings.backspace_sequence {
-                                        BackspaceSequence::Delete127 => Some(b"\x7f".to_vec()),
-                                        BackspaceSequence::Backspace8 => Some(b"\x08".to_vec()),
-                                    },
-                                    egui::Key::Tab => Some(b"\t".to_vec()),
-                                    egui::Key::Escape => Some(b"\x1b".to_vec()),
-                                    egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
-                                    egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
-                                    egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
-                                    egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
-                                    egui::Key::Home => Some(b"\x1b[H".to_vec()),
-                                    egui::Key::End => Some(b"\x1b[F".to_vec()),
-                                    egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
-                                    egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
-                                    egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
-                                    _ => None,
-                                };
-                            }
-
-                            if let Some(b) = bytes {
-                                if let Ok(mut w) = self.writer.lock() {
-                                    let _ = w.write_all(&b);
-                                    let _ = w.flush();
-                                }
-                            }
-                        }
-                        egui::Event::Paste(text) => {
-                            self.send_input(text);
-                        }
-                        _ => {}
-                    }
-                }
-            });
+        // 2. Keyboard routing (if no modal & no text widget has focus)
+        if self.active_auth_prompt.is_none() && !ui.ctx().wants_keyboard_input() {
+            self.handle_keyboard_events(ui.ctx(), settings);
         }
 
         // 3. Dynamic Resize & Painter
