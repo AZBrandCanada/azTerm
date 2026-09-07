@@ -1,0 +1,8 @@
+[Nemo Action]
+Name=Open in AZTerm
+Comment=Open AZTerm in current folder
+Exec=azterm -d "%F"
+Icon-Name=azterm
+Selection=any
+Extensions=dir;
+Quote=double
