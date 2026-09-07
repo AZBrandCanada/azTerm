@@ -11,6 +11,10 @@ echo "[1/5] Checking Debian/Ubuntu dependencies..."
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libx11-dev libgl1-mesa-dev
 
+if ! command -v cargo &> /dev/null && ! command -v rustup &> /dev/null; then
+    sudo apt-get install -y cargo rustc
+fi
+
 # 2. Build Release Binary
 echo "[2/5] Compiling AZTerm in release mode..."
 cargo build --release
