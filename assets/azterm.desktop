@@ -1,10 +1,21 @@
 [Desktop Entry]
 Name=AZTerm
+GenericName=Terminal Emulator
 Comment=Fast, modern native terminal, SSH profile manager, and SFTP client
-Exec=azterm
+Exec=azterm %U
 Icon=azterm
 Terminal=false
 Type=Application
-Categories=System;TerminalEmulator;Network;
-Keywords=terminal;ssh;sftp;shell;console;
+Categories=System;TerminalEmulator;Network;FileTransfer;
+Keywords=terminal;ssh;sftp;shell;console;command;
+MimeType=x-scheme-handler/ssh;x-scheme-handler/sftp;x-scheme-handler/terminal;
 StartupNotify=true
+Actions=NewWindow;OpenSFTP;
+
+[Desktop Action NewWindow]
+Name=Open New Terminal
+Exec=azterm
+
+[Desktop Action OpenSFTP]
+Name=Open SFTP Explorer
+Exec=azterm --sftp

@@ -11,6 +11,7 @@ use portable_pty::CommandBuilder;
 use settings::{AppSettings, BackspaceSequence};
 use sftp::{SftpManager, SftpTarget};
 use ssh::{SshAuthType, SshProfile, SshStore};
+use std::path::Path;
 use terminal::{SessionType, TerminalSession};
 use theme::*;
 
@@ -35,6 +36,51 @@ enum SettingsCategory {
     Sftp,
     Security,
     System,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CliLaunchOptions {
+    working_directory: Option<String>,
+    ssh_url: Option<String>,
+    open_sftp_only: bool,
+    execute_command: Option<Vec<String>>,
+}
+
+fn parse_cli_arguments() -> CliLaunchOptions {
+    let mut opts = CliLaunchOptions::default();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "-d" | "--working-directory" | "--dir" => {
+                if let Some(dir) = iter.next() {
+                    opts.working_directory = Some(dir);
+                }
+            }
+            "--sftp" => {
+                opts.open_sftp_only = true;
+            }
+            "-e" | "--execute" => {
+                let rest: Vec<String> = iter.collect();
+                if !rest.is_empty() {
+                    opts.execute_command = Some(rest);
+                }
+                break;
+            }
+            other => {
+                if other.starts_with("ssh://") || other.starts_with("ssh:") {
+                    opts.ssh_url = Some(other.to_string());
+                } else if other.starts_with("sftp://") || other.starts_with("sftp:") {
+                    opts.ssh_url = Some(other.replace("sftp://", "ssh://"));
+                    opts.open_sftp_only = true;
+                } else if Path::new(other).exists() && Path::new(other).is_dir() {
+                    opts.working_directory = Some(other.to_string());
+                }
+            }
+        }
+    }
+    opts
 }
 
 struct AppState {
@@ -73,7 +119,7 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, cli: CliLaunchOptions) -> Self {
         let settings = AppSettings::load();
         let ssh_store = SshStore::load();
 
@@ -84,7 +130,7 @@ impl AppState {
             sftp: SftpManager::new(),
             active_tab_idx: 0,
             next_tab_id: 1,
-            active_view: ActiveView::Terminal,
+            active_view: if cli.open_sftp_only { ActiveView::SftpBrowser } else { ActiveView::Terminal },
             ssh_subview: SshSubView::Profiles,
             settings_category: SettingsCategory::Terminal,
             toast_message: None,
@@ -107,8 +153,36 @@ impl AppState {
             settings_search: String::new(),
         };
 
-        app.restore_saved_sessions(cc.egui_ctx.clone());
+        // Handle CLI Launch Parameters
+        if let Some(dir) = cli.working_directory {
+            app.spawn_local_terminal(cc.egui_ctx.clone(), Some(dir));
+        } else if let Some(url) = cli.ssh_url {
+            app.handle_ssh_url_launch(&url, cc.egui_ctx.clone());
+        } else {
+            app.restore_saved_sessions(cc.egui_ctx.clone());
+        }
+
         app
+    }
+
+    fn handle_ssh_url_launch(&mut self, url: &str, ctx: egui::Context) {
+        // Parse ssh://user@host:port
+        let clean = url.trim_start_matches("ssh://").trim_start_matches("sftp://");
+        let (user_host, port_str) = if let Some((uh, p)) = clean.split_once(':') {
+            (uh, p)
+        } else {
+            (clean, "22")
+        };
+
+        let (user, host) = if let Some((u, h)) = user_host.split_once('@') {
+            (u.to_string(), h.to_string())
+        } else {
+            ("root".to_string(), user_host.to_string())
+        };
+
+        let port: u16 = port_str.parse().unwrap_or(22);
+        let profile = SshProfile::new(&format!("Direct: {}", host), &host, port, &user);
+        self.spawn_ssh_terminal(&profile, ctx);
     }
 
     fn set_toast(&mut self, text: impl Into<String>) {
@@ -202,7 +276,7 @@ impl AppState {
         self.active_tab_idx = self.sessions.len() - 1;
         self.active_view = ActiveView::Terminal;
 
-        // Automatically point SFTP pane to this SSH profile
+        // Point SFTP pane to this profile
         self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(profile.clone()));
 
         self.persist_sessions();
@@ -338,7 +412,6 @@ impl eframe::App for AppState {
                                                     self.active_tab_idx = i;
                                                     self.active_view = ActiveView::Terminal;
 
-                                                    // Auto update SFTP target if SSH tab is chosen
                                                     if let SessionType::Ssh { profile_id } = &session.session_type {
                                                         if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
                                                             self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
@@ -1025,6 +1098,8 @@ impl eframe::App for AppState {
 }
 
 fn main() -> eframe::Result<()> {
+    let cli_opts = parse_cli_arguments();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1160.0, 740.0])
@@ -1034,6 +1109,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "AZTerm",
         options,
-        Box::new(|cc| Ok(Box::new(AppState::new(cc)))),
+        Box::new(|cc| Ok(Box::new(AppState::new(cc, cli_opts)))),
     )
 }

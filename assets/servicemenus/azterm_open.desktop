@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;inode/directory;
+Actions=openInAzTerm;
+X-KDE-Priority=TopLevel
+
+[Desktop Action openInAzTerm]
+Name=Open in AZTerm
+Icon=azterm
+Exec=bash -c 'if [ -d "%f" ]; then azterm -d "%f"; else azterm -d "%d"; fi'
