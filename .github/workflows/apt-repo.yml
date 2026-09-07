@@ -5,12 +5,13 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   apt-deploy:
     name: Build .deb and Deploy APT Repo to GitHub Pages
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -20,7 +21,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config apt-utils dpkg-dev
 
-      - name: Install Rust
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-deb
@@ -38,18 +39,10 @@ jobs:
           dpkg-scanpackages --multiversion . > Packages
           gzip -k -f Packages
           
-          # Generate Release metadata
-          cat << 'REL' > Release
-Architectures: amd64
-Components: main
-Description: Official AZTerm Debian/Ubuntu Repository
-Label: AZTerm
-Origin: AZBrandCanada
-Suite: stable
-REL
+          printf "Architectures: amd64\nComponents: main\nDescription: Official AZTerm Debian/Ubuntu Repository\nLabel: AZTerm\nOrigin: AZBrandCanada\nSuite: stable\n" > Release
           apt-ftparchive release . >> Release
 
-      - name: Deploy to GitHub Pages (gh-pages branch)
+      - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

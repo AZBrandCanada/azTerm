@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     name: Linux Packages (.AppImage, .deb, .tar.gz)
@@ -13,12 +16,12 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config curl
 
-      - name: Install Rust
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install cargo-deb
@@ -26,36 +29,35 @@ jobs:
 
       - name: Build All Linux Packages
         run: |
+          mkdir -p dist target/stage-linux target/AppDir/usr/bin target/AppDir/usr/share/applications target/AppDir/usr/share/icons/hicolor/scalable/apps target/AppDir/usr/share/icons/hicolor/256x256/apps
+          
+          # 1. Compile Release Binary
           cargo build --release
+          
+          # 2. Build .deb Package
           cargo deb -o dist/azterm_0.1.0_amd64.deb
-
-          mkdir -p dist target/stage-linux
+          
+          # 3. Build Tarball
           cp target/release/azterm target/stage-linux/
           cp assets/azterm.desktop target/stage-linux/
           cp assets/azterm.svg target/stage-linux/
           tar -czf dist/azterm-linux-x86_64.tar.gz -C target/stage-linux .
-
-          # AppImage Build
-          mkdir -p target/AppDir/usr/bin target/AppDir/usr/share/applications target/AppDir/usr/share/icons/hicolor/scalable/apps
+          
+          # 4. Build AppImage
           cp target/release/azterm target/AppDir/usr/bin/azterm
           cp assets/azterm.desktop target/AppDir/azterm.desktop
           cp assets/azterm.desktop target/AppDir/usr/share/applications/azterm.desktop
           cp assets/azterm.svg target/AppDir/azterm.svg
           cp assets/azterm.svg target/AppDir/usr/share/icons/hicolor/scalable/apps/azterm.svg
           
-          cat << 'APPRUN' > target/AppDir/AppRun
-#!/sh
-SELF=$(readlink -f "$0")
-HERE=${SELF%/*}
-export PATH="${HERE}/usr/bin:${PATH}"
-exec "${HERE}/usr/bin/azterm" "$@"
-APPRUN
+          printf '#!/bin/sh\nSELF=$(readlink -f "$0")\nHERE=${SELF%%/*}\nexport PATH="${HERE}/usr/bin:${PATH}"\nexec "${HERE}/usr/bin/azterm" "$@"\n' > target/AppDir/AppRun
           chmod +x target/AppDir/AppRun
+          
           curl -sLo target/appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x target/appimagetool
           ARCH=x86_64 ./target/appimagetool --appimage-extract-and-run target/AppDir dist/AZTerm-x86_64.AppImage
 
-      - name: Upload Linux Assets
+      - name: Upload Linux Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -70,7 +72,7 @@ APPRUN
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build Windows Binary
@@ -81,10 +83,10 @@ APPRUN
           mkdir dist
           Compress-Archive -Path target\release\azterm.exe -DestinationPath dist\azterm-windows-x86_64.zip
 
-      - name: Upload Windows Assets
+      - name: Upload Windows Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist\azterm-windows-x86_64.zip
+          files: dist/azterm-windows-x86_64.zip
 
   build-macos:
     name: macOS Package (.tar.gz)
@@ -93,7 +95,7 @@ APPRUN
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Rust
+      - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build macOS Binary
@@ -104,7 +106,7 @@ APPRUN
           mkdir -p dist
           tar -czf dist/azterm-macos-universal.tar.gz -C target/release azterm
 
-      - name: Upload macOS Assets
+      - name: Upload macOS Release Assets
         uses: softprops/action-gh-release@v2
         with:
           files: dist/azterm-macos-universal.tar.gz
