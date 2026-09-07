@@ -64,3 +64,33 @@ pub fn setting_row_toggle(ui: &mut egui::Ui, title: &str, desc: &str, value: &mu
     ui.add_space(6.0);
     changed
 }
+
+pub fn setting_row_disabled(ui: &mut egui::Ui, title: &str, desc: &str, value: bool) {
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(title).strong().color(egui::Color32::from_rgb(148, 163, 184)));
+                ui.label(
+                    egui::RichText::new("[Soon]")
+                        .small()
+                        .color(egui::Color32::from_rgb(100, 116, 139)),
+                );
+            });
+            if !desc.is_empty() {
+                ui.label(egui::RichText::new(desc).small().color(egui::Color32::from_rgb(71, 85, 105)));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let desired_size = egui::vec2(36.0, 18.0);
+            let (rect, _response) = ui.allocate_exact_size(desired_size, egui::Sense::hover());
+            let radius = 0.5 * rect.height();
+            ui.painter().rect_filled(rect, radius, egui::Color32::from_rgb(30, 41, 59));
+            let circle_x = if value { rect.right() - radius } else { rect.left() + radius };
+            let center = egui::pos2(circle_x, rect.center().y);
+            ui.painter().circle_filled(center, radius - 2.5, egui::Color32::from_rgb(71, 85, 105));
+        });
+    });
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(6.0);
+}

@@ -211,7 +211,9 @@ impl AppState {
     fn restore_saved_sessions(&mut self, ctx: egui::Context) {
         let saved = Database::load_sessions();
         if saved.is_empty() {
-            self.spawn_local_terminal(ctx, None);
+            if self.settings.open_default_tab {
+                self.spawn_local_terminal(ctx, None);
+            }
         } else {
             for item in saved {
                 if item.kind == "ssh" {
@@ -974,10 +976,12 @@ impl eframe::App for AppState {
                                             changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut self.settings.cursor_blink);
                                             changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut self.settings.copy_on_select);
                                             changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut self.settings.paste_on_right_click);
-                                            changed |= setting_row_toggle(ui, "Right Click Auto Select Word", "Double click/right click to select full alphanumeric words.", &mut self.settings.right_click_select_word);
-                                            changed |= setting_row_toggle(ui, "Hold Ctrl / Meta to Open Links", "Require modifier key press before launching detected URL hyperlinks.", &mut self.settings.must_hold_ctrl_for_links);
-                                            changed |= setting_row_toggle(ui, "Command Suggestions", "Display autocompletion hints based on history.", &mut self.settings.show_command_suggestions);
-                                            changed |= setting_row_toggle(ui, "Auto Reconnect on Disconnect", "Automatically retry remote SSH sessions when connection drops.", &mut self.settings.auto_reconnect_terminal);
+                                            
+                                            // Placeholders
+                                            setting_row_disabled(ui, "Right Click Auto Select Word", "Double click/right click to select full alphanumeric words.", self.settings.right_click_select_word);
+                                            setting_row_disabled(ui, "Hold Ctrl / Meta to Open Links", "Require modifier key press before launching detected URL hyperlinks.", self.settings.must_hold_ctrl_for_links);
+                                            setting_row_disabled(ui, "Command Suggestions", "Display autocompletion hints based on history.", self.settings.show_command_suggestions);
+                                            setting_row_disabled(ui, "Auto Reconnect on Disconnect", "Automatically retry remote SSH sessions when connection drops.", self.settings.auto_reconnect_terminal);
                                         }
                                         SettingsCategory::ShellEnv => {
                                             ui.label(egui::RichText::new("Shell & Environment").strong().size(16.0).color(COLOR_ACCENT));
@@ -1027,23 +1031,10 @@ impl eframe::App for AppState {
                                             ui.separator();
                                             ui.add_space(8.0);
 
-                                            ui.horizontal(|ui| {
-                                                ui.vertical(|ui| {
-                                                    ui.label(egui::RichText::new("Terminal Log Directory").strong().color(COLOR_TEXT_PRIMARY));
-                                                    ui.label(egui::RichText::new("Target filesystem folder for saved session transcripts.").small().color(COLOR_TEXT_MUTED));
-                                                });
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.add(egui::TextEdit::singleline(&mut self.settings.terminal_log_path).desired_width(220.0)).changed() {
-                                                        changed = true;
-                                                    }
-                                                });
-                                            });
-                                            ui.add_space(8.0);
-                                            ui.separator();
-                                            ui.add_space(8.0);
-
-                                            changed |= setting_row_toggle(ui, "Save Terminal Session Logs", "Write all output streams into timestamped log files.", &mut self.settings.save_terminal_log);
-                                            changed |= setting_row_toggle(ui, "Timestamp Log Entries", "Prefix each logged output line with local ISO timestamp.", &mut self.settings.add_timestamp_to_log);
+                                            // Placeholders
+                                            setting_row_disabled(ui, "Terminal Log Directory", "Target filesystem folder for saved session transcripts.", false);
+                                            setting_row_disabled(ui, "Save Terminal Session Logs", "Write all output streams into timestamped log files.", self.settings.save_terminal_log);
+                                            setting_row_disabled(ui, "Timestamp Log Entries", "Prefix each logged output line with local ISO timestamp.", self.settings.add_timestamp_to_log);
                                         }
                                         SettingsCategory::Sftp => {
                                             ui.label(egui::RichText::new("SFTP & File Transfers").strong().size(16.0).color(COLOR_ACCENT));
@@ -1051,10 +1042,12 @@ impl eframe::App for AppState {
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut self.settings.show_sftp_split_view);
-                                            changed |= setting_row_toggle(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", &mut self.settings.sftp_path_sync);
-                                            changed |= setting_row_toggle(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", &mut self.settings.auto_refresh_sftp);
-                                            changed |= setting_row_toggle(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", &mut self.settings.show_hidden_sftp);
-                                            changed |= setting_row_toggle(ui, "Disable SFTP Transfer History", "Do not write upload/download records to disk.", &mut self.settings.disable_sftp_history);
+                                            
+                                            // Placeholders
+                                            setting_row_disabled(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", self.settings.sftp_path_sync);
+                                            setting_row_disabled(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", self.settings.auto_refresh_sftp);
+                                            setting_row_disabled(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", self.settings.show_hidden_sftp);
+                                            setting_row_disabled(ui, "Disable SFTP Transfer History", "Do not write upload/download records to disk.", self.settings.disable_sftp_history);
                                         }
                                         SettingsCategory::Security => {
                                             ui.label(egui::RichText::new("Security & 2FA").strong().size(16.0).color(COLOR_ACCENT));
@@ -1074,13 +1067,15 @@ impl eframe::App for AppState {
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
-                                            changed |= setting_row_toggle(ui, "Allow Multi-Instance Execution", "Permit launching multiple independent AZTerm window processes.", &mut self.settings.allow_multi_instance);
-                                            changed |= setting_row_toggle(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", &mut self.settings.confirm_before_exit);
-                                            changed |= setting_row_toggle(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", &mut self.settings.hide_ip);
-                                            changed |= setting_row_toggle(ui, "Use System Title Bar", "Delegate window decorations to your desktop window manager.", &mut self.settings.use_system_titlebar);
-                                            changed |= setting_row_toggle(ui, "Disable Connection History", "Do not cache recent SSH session targets in SQLite.", &mut self.settings.disable_connection_history);
-                                            changed |= setting_row_toggle(ui, "Debug Logging Mode", "Emit verbose PTY and layout traces to stderr.", &mut self.settings.debug_mode);
-                                            changed |= setting_row_toggle(ui, "Check for Updates on Startup", "Query upstream GitHub releases for new version tags.", &mut self.settings.check_updates);
+                                            
+                                            // Placeholders
+                                            setting_row_disabled(ui, "Allow Multi-Instance Execution", "Permit launching multiple independent AZTerm window processes.", self.settings.allow_multi_instance);
+                                            setting_row_disabled(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", self.settings.confirm_before_exit);
+                                            setting_row_disabled(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", self.settings.hide_ip);
+                                            setting_row_disabled(ui, "Use System Title Bar", "Delegate window decorations to your desktop window manager.", self.settings.use_system_titlebar);
+                                            setting_row_disabled(ui, "Disable Connection History", "Do not cache recent SSH session targets in SQLite.", self.settings.disable_connection_history);
+                                            setting_row_disabled(ui, "Debug Logging Mode", "Emit verbose PTY and layout traces to stderr.", self.settings.debug_mode);
+                                            setting_row_disabled(ui, "Check for Updates on Startup", "Query upstream GitHub releases for new version tags.", self.settings.check_updates);
                                         }
                                     }
                                 });
