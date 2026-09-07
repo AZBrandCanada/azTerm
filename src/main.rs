@@ -1,15 +1,17 @@
+mod db;
 mod settings;
 mod sftp;
 mod ssh;
 mod terminal;
 mod theme;
 
+use db::{Database, SavedSessionState};
 use eframe::egui;
 use portable_pty::CommandBuilder;
 use settings::{AppSettings, BackspaceSequence};
 use sftp::SftpBrowser;
-use ssh::{SavedKeyEntry, SshAuthType, SshProfile, SshStore};
-use terminal::TerminalSession;
+use ssh::{SshAuthType, SshProfile, SshStore};
+use terminal::{SessionType, TerminalSession};
 use theme::*;
 
 #[derive(PartialEq, Eq)]
@@ -26,6 +28,15 @@ enum SshSubView {
     KeysManager,
 }
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum SettingsCategory {
+    Terminal,
+    ShellEnv,
+    Sftp,
+    Security,
+    System,
+}
+
 struct AppState {
     settings: AppSettings,
     ssh_store: SshStore,
@@ -35,14 +46,19 @@ struct AppState {
     next_tab_id: usize,
     active_view: ActiveView,
     ssh_subview: SshSubView,
+    settings_category: SettingsCategory,
 
-    // Profile Modal / Form
-    show_new_profile_modal: bool,
+    // Toast feedback: (Message, Timestamp)
+    toast_message: Option<(String, std::time::Instant)>,
+
+    // Profile Modal (Create / Edit)
+    show_profile_modal: bool,
+    editing_profile_id: Option<String>,
     new_ssh_name: String,
     new_ssh_host: String,
     new_ssh_port: String,
     new_ssh_user: String,
-    new_ssh_auth_choice: usize, // 0: Password, 1: Key File, 2: Paste Key
+    new_ssh_auth_choice: usize,
     new_ssh_key_path: String,
     new_ssh_pasted_key: String,
 
@@ -70,8 +86,11 @@ impl AppState {
             next_tab_id: 1,
             active_view: ActiveView::Terminal,
             ssh_subview: SshSubView::Profiles,
+            settings_category: SettingsCategory::Terminal,
+            toast_message: None,
 
-            show_new_profile_modal: false,
+            show_profile_modal: false,
+            editing_profile_id: None,
             new_ssh_name: String::new(),
             new_ssh_host: String::new(),
             new_ssh_port: "22".to_string(),
@@ -88,11 +107,56 @@ impl AppState {
             settings_search: String::new(),
         };
 
-        app.spawn_local_terminal(cc.egui_ctx.clone());
+        app.restore_saved_sessions(cc.egui_ctx.clone());
         app
     }
 
-    fn spawn_local_terminal(&mut self, ctx: egui::Context) {
+    fn set_toast(&mut self, text: impl Into<String>) {
+        self.toast_message = Some((text.into(), std::time::Instant::now()));
+    }
+
+    fn persist_sessions(&self) {
+        let saved: Vec<SavedSessionState> = self
+            .sessions
+            .iter()
+            .map(|s| match &s.session_type {
+                SessionType::Local { working_dir } => SavedSessionState {
+                    kind: "local".to_string(),
+                    title: s.title.clone(),
+                    target: working_dir.clone(),
+                },
+                SessionType::Ssh { profile_id } => SavedSessionState {
+                    kind: "ssh".to_string(),
+                    title: s.title.clone(),
+                    target: profile_id.clone(),
+                },
+            })
+            .collect();
+        Database::save_sessions(&saved);
+    }
+
+    fn restore_saved_sessions(&mut self, ctx: egui::Context) {
+        let saved = Database::load_sessions();
+        if saved.is_empty() {
+            self.spawn_local_terminal(ctx, None);
+        } else {
+            for item in saved {
+                if item.kind == "ssh" {
+                    if let Some(profile) = self.ssh_store.profiles.iter().find(|p| p.id == item.target) {
+                        let profile_clone = profile.clone();
+                        self.spawn_ssh_terminal(&profile_clone, ctx.clone());
+                    } else {
+                        self.spawn_local_terminal(ctx.clone(), None);
+                    }
+                } else {
+                    let dir = if item.target.is_empty() { None } else { Some(item.target) };
+                    self.spawn_local_terminal(ctx.clone(), dir);
+                }
+            }
+        }
+    }
+
+    fn spawn_local_terminal(&mut self, ctx: egui::Context, custom_dir: Option<String>) {
         let shell = if !self.settings.default_shell.trim().is_empty() {
             self.settings.default_shell.clone()
         } else if cfg!(windows) {
@@ -103,29 +167,87 @@ impl AppState {
 
         let mut c = CommandBuilder::new(shell);
         c.env("TERM", "xterm-256color");
+        let work_dir = custom_dir.unwrap_or_else(|| {
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        });
+        c.cwd(&work_dir);
 
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let session = TerminalSession::new(id, format!("Local #{}", id), c, ctx);
+        let session = TerminalSession::new(
+            id,
+            format!("Local #{}", id),
+            SessionType::Local { working_dir: work_dir },
+            c,
+            ctx,
+        );
         self.sessions.push(session);
         self.active_tab_idx = self.sessions.len() - 1;
         self.active_view = ActiveView::Terminal;
+        self.persist_sessions();
     }
 
     fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
         let cmd = profile.to_command();
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        let session = TerminalSession::new(id, format!("SSH: {}", profile.name), cmd, ctx);
+        let session = TerminalSession::new(
+            id,
+            format!("SSH: {}", profile.name),
+            SessionType::Ssh { profile_id: profile.id.clone() },
+            cmd,
+            ctx,
+        );
         self.sessions.push(session);
         self.active_tab_idx = self.sessions.len() - 1;
         self.active_view = ActiveView::Terminal;
+        self.persist_sessions();
+    }
+
+    fn open_create_profile_modal(&mut self) {
+        self.editing_profile_id = None;
+        self.new_ssh_name = "My Server".to_string();
+        self.new_ssh_host = "192.168.1.100".to_string();
+        self.new_ssh_port = "22".to_string();
+        self.new_ssh_user = "root".to_string();
+        self.new_ssh_auth_choice = 0;
+        self.new_ssh_key_path.clear();
+        self.new_ssh_pasted_key.clear();
+        self.show_profile_modal = true;
+    }
+
+    fn open_edit_profile_modal(&mut self, profile: &SshProfile) {
+        self.editing_profile_id = Some(profile.id.clone());
+        self.new_ssh_name = profile.name.clone();
+        self.new_ssh_host = profile.host.clone();
+        self.new_ssh_port = profile.port.to_string();
+        self.new_ssh_user = profile.username.clone();
+
+        match &profile.auth_type {
+            SshAuthType::PasswordOrAgent => {
+                self.new_ssh_auth_choice = 0;
+                self.new_ssh_key_path.clear();
+                self.new_ssh_pasted_key.clear();
+            }
+            SshAuthType::KeyFile(path) => {
+                self.new_ssh_auth_choice = 1;
+                self.new_ssh_key_path = path.clone();
+                self.new_ssh_pasted_key.clear();
+            }
+            SshAuthType::PastedKey { key_id } => {
+                self.new_ssh_auth_choice = 2;
+                self.new_ssh_key_path.clear();
+                let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                self.new_ssh_pasted_key = std::fs::read_to_string(key_path).unwrap_or_default();
+            }
+        }
+        self.show_profile_modal = true;
     }
 }
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll output on active terminal sessions
+        // Poll terminal outputs
         for s in &mut self.sessions {
             s.poll_updates(&self.settings);
         }
@@ -141,7 +263,7 @@ impl eframe::App for AppState {
                             .strong()
                             .size(16.0),
                     );
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
 
                     if ui.selectable_label(self.active_view == ActiveView::Terminal, "Terminal").clicked() {
                         self.active_view = ActiveView::Terminal;
@@ -158,31 +280,116 @@ impl eframe::App for AppState {
 
                     ui.separator();
 
-                    let mut tab_to_close: Option<usize> = None;
-                    for (i, session) in self.sessions.iter().enumerate() {
-                        let is_active = self.active_view == ActiveView::Terminal && self.active_tab_idx == i;
-                        ui.horizontal(|ui| {
-                            let tab_btn = ui.selectable_label(is_active, &session.title);
-                            if tab_btn.clicked() {
-                                self.active_tab_idx = i;
-                                self.active_view = ActiveView::Terminal;
-                            }
-                            if self.sessions.len() > 1 && ui.small_button("×").clicked() {
-                                tab_to_close = Some(i);
-                            }
-                        });
+                    if ui.button("+ New Shell").clicked() {
+                        self.spawn_local_terminal(ctx.clone(), None);
                     }
+
+                    ui.separator();
+
+                    // Dynamic Auto-Sizing Tabs
+                    let mut tab_to_close: Option<usize> = None;
+                    let avail_w = (ui.available_width() - 16.0).max(80.0);
+                    let num_tabs = self.sessions.len().max(1) as f32;
+                    let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(65.0, 160.0);
+                    let max_chars = ((computed_tab_width - 26.0) / 7.2).max(3.0) as usize;
+
+                    egui::ScrollArea::horizontal()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for (i, session) in self.sessions.iter().enumerate() {
+                                    let is_active = self.active_view == ActiveView::Terminal && self.active_tab_idx == i;
+                                    let tab_bg = if is_active { COLOR_BG_CARD } else { COLOR_BG_MAIN };
+
+                                    egui::Frame::none()
+                                        .fill(tab_bg)
+                                        .stroke(egui::Stroke::new(1.0_f32, if is_active { COLOR_ACCENT } else { COLOR_BORDER }))
+                                        .rounding(4.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.set_width(computed_tab_width);
+                                            ui.horizontal(|ui| {
+                                                let label_text = if session.title.len() > max_chars {
+                                                    format!("{}...", &session.title[..max_chars.saturating_sub(3)])
+                                                } else {
+                                                    session.title.clone()
+                                                };
+                                                if ui.selectable_label(is_active, label_text).clicked() {
+                                                    self.active_tab_idx = i;
+                                                    self.active_view = ActiveView::Terminal;
+                                                }
+                                                if self.sessions.len() > 1 && ui.small_button("×").clicked() {
+                                                    tab_to_close = Some(i);
+                                                }
+                                            });
+                                        });
+                                    ui.add_space(3.0);
+                                }
+                            });
+                        });
 
                     if let Some(i) = tab_to_close {
                         self.sessions.remove(i);
                         if self.active_tab_idx >= self.sessions.len() && !self.sessions.is_empty() {
                             self.active_tab_idx = self.sessions.len() - 1;
                         }
+                        self.persist_sessions();
+                    }
+                });
+            });
+
+        // Bottom Status Bar with SFTP Split Toggle & Toast
+        egui::TopBottomPanel::bottom("bottom_status_bar")
+            .frame(egui::Frame::none().fill(COLOR_BG_PANEL).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(session) = self.sessions.get(self.active_tab_idx) {
+                        let info = match &session.session_type {
+                            SessionType::Local { working_dir } => format!("Local Shell: {}", working_dir),
+                            SessionType::Ssh { profile_id } => format!("SSH Target: {}", profile_id),
+                        };
+                        ui.label(egui::RichText::new(info).small().color(COLOR_TEXT_MUTED));
                     }
 
-                    if ui.button("+ New Shell").clicked() {
-                        self.spawn_local_terminal(ctx.clone());
+                    ui.separator();
+
+                    // SFTP Drawer Toggle Button
+                    let sftp_btn_text = if self.settings.show_sftp_split_view {
+                        "SFTP Drawer: OPEN"
+                    } else {
+                        "SFTP Drawer: CLOSED"
+                    };
+                    if ui.selectable_label(self.settings.show_sftp_split_view, sftp_btn_text).clicked() {
+                        self.settings.show_sftp_split_view = !self.settings.show_sftp_split_view;
+                        self.settings.save();
+                        self.set_toast(if self.settings.show_sftp_split_view {
+                            "SFTP split panel opened"
+                        } else {
+                            "SFTP split panel closed"
+                        });
                     }
+
+                    // Toast Feedback Message
+                    if let Some((msg, time)) = &self.toast_message {
+                        if time.elapsed().as_secs_f32() < 3.0 {
+                            ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                                egui::Frame::none()
+                                    .fill(COLOR_BG_CARD)
+                                    .stroke(egui::Stroke::new(1.0_f32, COLOR_ACCENT))
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::symmetric(12.0, 2.0))
+                                    .show(ui, |ui| {
+                                        ui.label(egui::RichText::new(msg).color(COLOR_ACCENT).strong().small());
+                                    });
+                            });
+                        }
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(session) = self.sessions.get(self.active_tab_idx) {
+                            ui.label(egui::RichText::new(format!("{}x{}", session.cols, session.rows)).small().color(COLOR_TEXT_MUTED));
+                        }
+                    });
                 });
             });
 
@@ -190,113 +397,163 @@ impl eframe::App for AppState {
         if self.show_keygen_modal {
             egui::Window::new("Generate Ed25519 SSH Keypair")
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(520.0)
+                .max_height(480.0)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.set_width(480.0);
-                    ui.add_space(6.0);
-                    ui.label("Key identifier name:");
-                    ui.text_edit_singleline(&mut self.keygen_name);
-                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.label("Key identifier name:");
+                                ui.text_edit_singleline(&mut self.keygen_name);
+                                ui.add_space(8.0);
 
-                    if ui.button("Generate Keypair").clicked() {
-                        match SshStore::generate_ed25519_keypair(&self.keygen_name) {
-                            Ok((priv_path, pub_key)) => {
-                                self.generated_pub_key = pub_key;
-                                self.keygen_status = format!("Key generated and saved to: {}", priv_path);
+                                if ui.button("Generate Keypair").clicked() {
+                                    match SshStore::generate_ed25519_keypair(&self.keygen_name) {
+                                        Ok((priv_path, pub_key)) => {
+                                            self.generated_pub_key = pub_key;
+                                            self.keygen_status = format!("Key generated and saved to: {}", priv_path);
+                                        }
+                                        Err(e) => {
+                                            self.keygen_status = format!("Error: {}", e);
+                                        }
+                                    }
+                                }
+
+                                if !self.generated_pub_key.is_empty() {
+                                    ui.add_space(8.0);
+                                    ui.label(egui::RichText::new("Public Key (Paste into remote ~/.ssh/authorized_keys):").strong());
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut self.generated_pub_key)
+                                            .desired_rows(5)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    if ui.button("Copy Public Key to Clipboard").clicked() {
+                                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                                            let _ = cb.set_text(self.generated_pub_key.clone());
+                                            self.set_toast("Public key copied to clipboard");
+                                        }
+                                    }
+                                }
+
+                                if !self.keygen_status.is_empty() {
+                                    ui.add_space(6.0);
+                                    ui.label(&self.keygen_status);
+                                }
+                            });
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                self.show_keygen_modal = false;
                             }
-                            Err(e) => {
-                                self.keygen_status = format!("Error: {}", e);
-                            }
-                        }
-                    }
-
-                    if !self.generated_pub_key.is_empty() {
-                        ui.add_space(8.0);
-                        ui.label(egui::RichText::new("Public Key (Paste into remote ~/.ssh/authorized_keys):").strong());
-                        ui.text_edit_multiline(&mut self.generated_pub_key);
-                        if ui.button("Copy Public Key to Clipboard").clicked() {
-                            ui.output_mut(|o| o.copied_text = self.generated_pub_key.clone());
-                        }
-                    }
-
-                    if !self.keygen_status.is_empty() {
-                        ui.add_space(6.0);
-                        ui.label(&self.keygen_status);
-                    }
-
-                    ui.separator();
-                    if ui.button("Close").clicked() {
-                        self.show_keygen_modal = false;
-                    }
+                        });
+                    });
                 });
         }
 
-        // New Profile Modal Window
-        if self.show_new_profile_modal {
-            egui::Window::new("Create / Edit SSH Profile")
+        // Profile Modal Window (Create / Edit)
+        if self.show_profile_modal {
+            let modal_title = if self.editing_profile_id.is_some() {
+                "Edit SSH Profile"
+            } else {
+                "Create New SSH Profile"
+            };
+
+            egui::Window::new(modal_title)
                 .collapsible(false)
-                .resizable(false)
+                .resizable(true)
+                .default_width(540.0)
+                .max_height(540.0)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.set_width(520.0);
-                    egui::Grid::new("profile_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-                        ui.label("Profile Name:");
-                        ui.text_edit_singleline(&mut self.new_ssh_name);
-                        ui.end_row();
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Grid::new("profile_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
+                                    ui.label("Profile Name:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_name);
+                                    ui.end_row();
 
-                        ui.label("Host / IP:");
-                        ui.text_edit_singleline(&mut self.new_ssh_host);
-                        ui.end_row();
+                                    ui.label("Host / IP:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_host);
+                                    ui.end_row();
 
-                        ui.label("Port:");
-                        ui.text_edit_singleline(&mut self.new_ssh_port);
-                        ui.end_row();
+                                    ui.label("Port:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_port);
+                                    ui.end_row();
 
-                        ui.label("Username:");
-                        ui.text_edit_singleline(&mut self.new_ssh_user);
-                        ui.end_row();
+                                    ui.label("Username:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_user);
+                                    ui.end_row();
 
-                        ui.label("Authentication:");
+                                    ui.label("Authentication:");
+                                    ui.horizontal(|ui| {
+                                        ui.radio_value(&mut self.new_ssh_auth_choice, 0, "Password / Agent");
+                                        ui.radio_value(&mut self.new_ssh_auth_choice, 1, "Key File");
+                                        ui.radio_value(&mut self.new_ssh_auth_choice, 2, "Paste Key");
+                                    });
+                                    ui.end_row();
+
+                                    if self.new_ssh_auth_choice == 1 {
+                                        ui.label("Key File Path:");
+                                        ui.text_edit_singleline(&mut self.new_ssh_key_path);
+                                        ui.end_row();
+                                    } else if self.new_ssh_auth_choice == 2 {
+                                        ui.label("Paste Private Key:");
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut self.new_ssh_pasted_key)
+                                                .desired_rows(6)
+                                                .desired_width(f32::INFINITY)
+                                                .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----\n..."),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                            });
+
+                        ui.separator();
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut self.new_ssh_auth_choice, 0, "Password / Agent");
-                            ui.radio_value(&mut self.new_ssh_auth_choice, 1, "Key File");
-                            ui.radio_value(&mut self.new_ssh_auth_choice, 2, "Paste Key");
-                        });
-                        ui.end_row();
+                            if ui.button("Save Profile").clicked() {
+                                let port = self.new_ssh_port.parse().unwrap_or(22);
+                                let auth_type = if self.new_ssh_auth_choice == 1 && !self.new_ssh_key_path.trim().is_empty() {
+                                    SshAuthType::KeyFile(self.new_ssh_key_path.clone())
+                                } else if self.new_ssh_auth_choice == 2 && !self.new_ssh_pasted_key.trim().is_empty() {
+                                    let key_id = format!("{}_{}", self.new_ssh_host, port);
+                                    let _ = SshStore::save_pasted_key(&key_id, &self.new_ssh_pasted_key);
+                                    SshAuthType::PastedKey { key_id }
+                                } else {
+                                    SshAuthType::PasswordOrAgent
+                                };
 
-                        if self.new_ssh_auth_choice == 1 {
-                            ui.label("Key File Path:");
-                            ui.text_edit_singleline(&mut self.new_ssh_key_path);
-                            ui.end_row();
-                        } else if self.new_ssh_auth_choice == 2 {
-                            ui.label("Paste Private Key:");
-                            ui.text_edit_multiline(&mut self.new_ssh_pasted_key);
-                            ui.end_row();
-                        }
-                    });
+                                if let Some(ref edit_id) = self.editing_profile_id {
+                                    if let Some(existing) = self.ssh_store.profiles.iter_mut().find(|p| p.id == *edit_id) {
+                                        existing.name = self.new_ssh_name.clone();
+                                        existing.host = self.new_ssh_host.clone();
+                                        existing.port = port;
+                                        existing.username = self.new_ssh_user.clone();
+                                        existing.auth_type = auth_type;
+                                    }
+                                    self.set_toast("SSH Profile Updated");
+                                } else {
+                                    let mut profile = SshProfile::new(&self.new_ssh_name, &self.new_ssh_host, port, &self.new_ssh_user);
+                                    profile.auth_type = auth_type;
+                                    self.ssh_store.profiles.push(profile);
+                                    self.set_toast("SSH Profile Created");
+                                }
 
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Save Profile").clicked() {
-                            let port = self.new_ssh_port.parse().unwrap_or(22);
-                            let mut profile = SshProfile::new(&self.new_ssh_name, &self.new_ssh_host, port, &self.new_ssh_user);
-
-                            if self.new_ssh_auth_choice == 1 && !self.new_ssh_key_path.trim().is_empty() {
-                                profile.auth_type = SshAuthType::KeyFile(self.new_ssh_key_path.clone());
-                            } else if self.new_ssh_auth_choice == 2 && !self.new_ssh_pasted_key.trim().is_empty() {
-                                let key_id = format!("{}_{}", self.new_ssh_host, port);
-                                let _ = SshStore::save_pasted_key(&key_id, &self.new_ssh_pasted_key);
-                                profile.auth_type = SshAuthType::PastedKey { key_id };
+                                self.ssh_store.save();
+                                self.show_profile_modal = false;
                             }
-
-                            self.ssh_store.profiles.push(profile);
-                            self.ssh_store.save();
-                            self.show_new_profile_modal = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.show_new_profile_modal = false;
-                        }
+                            if ui.button("Cancel").clicked() {
+                                self.show_profile_modal = false;
+                            }
+                        });
                     });
                 });
         }
@@ -306,10 +563,11 @@ impl eframe::App for AppState {
             .frame(egui::Frame::none().fill(COLOR_BG_MAIN))
             .show(ctx, |ui| match self.active_view {
                 ActiveView::Terminal => {
+                    let mut toast = self.toast_message.clone();
                     if self.settings.show_sftp_split_view {
                         ui.columns(2, |columns| {
                             if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
-                                session.render(&mut columns[0], &self.settings);
+                                session.render(&mut columns[0], &self.settings, &mut toast);
                             }
                             card_frame().show(&mut columns[1], |ui| {
                                 ui.heading("SFTP Sync Explorer");
@@ -318,14 +576,15 @@ impl eframe::App for AppState {
                             });
                         });
                     } else if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
-                        session.render(ui, &self.settings);
+                        session.render(ui, &self.settings, &mut toast);
                     } else {
                         ui.centered_and_justified(|ui| {
                             if ui.button("Open Shell Session").clicked() {
-                                self.spawn_local_terminal(ctx.clone());
+                                self.spawn_local_terminal(ctx.clone(), None);
                             }
                         });
                     }
+                    self.toast_message = toast;
                 }
                 ActiveView::SshBookmarks => {
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -345,9 +604,7 @@ impl eframe::App for AppState {
                                     self.show_keygen_modal = true;
                                 }
                                 if ui.button("+ New SSH Profile").clicked() {
-                                    self.new_ssh_name = "My Server".to_string();
-                                    self.new_ssh_host = "192.168.1.100".to_string();
-                                    self.show_new_profile_modal = true;
+                                    self.open_create_profile_modal();
                                 }
                             });
                         });
@@ -359,6 +616,7 @@ impl eframe::App for AppState {
                                 let profiles = self.ssh_store.profiles.clone();
                                 let mut delete_idx: Option<usize> = None;
                                 let mut connect_profile: Option<SshProfile> = None;
+                                let mut edit_profile: Option<SshProfile> = None;
                                 let mut open_sftp = false;
 
                                 for (idx, profile) in profiles.iter().enumerate() {
@@ -384,6 +642,9 @@ impl eframe::App for AppState {
                                                 if ui.button("Delete").clicked() {
                                                     delete_idx = Some(idx);
                                                 }
+                                                if ui.button("Edit").clicked() {
+                                                    edit_profile = Some(profile.clone());
+                                                }
                                                 if ui.button("SFTP").clicked() {
                                                     open_sftp = true;
                                                 }
@@ -399,6 +660,9 @@ impl eframe::App for AppState {
                                 if let Some(i) = delete_idx {
                                     self.ssh_store.profiles.remove(i);
                                     self.ssh_store.save();
+                                }
+                                if let Some(p) = edit_profile {
+                                    self.open_edit_profile_modal(&p);
                                 }
                                 if open_sftp {
                                     self.active_view = ActiveView::SftpBrowser;
@@ -430,7 +694,10 @@ impl eframe::App for AppState {
                                                     }
                                                     if let Some(ref pub_k) = key.pub_key_content {
                                                         if ui.button("Copy Public Key").clicked() {
-                                                            ui.output_mut(|o| o.copied_text = pub_k.clone());
+                                                            if let Ok(mut cb) = arboard::Clipboard::new() {
+                                                                let _ = cb.set_text(pub_k.clone());
+                                                                self.set_toast("Public key copied to clipboard");
+                                                            }
                                                         }
                                                     }
                                                 });
@@ -441,6 +708,7 @@ impl eframe::App for AppState {
 
                                     if let Some(name) = key_to_delete {
                                         SshStore::delete_key_files(&name);
+                                        self.set_toast("Key files removed");
                                     }
                                 }
                             }
@@ -456,147 +724,194 @@ impl eframe::App for AppState {
                     });
                 }
                 ActiveView::Settings => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.add_space(14.0);
-                        ui.horizontal(|ui| {
-                            ui.heading(egui::RichText::new("Preferences & Configuration").color(COLOR_TEXT_PRIMARY));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add(egui::TextEdit::singleline(&mut self.settings_search).hint_text("Search settings...").desired_width(180.0));
-                            });
+                    // Professional Sidebar + Settings Panel Layout
+                    ui.columns(2, |columns| {
+                        // Left Settings Navigation Sidebar (Width ~210px)
+                        columns[0].set_max_width(210.0);
+                        columns[0].vertical(|ui| {
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new("Preferences").strong().size(16.0).color(COLOR_TEXT_PRIMARY));
+                            ui.add_space(12.0);
+
+                            let nav_item = |ui: &mut egui::Ui, cat: SettingsCategory, label: &str, current: SettingsCategory| -> bool {
+                                let is_active = current == cat;
+                                let bg = if is_active { COLOR_BG_CARD } else { egui::Color32::TRANSPARENT };
+                                let stroke = if is_active { egui::Stroke::new(1.0_f32, COLOR_ACCENT) } else { egui::Stroke::NONE };
+
+                                egui::Frame::none()
+                                    .fill(bg)
+                                    .stroke(stroke)
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                    .show(ui, |ui| {
+                                        ui.set_width(180.0);
+                                        let text_color = if is_active { COLOR_ACCENT } else { COLOR_TEXT_PRIMARY };
+                                        ui.selectable_label(is_active, egui::RichText::new(label).color(text_color)).clicked()
+                                    }).inner
+                            };
+
+                            if nav_item(ui, SettingsCategory::Terminal, "Terminal Interaction", self.settings_category) {
+                                self.settings_category = SettingsCategory::Terminal;
+                            }
+                            ui.add_space(4.0);
+                            if nav_item(ui, SettingsCategory::ShellEnv, "Shell & Environment", self.settings_category) {
+                                self.settings_category = SettingsCategory::ShellEnv;
+                            }
+                            ui.add_space(4.0);
+                            if nav_item(ui, SettingsCategory::Sftp, "SFTP & Transfers", self.settings_category) {
+                                self.settings_category = SettingsCategory::Sftp;
+                            }
+                            ui.add_space(4.0);
+                            if nav_item(ui, SettingsCategory::Security, "Security & 2FA", self.settings_category) {
+                                self.settings_category = SettingsCategory::Security;
+                            }
+                            ui.add_space(4.0);
+                            if nav_item(ui, SettingsCategory::System, "Application & System", self.settings_category) {
+                                self.settings_category = SettingsCategory::System;
+                            }
+
+                            ui.add_space(20.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            if ui.button("Restore Defaults").clicked() {
+                                self.settings = AppSettings::default();
+                                self.settings.save();
+                                self.set_toast("Defaults Restored");
+                            }
                         });
-                        ui.add_space(14.0);
 
-                        let mut changed = false;
+                        // Right Settings Content View (Wide structured rows)
+                        columns[1].vertical(|ui| {
+                            ui.add_space(10.0);
+                            let mut changed = false;
 
-                        // 2-Column Dashboard Layout
-                        ui.columns(2, |columns| {
-                            // Left Column: Shell & Terminal Settings + 2FA
-                            columns[0].vertical(|ui| {
-                                card_frame().show(ui, |ui| {
-                                    ui.label(egui::RichText::new("Shell & Terminal Environment").strong().size(14.0).color(COLOR_ACCENT));
-                                    ui.add_space(6.0);
+                            card_frame().show(ui, |ui| {
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    match self.settings_category {
+                                        SettingsCategory::Terminal => {
+                                            ui.label(egui::RichText::new("Terminal Interaction").strong().size(16.0).color(COLOR_ACCENT));
+                                            ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and visual cues.").small().color(COLOR_TEXT_MUTED));
+                                            ui.add_space(12.0);
 
-                                    ui.label("Default Shell Path:");
-                                    if ui.text_edit_singleline(&mut self.settings.default_shell).changed() {
-                                        changed = true;
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new("Presets:").small().color(COLOR_TEXT_MUTED));
-                                        if ui.small_button("bash").clicked() {
-                                            self.settings.default_shell = "/bin/bash".to_string();
-                                            changed = true;
+                                            changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut self.settings.cursor_blink);
+                                            changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut self.settings.copy_on_select);
+                                            changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut self.settings.paste_on_right_click);
+                                            changed |= setting_row_toggle(ui, "Right Click Auto Select Word", "Double click/right click to select full alphanumeric words.", &mut self.settings.right_click_select_word);
+                                            changed |= setting_row_toggle(ui, "Hold Ctrl / Meta to Open Links", "Require modifier key press before launching detected URL hyperlinks.", &mut self.settings.must_hold_ctrl_for_links);
+                                            changed |= setting_row_toggle(ui, "Command Suggestions", "Display autocompletion hints based on history.", &mut self.settings.show_command_suggestions);
+                                            changed |= setting_row_toggle(ui, "Auto Reconnect on Disconnect", "Automatically retry remote SSH sessions when connection drops.", &mut self.settings.auto_reconnect_terminal);
                                         }
-                                        if ui.small_button("zsh").clicked() {
-                                            self.settings.default_shell = "/bin/zsh".to_string();
-                                            changed = true;
-                                        }
-                                        if ui.small_button("fish").clicked() {
-                                            self.settings.default_shell = "/bin/fish".to_string();
-                                            changed = true;
-                                        }
-                                    });
+                                        SettingsCategory::ShellEnv => {
+                                            ui.label(egui::RichText::new("Shell & Environment").strong().size(16.0).color(COLOR_ACCENT));
+                                            ui.label(egui::RichText::new("Set your default command interpreter, session log directories, and keycodes.").small().color(COLOR_TEXT_MUTED));
+                                            ui.add_space(12.0);
 
-                                    ui.add_space(10.0);
-                                    ui.label("Terminal Log Directory:");
-                                    if ui.text_edit_singleline(&mut self.settings.terminal_log_path).changed() {
-                                        changed = true;
-                                    }
-
-                                    ui.add_space(10.0);
-                                    ui.horizontal(|ui| {
-                                        ui.label("Backspace Keycode:");
-                                        egui::ComboBox::from_id_source("backspace_seq_select")
-                                            .selected_text(match self.settings.backspace_sequence {
-                                                BackspaceSequence::Delete127 => "^? (Delete 0x7F)",
-                                                BackspaceSequence::Backspace8 => "^H (Backspace 0x08)",
-                                            })
-                                            .show_ui(ui, |ui| {
-                                                if ui.selectable_value(&mut self.settings.backspace_sequence, BackspaceSequence::Delete127, "^? (Delete 0x7F)").clicked() {
-                                                    changed = true;
-                                                }
-                                                if ui.selectable_value(&mut self.settings.backspace_sequence, BackspaceSequence::Backspace8, "^H (Backspace 0x08)").clicked() {
-                                                    changed = true;
-                                                }
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Default Shell Path").strong().color(COLOR_TEXT_PRIMARY));
+                                                    ui.label(egui::RichText::new("Executable path spawned when opening new local tabs.").small().color(COLOR_TEXT_MUTED));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.add(egui::TextEdit::singleline(&mut self.settings.default_shell).desired_width(180.0)).changed() {
+                                                        changed = true;
+                                                    }
+                                                });
                                             });
-                                    });
-                                });
+                                            ui.add_space(4.0);
+                                            ui.horizontal(|ui| {
+                                                ui.label(egui::RichText::new("Shell Presets:").small().color(COLOR_TEXT_MUTED));
+                                                if ui.small_button("bash").clicked() { self.settings.default_shell = "/bin/bash".to_string(); changed = true; }
+                                                if ui.small_button("zsh").clicked() { self.settings.default_shell = "/bin/zsh".to_string(); changed = true; }
+                                                if ui.small_button("fish").clicked() { self.settings.default_shell = "/bin/fish".to_string(); changed = true; }
+                                            });
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
 
-                                ui.add_space(12.0);
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Backspace Keycode Sequence").strong().color(COLOR_TEXT_PRIMARY));
+                                                    ui.label(egui::RichText::new("Control character code sent to PTY upon pressing Backspace.").small().color(COLOR_TEXT_MUTED));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    egui::ComboBox::from_id_source("backspace_seq_select")
+                                                        .selected_text(match self.settings.backspace_sequence {
+                                                            BackspaceSequence::Delete127 => "^? (Delete 0x7F)",
+                                                            BackspaceSequence::Backspace8 => "^H (Backspace 0x08)",
+                                                        })
+                                                        .show_ui(ui, |ui| {
+                                                            if ui.selectable_value(&mut self.settings.backspace_sequence, BackspaceSequence::Delete127, "^? (Delete 0x7F)").clicked() { changed = true; }
+                                                            if ui.selectable_value(&mut self.settings.backspace_sequence, BackspaceSequence::Backspace8, "^H (Backspace 0x08)").clicked() { changed = true; }
+                                                        });
+                                                });
+                                            });
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
 
-                                card_frame().show(ui, |ui| {
-                                    ui.label(egui::RichText::new("Terminal Interaction").strong().size(14.0).color(COLOR_ACCENT));
-                                    ui.add_space(6.0);
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Terminal Log Directory").strong().color(COLOR_TEXT_PRIMARY));
+                                                    ui.label(egui::RichText::new("Target filesystem folder for saved session transcripts.").small().color(COLOR_TEXT_MUTED));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.add(egui::TextEdit::singleline(&mut self.settings.terminal_log_path).desired_width(220.0)).changed() {
+                                                        changed = true;
+                                                    }
+                                                });
+                                            });
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
 
-                                    changed |= toggle_switch(ui, &mut self.settings.cursor_blink, "Cursor blink").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.paste_on_right_click, "Paste when right click").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.copy_on_select, "Copy selected text when select").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.right_click_select_word, "Right click auto select word").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.must_hold_ctrl_for_links, "Hold Ctrl/Meta to open links").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.show_command_suggestions, "Show command suggestions").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.save_terminal_log, "Save terminal log to file").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.add_timestamp_to_log, "Add timestamp to terminal log").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.auto_reconnect_terminal, "Auto reconnect on disconnect").changed();
-                                });
+                                            changed |= setting_row_toggle(ui, "Save Terminal Session Logs", "Write all output streams into timestamped log files.", &mut self.settings.save_terminal_log);
+                                            changed |= setting_row_toggle(ui, "Timestamp Log Entries", "Prefix each logged output line with local ISO timestamp.", &mut self.settings.add_timestamp_to_log);
+                                        }
+                                        SettingsCategory::Sftp => {
+                                            ui.label(egui::RichText::new("SFTP & File Transfers").strong().size(16.0).color(COLOR_ACCENT));
+                                            ui.label(egui::RichText::new("Manage remote directory traversal, split paneling, and file syncing.").small().color(COLOR_TEXT_MUTED));
+                                            ui.add_space(12.0);
 
-                                ui.add_space(12.0);
+                                            changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut self.settings.show_sftp_split_view);
+                                            changed |= setting_row_toggle(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", &mut self.settings.sftp_path_sync);
+                                            changed |= setting_row_toggle(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", &mut self.settings.auto_refresh_sftp);
+                                            changed |= setting_row_toggle(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", &mut self.settings.show_hidden_sftp);
+                                            changed |= setting_row_toggle(ui, "Disable SFTP Transfer History", "Do not write upload/download records to disk.", &mut self.settings.disable_sftp_history);
+                                        }
+                                        SettingsCategory::Security => {
+                                            ui.label(egui::RichText::new("Security & 2FA").strong().size(16.0).color(COLOR_ACCENT));
+                                            ui.label(egui::RichText::new("Configure multi-factor authentication triggers and prompt detection.").small().color(COLOR_TEXT_MUTED));
+                                            ui.add_space(12.0);
 
-                                card_frame().show(ui, |ui| {
-                                    ui.label(egui::RichText::new("2FA & Security Triggers").strong().size(14.0).color(COLOR_ACCENT));
-                                    ui.add_space(6.0);
-                                    ui.label(egui::RichText::new("Keywords triggering verification prompt:").color(COLOR_TEXT_MUTED));
-                                    if ui.text_edit_singleline(&mut self.settings.two_factor_keywords).changed() {
-                                        changed = true;
+                                            ui.label(egui::RichText::new("2FA Verification Trigger Keywords").strong().color(COLOR_TEXT_PRIMARY));
+                                            ui.label(egui::RichText::new("Comma-separated list of terms that trigger the interactive OTP submission banner.").small().color(COLOR_TEXT_MUTED));
+                                            ui.add_space(6.0);
+                                            if ui.add(egui::TextEdit::multiline(&mut self.settings.two_factor_keywords).desired_rows(3).desired_width(f32::INFINITY)).changed() {
+                                                changed = true;
+                                            }
+                                        }
+                                        SettingsCategory::System => {
+                                            ui.label(egui::RichText::new("Application & System").strong().size(16.0).color(COLOR_ACCENT));
+                                            ui.label(egui::RichText::new("Window behavior, multi-instance options, and security masks.").small().color(COLOR_TEXT_MUTED));
+                                            ui.add_space(12.0);
+
+                                            changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
+                                            changed |= setting_row_toggle(ui, "Allow Multi-Instance Execution", "Permit launching multiple independent AZTerm window processes.", &mut self.settings.allow_multi_instance);
+                                            changed |= setting_row_toggle(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", &mut self.settings.confirm_before_exit);
+                                            changed |= setting_row_toggle(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", &mut self.settings.hide_ip);
+                                            changed |= setting_row_toggle(ui, "Use System Title Bar", "Delegate window decorations to your desktop window manager.", &mut self.settings.use_system_titlebar);
+                                            changed |= setting_row_toggle(ui, "Disable Connection History", "Do not cache recent SSH session targets in SQLite.", &mut self.settings.disable_connection_history);
+                                            changed |= setting_row_toggle(ui, "Debug Logging Mode", "Emit verbose PTY and layout traces to stderr.", &mut self.settings.debug_mode);
+                                            changed |= setting_row_toggle(ui, "Check for Updates on Startup", "Query upstream GitHub releases for new version tags.", &mut self.settings.check_updates);
+                                        }
                                     }
                                 });
                             });
 
-                            // Right Column: SFTP, Application & System
-                            columns[1].vertical(|ui| {
-                                card_frame().show(ui, |ui| {
-                                    ui.label(egui::RichText::new("SFTP & File Transfer").strong().size(14.0).color(COLOR_ACCENT));
-                                    ui.add_space(6.0);
-
-                                    changed |= toggle_switch(ui, &mut self.settings.show_sftp_split_view, "Show terminal and SFTP in split view").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.sftp_path_sync, "SFTP path sync with terminal").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.auto_refresh_sftp, "Auto refresh when switch to SFTP").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.show_hidden_sftp, "Show hidden files on SFTP start").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.disable_sftp_history, "Disable SFTP transfer history").changed();
-                                });
-
-                                ui.add_space(12.0);
-
-                                card_frame().show(ui, |ui| {
-                                    ui.label(egui::RichText::new("Application & System").strong().size(14.0).color(COLOR_ACCENT));
-                                    ui.add_space(6.0);
-
-                                    changed |= toggle_switch(ui, &mut self.settings.open_default_tab, "Open default tab when app starts").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.disable_connection_history, "Disable connection history").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.support_screen_reader, "Support screen reader in terminal").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.use_system_titlebar, "Use system title bar").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.confirm_before_exit, "Confirm before exit").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.hide_ip, "Hide IP address in status").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.allow_multi_instance, "Allow multi-instance").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.disable_developer_tools, "Disable developer tools").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.debug_mode, "Debug mode").changed();
-                                    changed |= toggle_switch(ui, &mut self.settings.check_updates, "Check update on app start").changed();
-                                });
-
-                                ui.add_space(12.0);
-
-                                card_frame().show(ui, |ui| {
-                                    ui.label(egui::RichText::new("Preferences Management").strong().size(14.0).color(COLOR_ACCENT));
-                                    ui.add_space(6.0);
-                                    if ui.button("Restore All Defaults").clicked() {
-                                        self.settings = AppSettings::default();
-                                        self.settings.save();
-                                    }
-                                });
-                            });
+                            if changed {
+                                self.settings.save();
+                            }
                         });
-
-                        if changed {
-                            self.settings.save();
-                        }
                     });
                 }
             });
@@ -606,7 +921,7 @@ impl eframe::App for AppState {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1080.0, 700.0])
+            .with_inner_size([1120.0, 720.0])
             .with_title("AZTerm"),
         ..Default::default()
     };

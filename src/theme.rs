@@ -37,7 +37,30 @@ pub fn toggle_switch(ui: &mut egui::Ui, value: &mut bool, text: &str) -> egui::R
             let center = egui::pos2(circle_x, rect.center().y);
             ui.painter().circle_filled(center, radius - 2.5, egui::Color32::WHITE);
         }
-        ui.label(egui::RichText::new(text).color(COLOR_TEXT_PRIMARY));
+        if !text.is_empty() {
+            ui.label(egui::RichText::new(text).color(COLOR_TEXT_PRIMARY));
+        }
         response
     }).inner
+}
+
+pub fn setting_row_toggle(ui: &mut egui::Ui, title: &str, desc: &str, value: &mut bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(egui::RichText::new(title).strong().color(COLOR_TEXT_PRIMARY));
+            if !desc.is_empty() {
+                ui.label(egui::RichText::new(desc).small().color(COLOR_TEXT_MUTED));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if toggle_switch(ui, value, "").changed() {
+                changed = true;
+            }
+        });
+    });
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(6.0);
+    changed
 }

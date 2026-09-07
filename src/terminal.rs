@@ -53,21 +53,48 @@ fn ansi_idx_to_color(idx: u8) -> egui::Color32 {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum SessionType {
+    Local { working_dir: String },
+    Ssh { profile_id: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthPrompt {
+    pub title: String,
+    pub prompt_line: String,
+    pub is_secret: bool,
+}
+
 pub struct TerminalSession {
     pub id: usize,
     pub title: String,
+    pub session_type: SessionType,
     pub parser: vt100::Parser,
     pub rx: Receiver<Vec<u8>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub rows: u16,
     pub cols: u16,
-    pub detected_2fa: bool,
-    pub otp_input: String,
+
+    // Center Auth Popup State
+    pub active_auth_prompt: Option<AuthPrompt>,
+    pub auth_input: String,
+    pub auth_show_secret: bool,
+
+    // Selection Tracking
+    pub selection_start: Option<(u16, u16)>,
+    pub selection_end: Option<(u16, u16)>,
 }
 
 impl TerminalSession {
-    pub fn new(id: usize, title: String, cmd: CommandBuilder, ctx: egui::Context) -> Self {
+    pub fn new(
+        id: usize,
+        title: String,
+        session_type: SessionType,
+        cmd: CommandBuilder,
+        ctx: egui::Context,
+    ) -> Self {
         let rows = 28;
         let cols = 90;
 
@@ -112,20 +139,34 @@ impl TerminalSession {
         Self {
             id,
             title,
+            session_type,
             parser: vt100::Parser::new(rows, cols, 2000),
             rx,
             writer,
             master_pty,
             rows,
             cols,
-            detected_2fa: false,
-            otp_input: String::new(),
+            active_auth_prompt: None,
+            auth_input: String::new(),
+            auth_show_secret: false,
+            selection_start: None,
+            selection_end: None,
         }
     }
 
     pub fn send_input(&self, text: &str) {
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(text.as_bytes());
+            let _ = w.flush();
+        }
+    }
+
+    pub fn send_auth_response(&self, text: &str) {
+        if let Ok(mut w) = self.writer.lock() {
+            let clean = text.trim_end_matches(&['\r', '\n'][..]);
+            let mut data = clean.as_bytes().to_vec();
+            data.push(b'\r');
+            let _ = w.write_all(&data);
             let _ = w.flush();
         }
     }
@@ -140,138 +181,314 @@ impl TerminalSession {
 
         while let Ok(bytes) = self.rx.try_recv() {
             self.parser.process(&bytes);
-            let text = String::from_utf8_lossy(&bytes).to_lowercase();
-            for kw in &keywords {
-                if text.contains(kw) {
-                    self.detected_2fa = true;
-                    break;
+            let text = String::from_utf8_lossy(&bytes);
+            let lower = text.to_lowercase();
+
+            if self.active_auth_prompt.is_none() {
+                let mut found_2fa = false;
+                for kw in &keywords {
+                    if lower.contains(kw) {
+                        self.active_auth_prompt = Some(AuthPrompt {
+                            title: "2FA / OTP Verification".to_string(),
+                            prompt_line: text.trim().to_string(),
+                            is_secret: false,
+                        });
+                        self.auth_input.clear();
+                        found_2fa = true;
+                        break;
+                    }
+                }
+
+                if !found_2fa {
+                    if lower.contains("passphrase for key") || lower.contains("enter passphrase") {
+                        self.active_auth_prompt = Some(AuthPrompt {
+                            title: "SSH Key Passphrase".to_string(),
+                            prompt_line: text.trim().to_string(),
+                            is_secret: true,
+                        });
+                        self.auth_input.clear();
+                    } else if (lower.contains("password:") || lower.contains("'s password:")) && !lower.contains("one-time") {
+                        self.active_auth_prompt = Some(AuthPrompt {
+                            title: "SSH Password Authentication".to_string(),
+                            prompt_line: text.trim().to_string(),
+                            is_secret: true,
+                        });
+                        self.auth_input.clear();
+                    }
                 }
             }
         }
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui, settings: &AppSettings) {
-        // Interactive 2FA Banner
-        if self.detected_2fa {
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgb(49, 46, 129))
-                .inner_margin(egui::Margin::symmetric(14.0, 8.0))
-                .rounding(6.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("[2FA / OTP Verification Requested]:")
-                                .color(egui::Color32::from_rgb(244, 114, 182))
-                                .strong(),
-                        );
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.otp_input)
-                                .desired_width(140.0)
-                                .hint_text("Enter OTP Code"),
-                        );
-                        if (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
-                            || ui.button("Submit").clicked()
-                        {
-                            let mut code = self.otp_input.clone();
-                            code.push('\r');
-                            self.send_input(&code);
-                            self.otp_input.clear();
-                            self.detected_2fa = false;
-                        }
-                        if ui.button("Dismiss").clicked() {
-                            self.detected_2fa = false;
-                        }
-                    });
-                });
-            ui.add_space(4.0);
+    fn is_cell_selected(&self, r: u16, c: u16) -> bool {
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            if start == end {
+                return false;
+            }
+            let (mut r1, mut c1) = start;
+            let (mut r2, mut c2) = end;
+            if r1 > r2 || (r1 == r2 && c1 > c2) {
+                std::mem::swap(&mut r1, &mut r2);
+                std::mem::swap(&mut c1, &mut c2);
+            }
+            if r < r1 || r > r2 {
+                return false;
+            }
+            if r == r1 && r == r2 {
+                return c >= c1 && c <= c2;
+            }
+            if r == r1 {
+                return c >= c1;
+            }
+            if r == r2 {
+                return c <= c2;
+            }
+            true
+        } else {
+            false
         }
+    }
 
-        // Key Routing
-        ui.input(|i| {
-            for event in &i.events {
-                match event {
-                    egui::Event::Text(text) => {
-                        if !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
-                            self.send_input(text);
-                        }
-                    }
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } => {
-                        let mut bytes: Option<Vec<u8>> = None;
-                        if modifiers.ctrl {
-                            let ctrl_byte = match key {
-                                egui::Key::A => Some(1),
-                                egui::Key::B => Some(2),
-                                egui::Key::C => Some(3),
-                                egui::Key::D => Some(4),
-                                egui::Key::E => Some(5),
-                                egui::Key::F => Some(6),
-                                egui::Key::G => Some(7),
-                                egui::Key::H => Some(8),
-                                egui::Key::I => Some(9),
-                                egui::Key::J => Some(10),
-                                egui::Key::K => Some(11),
-                                egui::Key::L => Some(12),
-                                egui::Key::M => Some(13),
-                                egui::Key::N => Some(14),
-                                egui::Key::O => Some(15),
-                                egui::Key::P => Some(16),
-                                egui::Key::Q => Some(17),
-                                egui::Key::R => Some(18),
-                                egui::Key::S => Some(19),
-                                egui::Key::T => Some(20),
-                                egui::Key::U => Some(21),
-                                egui::Key::V => Some(22),
-                                egui::Key::W => Some(23),
-                                egui::Key::X => Some(24),
-                                egui::Key::Y => Some(25),
-                                egui::Key::Z => Some(26),
-                                _ => None,
-                            };
-                            if let Some(b) = ctrl_byte {
-                                bytes = Some(vec![b]);
-                            }
+    fn extract_selected_text(&self) -> String {
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            let (mut r1, mut c1) = start;
+            let (mut r2, mut c2) = end;
+            if r1 > r2 || (r1 == r2 && c1 > c2) {
+                std::mem::swap(&mut r1, &mut r2);
+                std::mem::swap(&mut c1, &mut c2);
+            }
+
+            let screen = self.parser.screen();
+            let mut result = String::new();
+
+            for r in r1..=r2 {
+                let start_c = if r == r1 { c1 } else { 0 };
+                let end_c = if r == r2 { c2 } else { self.cols.saturating_sub(1) };
+                let mut line = String::new();
+
+                for c in start_c..=end_c {
+                    if let Some(cell) = screen.cell(r, c) {
+                        let text = cell.contents();
+                        if text.is_empty() {
+                            line.push(' ');
                         } else {
-                            bytes = match key {
-                                egui::Key::Enter => Some(b"\r".to_vec()),
-                                egui::Key::Backspace => match settings.backspace_sequence {
-                                    BackspaceSequence::Delete127 => Some(b"\x7f".to_vec()),
-                                    BackspaceSequence::Backspace8 => Some(b"\x08".to_vec()),
-                                },
-                                egui::Key::Tab => Some(b"\t".to_vec()),
-                                egui::Key::Escape => Some(b"\x1b".to_vec()),
-                                egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
-                                egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
-                                egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
-                                egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
-                                egui::Key::Home => Some(b"\x1b[H".to_vec()),
-                                egui::Key::End => Some(b"\x1b[F".to_vec()),
-                                egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
-                                egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
-                                egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
-                                _ => None,
-                            };
-                        }
-
-                        if let Some(b) = bytes {
-                            if let Ok(mut w) = self.writer.lock() {
-                                let _ = w.write_all(&b);
-                                let _ = w.flush();
-                            }
+                            line.push_str(&text);
                         }
                     }
-                    egui::Event::Paste(text) => {
-                        self.send_input(text);
-                    }
-                    _ => {}
+                }
+                result.push_str(line.trim_end());
+                if r != r2 {
+                    result.push('\n');
                 }
             }
-        });
+            result
+        } else {
+            String::new()
+        }
+    }
 
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        settings: &AppSettings,
+        toast: &mut Option<(String, std::time::Instant)>,
+    ) {
+        let has_modal = self.active_auth_prompt.is_some();
+
+        // 1. Floating Non-Blocking Center Authentication Modal
+        if let Some(prompt) = self.active_auth_prompt.clone() {
+            egui::Area::new(egui::Id::new("center_auth_prompt"))
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::none()
+                        .fill(COLOR_BG_CARD)
+                        .stroke(egui::Stroke::new(1.5_f32, COLOR_ACCENT))
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::same(20.0))
+                        .show(ui, |ui| {
+                            ui.set_width(420.0);
+
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&prompt.title)
+                                        .strong()
+                                        .size(16.0)
+                                        .color(COLOR_ACCENT),
+                                );
+                            });
+                            ui.add_space(8.0);
+
+                            if !prompt.prompt_line.is_empty() {
+                                egui::Frame::none()
+                                    .fill(COLOR_BG_PANEL)
+                                    .rounding(4.0)
+                                    .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(&prompt.prompt_line)
+                                                .small()
+                                                .color(COLOR_TEXT_PRIMARY),
+                                        );
+                                    });
+                                ui.add_space(8.0);
+                            }
+
+                            let label_text = if prompt.is_secret {
+                                "Enter Password / Passphrase:"
+                            } else {
+                                "Enter 6-Digit OTP / Token:"
+                            };
+                            ui.label(egui::RichText::new(label_text).small().color(COLOR_TEXT_MUTED));
+                            ui.add_space(4.0);
+
+                            let mut submit = false;
+                            ui.horizontal(|ui| {
+                                let edit = egui::TextEdit::singleline(&mut self.auth_input)
+                                    .password(prompt.is_secret && !self.auth_show_secret)
+                                    .desired_width(
+                                        ui.available_width()
+                                            - if prompt.is_secret { 65.0 } else { 0.0 },
+                                    );
+                                let res = ui.add(edit);
+                                res.request_focus();
+
+                                if res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    submit = true;
+                                }
+
+                                if prompt.is_secret {
+                                    if ui.button(if self.auth_show_secret { "Hide" } else { "Show" }).clicked() {
+                                        self.auth_show_secret = !self.auth_show_secret;
+                                    }
+                                }
+                            });
+
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                if ui.button(egui::RichText::new("Submit").strong()).clicked() {
+                                    submit = true;
+                                }
+
+                                if !prompt.is_secret {
+                                    if ui.button("Paste Clipboard").clicked() {
+                                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                                            if let Ok(text) = cb.get_text() {
+                                                self.auth_input = text.trim().to_string();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("Dismiss / Terminal").clicked() {
+                                        self.active_auth_prompt = None;
+                                    }
+                                });
+                            });
+
+                            if submit {
+                                self.send_auth_response(&self.auth_input);
+                                self.auth_input.clear();
+                                self.active_auth_prompt = None;
+                                *toast = Some((
+                                    "Authentication submitted".to_string(),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        });
+                });
+        }
+
+        // 2. Standard Keyboard Routing (Only when no modal or text inputs have focus)
+        if !has_modal && !ui.ctx().wants_keyboard_input() {
+            ui.input(|i| {
+                for event in &i.events {
+                    match event {
+                        egui::Event::Text(text) => {
+                            if !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
+                                self.send_input(text);
+                            }
+                        }
+                        egui::Event::Key {
+                            key,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        } => {
+                            let mut bytes: Option<Vec<u8>> = None;
+                            if modifiers.ctrl {
+                                let ctrl_byte = match key {
+                                    egui::Key::A => Some(1),
+                                    egui::Key::B => Some(2),
+                                    egui::Key::C => Some(3),
+                                    egui::Key::D => Some(4),
+                                    egui::Key::E => Some(5),
+                                    egui::Key::F => Some(6),
+                                    egui::Key::G => Some(7),
+                                    egui::Key::H => Some(8),
+                                    egui::Key::I => Some(9),
+                                    egui::Key::J => Some(10),
+                                    egui::Key::K => Some(11),
+                                    egui::Key::L => Some(12),
+                                    egui::Key::M => Some(13),
+                                    egui::Key::N => Some(14),
+                                    egui::Key::O => Some(15),
+                                    egui::Key::P => Some(16),
+                                    egui::Key::Q => Some(17),
+                                    egui::Key::R => Some(18),
+                                    egui::Key::S => Some(19),
+                                    egui::Key::T => Some(20),
+                                    egui::Key::U => Some(21),
+                                    egui::Key::V => Some(22),
+                                    egui::Key::W => Some(23),
+                                    egui::Key::X => Some(24),
+                                    egui::Key::Y => Some(25),
+                                    egui::Key::Z => Some(26),
+                                    _ => None,
+                                };
+                                if let Some(b) = ctrl_byte {
+                                    bytes = Some(vec![b]);
+                                }
+                            } else {
+                                bytes = match key {
+                                    egui::Key::Enter => Some(b"\r".to_vec()),
+                                    egui::Key::Backspace => match settings.backspace_sequence {
+                                        BackspaceSequence::Delete127 => Some(b"\x7f".to_vec()),
+                                        BackspaceSequence::Backspace8 => Some(b"\x08".to_vec()),
+                                    },
+                                    egui::Key::Tab => Some(b"\t".to_vec()),
+                                    egui::Key::Escape => Some(b"\x1b".to_vec()),
+                                    egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
+                                    egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
+                                    egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
+                                    egui::Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
+                                    egui::Key::Home => Some(b"\x1b[H".to_vec()),
+                                    egui::Key::End => Some(b"\x1b[F".to_vec()),
+                                    egui::Key::PageUp => Some(b"\x1b[5~".to_vec()),
+                                    egui::Key::PageDown => Some(b"\x1b[6~".to_vec()),
+                                    egui::Key::Delete => Some(b"\x1b[3~".to_vec()),
+                                    _ => None,
+                                };
+                            }
+
+                            if let Some(b) = bytes {
+                                if let Ok(mut w) = self.writer.lock() {
+                                    let _ = w.write_all(&b);
+                                    let _ = w.flush();
+                                }
+                            }
+                        }
+                        egui::Event::Paste(text) => {
+                            self.send_input(text);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+
+        // 3. Dynamic Resize & Painter
         let font_size = 14.0;
         let char_width = 8.4;
         let row_height = 17.5;
@@ -298,67 +515,123 @@ impl TerminalSession {
             .fill(COLOR_BG_MAIN)
             .inner_margin(egui::Margin::same(10.0))
             .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(
+                        self.cols as f32 * char_width,
+                        self.rows as f32 * row_height,
+                    ),
+                    egui::Sense::click_and_drag(),
+                );
 
-                    let screen = self.parser.screen();
-                    let (rows, cols) = screen.size();
-                    let (cursor_r, cursor_c) = screen.cursor_position();
-                    let hide_cursor = screen.hide_cursor();
+                // Mouse Pointer Drag Handling
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let rel_x = (pos.x - rect.min.x).max(0.0);
+                    let rel_y = (pos.y - rect.min.y).max(0.0);
+                    let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
+                    let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
 
-                    let show_cursor = !hide_cursor
-                        && (!settings.cursor_blink
-                            || (ui.input(|i| (i.time * 2.0).fract() < 0.5)));
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        self.selection_start = Some((r, c));
+                        self.selection_end = Some((r, c));
+                    } else if response.dragged_by(egui::PointerButton::Primary) {
+                        self.selection_end = Some((r, c));
+                    }
+                }
 
-                    for r in 0..rows {
-                        let mut job = egui::text::LayoutJob::default();
-                        job.wrap.max_width = f32::INFINITY;
-
-                        for c in 0..cols {
-                            let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
-                            let default_cell = vt100::Cell::default();
-                            let cell = screen.cell(r, c).unwrap_or(&default_cell);
-                            let cell_text = cell.contents();
-                            let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
-
-                            let mut fg = vt_to_egui_color(cell.fgcolor(), false);
-                            let mut bg = vt_to_egui_color(cell.bgcolor(), true);
-
-                            if cell.inverse() || is_cursor {
-                                std::mem::swap(&mut fg, &mut bg);
-                                if is_cursor && bg == fg {
-                                    fg = COLOR_BG_MAIN;
-                                    bg = COLOR_TEXT_PRIMARY;
-                                }
-                            }
-
-                            job.append(
-                                display_char,
-                                0.0,
-                                egui::TextFormat {
-                                    font_id: egui::FontId::monospace(font_size),
-                                    color: fg,
-                                    background: if bg != COLOR_BG_MAIN {
-                                        bg
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    },
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                        let label_resp = ui.label(job);
-
-                        if settings.paste_on_right_click
-                            && label_resp.clicked_by(egui::PointerButton::Secondary)
-                        {
-                            let clip = ui.output(|o| o.copied_text.clone());
-                            if !clip.is_empty() {
-                                self.send_input(&clip);
+                // Copy on Drag Release
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    if settings.copy_on_select {
+                        let selected = self.extract_selected_text();
+                        if !selected.trim().is_empty() {
+                            if let Ok(mut cb) = arboard::Clipboard::new() {
+                                let _ = cb.set_text(selected.clone());
+                                let preview = if selected.len() > 24 {
+                                    format!("{}...", &selected[..21].replace('\n', " "))
+                                } else {
+                                    selected.replace('\n', " ")
+                                };
+                                *toast = Some((
+                                    format!("Copied: \"{}\"", preview),
+                                    std::time::Instant::now(),
+                                ));
                             }
                         }
                     }
-                });
+                }
+
+                // Paste on Right Click
+                if settings.paste_on_right_click
+                    && response.clicked_by(egui::PointerButton::Secondary)
+                {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if let Ok(clip) = cb.get_text() {
+                            if !clip.is_empty() {
+                                self.send_input(&clip);
+                                *toast = Some((
+                                    "Pasted from clipboard".to_string(),
+                                    std::time::Instant::now(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Draw Terminal Character Grid
+                let screen = self.parser.screen();
+                let (rows, cols) = screen.size();
+                let (cursor_r, cursor_c) = screen.cursor_position();
+                let hide_cursor = screen.hide_cursor();
+
+                let show_cursor = !hide_cursor
+                    && (!settings.cursor_blink
+                        || (ui.input(|i| (i.time * 2.0).fract() < 0.5)));
+
+                for r in 0..rows {
+                    let row_y = rect.min.y + r as f32 * row_height;
+                    let mut job = egui::text::LayoutJob::default();
+                    job.wrap.max_width = f32::INFINITY;
+
+                    for c in 0..cols {
+                        let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
+                        let is_selected = self.is_cell_selected(r, c);
+                        let default_cell = vt100::Cell::default();
+                        let cell = screen.cell(r, c).unwrap_or(&default_cell);
+                        let cell_text = cell.contents();
+                        let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
+
+                        let mut fg = vt_to_egui_color(cell.fgcolor(), false);
+                        let mut bg = vt_to_egui_color(cell.bgcolor(), true);
+
+                        if is_selected {
+                            fg = egui::Color32::from_rgb(11, 15, 25);
+                            bg = COLOR_ACCENT;
+                        } else if cell.inverse() || is_cursor {
+                            std::mem::swap(&mut fg, &mut bg);
+                            if is_cursor && bg == fg {
+                                fg = COLOR_BG_MAIN;
+                                bg = COLOR_TEXT_PRIMARY;
+                            }
+                        }
+
+                        job.append(
+                            display_char,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::monospace(font_size),
+                                color: fg,
+                                background: if bg != COLOR_BG_MAIN {
+                                    bg
+                                } else {
+                                    egui::Color32::TRANSPARENT
+                                },
+                                ..Default::default()
+                            },
+                        );
+                    }
+
+                    let galley = ui.painter().layout_job(job);
+                    ui.painter().galley(egui::pos2(rect.min.x, row_y), galley, egui::Color32::WHITE);
+                }
             });
     }
 }

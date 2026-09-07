@@ -1,6 +1,5 @@
+use crate::db::Database;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackspaceSequence {
@@ -91,28 +90,11 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    fn config_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".config/azterm/settings.json")
-    }
-
     pub fn load() -> Self {
-        let path = Self::config_path();
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(settings) = serde_json::from_str(&data) {
-                return settings;
-            }
-        }
-        Self::default()
+        Database::load_settings().unwrap_or_default()
     }
 
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(data) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, data);
-        }
+        Database::save_settings(self);
     }
 }

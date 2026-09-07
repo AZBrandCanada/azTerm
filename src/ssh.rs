@@ -1,3 +1,4 @@
+use crate::db::Database;
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -87,35 +88,24 @@ impl SshStore {
         Self::base_dir().join("keys")
     }
 
-    pub fn path() -> PathBuf {
-        Self::base_dir().join("ssh_profiles.json")
-    }
-
     pub fn load() -> Self {
-        let path = Self::path();
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(store) = serde_json::from_str(&data) {
-                return store;
-            }
+        if let Some(profiles) = Database::load_profiles() {
+            Self { profiles }
+        } else {
+            let mut default_store = Self::default();
+            default_store.profiles.push(SshProfile::new(
+                "Localhost Test",
+                "127.0.0.1",
+                22,
+                "root",
+            ));
+            default_store.save();
+            default_store
         }
-        let mut default_store = Self::default();
-        default_store.profiles.push(SshProfile::new(
-            "Localhost Test",
-            "127.0.0.1",
-            22,
-            "root",
-        ));
-        default_store
     }
 
     pub fn save(&self) {
-        let path = Self::path();
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(data) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(path, data);
-        }
+        Database::save_profiles(&self.profiles);
     }
 
     pub fn list_saved_keys() -> Vec<SavedKeyEntry> {
