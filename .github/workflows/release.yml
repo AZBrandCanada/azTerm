@@ -1,0 +1,90 @@
+name: Release Builds
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-linux:
+    name: Linux Binary & .deb
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build Binary
+        run: cargo build --release
+
+      - name: Package .deb
+        run: cargo deb
+
+      - name: Compress Tarball
+        run: |
+          mkdir -p dist
+          cp target/release/azterm dist/
+          cp assets/azterm.desktop dist/
+          cp assets/azterm.svg dist/
+          tar -czvf target/azterm-linux-x86_64.tar.gz -C dist .
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/azterm-linux-x86_64.tar.gz
+            target/debian/*.deb
+
+  build-windows:
+    name: Windows Binary
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Binary
+        run: cargo build --release
+
+      - name: Package Zip
+        run: |
+          Compress-Archive -Path target\release\azterm.exe -DestinationPath target\azterm-windows-x86_64.zip
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/azterm-windows-x86_64.zip
+
+  build-macos:
+    name: macOS Binary
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Binary
+        run: cargo build --release
+
+      - name: Package Tarball
+        run: |
+          tar -czvf target/azterm-macos-universal.tar.gz -C target/release azterm
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/azterm-macos-universal.tar.gz

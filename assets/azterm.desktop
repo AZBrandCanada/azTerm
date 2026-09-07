@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=AZTerm
+Comment=Fast, modern native terminal, SSH profile manager, and SFTP client
+Exec=azterm
+Icon=azterm
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;Network;
+Keywords=terminal;ssh;sftp;shell;console;
+StartupNotify=true
