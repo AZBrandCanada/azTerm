@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast, modern native cross-platform terminal, SSH profile manager, and SFTP client"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/azTerm/azTerm"
+repository = "https://github.com/AZBrandCanada/azTerm"
 
 [dependencies]
 eframe = { version = "0.28", default-features = true }
@@ -18,8 +18,8 @@ arboard = "3.4"
 
 [package.metadata.deb]
 name = "azterm"
-maintainer = "AZTerm Developers"
-copyright = "2026 AZTerm"
+maintainer = "AZBrandCanada Developers"
+copyright = "2026 AZBrandCanada"
 license-file = ["LICENSE", "4"]
 extended-description = "A fast, lightweight GPU-accelerated terminal emulator, SSH bookmark manager, and SFTP client written in pure Rust."
 depends = "$auto"
