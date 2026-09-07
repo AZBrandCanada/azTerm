@@ -6,9 +6,15 @@ echo "Installing AZTerm on Arch Linux / CachyOS"
 echo "=========================================="
 echo ""
 
-# 1. Ensure Dependencies
+# 1. Ensure Dependencies (Avoid rustup vs pacman rust conflicts)
 echo "[1/5] Checking Arch system dependencies..."
-sudo pacman -S --needed --noconfirm base-devel rust libxkbcommon openssl libxcb libx11 wayland mesa
+DEPS=("base-devel" "libxkbcommon" "openssl" "libxcb" "libx11" "wayland" "mesa")
+
+if ! command -v rustc &> /dev/null && ! command -v rustup &> /dev/null; then
+    DEPS+=("rust")
+fi
+
+sudo pacman -S --needed --noconfirm "${DEPS[@]}"
 
 # 2. Build Release Binary
 echo "[2/5] Compiling AZTerm in release mode..."
