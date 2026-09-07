@@ -6,9 +6,25 @@ Built with hardware-accelerated immediate-mode GPU graphics, AZTerm provides a f
 
 ---
 
-## Direct Downloads (Latest Releases)
+## One-Line Install (Pipe to Bash)
 
-Download pre-compiled binaries for your operating system:
+Run this single command in your terminal to automatically download, compile, and install AZTerm with full desktop integration:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash
+```
+
+Or using `wget`:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash
+```
+
+---
+
+## Direct Downloads (Precompiled Releases)
+
+Download pre-compiled standalone release binaries:
 
 * **Universal Linux AppImage:** [Download AZTerm-x86_64.AppImage](https://github.com/AZBrandCanada/azTerm/releases/latest/download/AZTerm-x86_64.AppImage)
 * **Debian / Ubuntu Package:** [Download azterm_0.1.0_amd64.deb](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm_0.1.0_amd64.deb)
@@ -17,16 +33,6 @@ Download pre-compiled binaries for your operating system:
 * **macOS Universal Package:** [Download azterm-macos-universal.tar.gz](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-macos-universal.tar.gz)
 
 To view all versions and changelogs, visit the [AZTerm Releases Page](https://github.com/AZBrandCanada/azTerm/releases).
-
----
-
-## One-Line Quick Install
-
-Clone and install AZTerm with full desktop integration in a single command:
-
-```bash
-git clone https://github.com/AZBrandCanada/azTerm.git && cd azTerm && ./install.sh
-```
 
 ---
 
@@ -66,7 +72,7 @@ git clone https://github.com/AZBrandCanada/azTerm.git && cd azTerm && ./install.
 
 ---
 
-## Installation by Distribution
+## Manual Installation by Distribution
 
 ### Arch Linux / CachyOS / Manjaro
 ```bash
