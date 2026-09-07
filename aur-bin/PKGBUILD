@@ -1,0 +1,19 @@
+# Maintainer: AZBrandCanada Developers <https://github.com/AZBrandCanada/azTerm>
+pkgname=azterm-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fast, modern native terminal, SSH bookmark manager, and SFTP client (Precompiled binary)"
+arch=('x86_64')
+url="https://github.com/AZBrandCanada/azTerm"
+license=('MIT' 'Apache-2.0')
+depends=('libxkbcommon' 'openssl' 'libxcb' 'libx11' 'mesa' 'wayland')
+provides=('azterm')
+conflicts=('azterm')
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/azterm-linux-x86_64.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+    install -Dm755 "$srcdir/azterm" "$pkgdir/usr/bin/azterm"
+    install -Dm644 "$srcdir/azterm.desktop" "$pkgdir/usr/share/applications/azterm.desktop"
+    install -Dm644 "$srcdir/azterm.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/azterm.svg"
+}
