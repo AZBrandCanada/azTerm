@@ -1,0 +1,58 @@
+name: Build and Update APT Repository
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  apt-deploy:
+    name: Build .deb and Deploy APT Repo to GitHub Pages
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config apt-utils dpkg-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Build Debian Package
+        run: |
+          cargo build --release
+          mkdir -p deb-repo
+          cargo deb -o deb-repo/azterm_amd64.deb
+
+      - name: Generate APT Repository Metadata
+        run: |
+          cd deb-repo
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -k -f Packages
+          
+          # Generate Release metadata
+          cat << 'REL' > Release
+Architectures: amd64
+Components: main
+Description: Official AZTerm Debian/Ubuntu Repository
+Label: AZTerm
+Origin: AZBrandCanada
+Suite: stable
+REL
+          apt-ftparchive release . >> Release
+
+      - name: Deploy to GitHub Pages (gh-pages branch)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deb-repo
+          publish_branch: gh-pages
+          force_orphan: true
