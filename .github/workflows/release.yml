@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-linux:
-    name: Linux Binary & .deb
+    name: Linux Packages (.AppImage, .deb, .tar.gz)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -16,7 +16,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config curl
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -24,29 +24,47 @@ jobs:
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
-      - name: Build Binary
-        run: cargo build --release
-
-      - name: Package .deb
-        run: cargo deb
-
-      - name: Compress Tarball
+      - name: Build All Linux Packages
         run: |
-          mkdir -p dist
-          cp target/release/azterm dist/
-          cp assets/azterm.desktop dist/
-          cp assets/azterm.svg dist/
-          tar -czvf target/azterm-linux-x86_64.tar.gz -C dist .
+          cargo build --release
+          cargo deb -o dist/azterm_0.1.0_amd64.deb
 
-      - name: Upload Release Assets
+          mkdir -p dist target/stage-linux
+          cp target/release/azterm target/stage-linux/
+          cp assets/azterm.desktop target/stage-linux/
+          cp assets/azterm.svg target/stage-linux/
+          tar -czf dist/azterm-linux-x86_64.tar.gz -C target/stage-linux .
+
+          # AppImage Build
+          mkdir -p target/AppDir/usr/bin target/AppDir/usr/share/applications target/AppDir/usr/share/icons/hicolor/scalable/apps
+          cp target/release/azterm target/AppDir/usr/bin/azterm
+          cp assets/azterm.desktop target/AppDir/azterm.desktop
+          cp assets/azterm.desktop target/AppDir/usr/share/applications/azterm.desktop
+          cp assets/azterm.svg target/AppDir/azterm.svg
+          cp assets/azterm.svg target/AppDir/usr/share/icons/hicolor/scalable/apps/azterm.svg
+          
+          cat << 'APPRUN' > target/AppDir/AppRun
+#!/sh
+SELF=$(readlink -f "$0")
+HERE=${SELF%/*}
+export PATH="${HERE}/usr/bin:${PATH}"
+exec "${HERE}/usr/bin/azterm" "$@"
+APPRUN
+          chmod +x target/AppDir/AppRun
+          curl -sLo target/appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x target/appimagetool
+          ARCH=x86_64 ./target/appimagetool --appimage-extract-and-run target/AppDir dist/AZTerm-x86_64.AppImage
+
+      - name: Upload Linux Assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/azterm-linux-x86_64.tar.gz
-            target/debian/*.deb
+            dist/AZTerm-x86_64.AppImage
+            dist/azterm_0.1.0_amd64.deb
+            dist/azterm-linux-x86_64.tar.gz
 
   build-windows:
-    name: Windows Binary
+    name: Windows Package (.zip)
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
@@ -55,20 +73,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Binary
+      - name: Build Windows Binary
         run: cargo build --release
 
-      - name: Package Zip
+      - name: Package Windows Zip
         run: |
-          Compress-Archive -Path target\release\azterm.exe -DestinationPath target\azterm-windows-x86_64.zip
+          mkdir dist
+          Compress-Archive -Path target\release\azterm.exe -DestinationPath dist\azterm-windows-x86_64.zip
 
-      - name: Upload Release Assets
+      - name: Upload Windows Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: target/azterm-windows-x86_64.zip
+          files: dist\azterm-windows-x86_64.zip
 
   build-macos:
-    name: macOS Binary
+    name: macOS Package (.tar.gz)
     runs-on: macos-latest
     steps:
       - name: Checkout Repository
@@ -77,14 +96,15 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Binary
+      - name: Build macOS Binary
         run: cargo build --release
 
-      - name: Package Tarball
+      - name: Package macOS Tarball
         run: |
-          tar -czvf target/azterm-macos-universal.tar.gz -C target/release azterm
+          mkdir -p dist
+          tar -czf dist/azterm-macos-universal.tar.gz -C target/release azterm
 
-      - name: Upload Release Assets
+      - name: Upload macOS Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: target/azterm-macos-universal.tar.gz
+          files: dist/azterm-macos-universal.tar.gz

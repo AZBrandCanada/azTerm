@@ -6,12 +6,26 @@ Built with hardware-accelerated immediate-mode GPU graphics, AZTerm provides a f
 
 ---
 
+## Direct Downloads (Latest Releases)
+
+Download pre-compiled binaries for your operating system:
+
+* **Universal Linux AppImage:** [Download AZTerm-x86_64.AppImage](https://github.com/AZBrandCanada/azTerm/releases/latest/download/AZTerm-x86_64.AppImage)
+* **Debian / Ubuntu Package:** [Download azterm_0.1.0_amd64.deb](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm_0.1.0_amd64.deb)
+* **Generic Linux Tarball:** [Download azterm-linux-x86_64.tar.gz](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-linux-x86_64.tar.gz)
+* **Windows 64-bit Archive:** [Download azterm-windows-x86_64.zip](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-windows-x86_64.zip)
+* **macOS Universal Package:** [Download azterm-macos-universal.tar.gz](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-macos-universal.tar.gz)
+
+To view all versions and changelogs, visit the [AZTerm Releases Page](https://github.com/AZBrandCanada/azTerm/releases).
+
+---
+
 ## One-Line Quick Install
 
 Clone and install AZTerm with full desktop integration in a single command:
 
 ```bash
-git clone https://github.com/azTerm/azTerm.git && cd azTerm && ./install.sh
+git clone https://github.com/AZBrandCanada/azTerm.git && cd azTerm && ./install.sh
 ```
 
 ---
@@ -48,7 +62,7 @@ git clone https://github.com/azTerm/azTerm.git && cd azTerm && ./install.sh
 ### 6. Native Desktop & OS Integration
 * **File Manager Context Menus:** Right-click any folder in KDE Dolphin, GNOME Nautilus, or Nemo to choose **Open in AZTerm**.
 * **URI Protocol Handlers:** Registers `ssh://` and `sftp://` URI schemes with the operating system for instant connection launching.
-* **Desktop App Identity:** Native launcher integration across KDE Plasma, GNOME, XFCE, and tiling window managers (Hyprland, Sway, i3, Rofi, Wofi).
+* **Desktop App Identity:** Native launcher and taskbar integration across KDE Plasma, GNOME, XFCE, and tiling window managers (Hyprland, Sway, i3, Rofi, Wofi).
 
 ---
 
@@ -56,14 +70,14 @@ git clone https://github.com/azTerm/azTerm.git && cd azTerm && ./install.sh
 
 ### Arch Linux / CachyOS / Manjaro
 ```bash
-git clone https://github.com/azTerm/azTerm.git
+git clone https://github.com/AZBrandCanada/azTerm.git
 cd azTerm
 ./install-arch.sh
 ```
 
 ### Ubuntu / Debian / Linux Mint / Pop!_OS
 ```bash
-git clone https://github.com/azTerm/azTerm.git
+git clone https://github.com/AZBrandCanada/azTerm.git
 cd azTerm
 ./install-debian.sh
 ```
@@ -96,17 +110,18 @@ azterm -e htop
 
 ## Multi-Platform Packaging
 
-To generate distribution binaries for all platforms from Linux:
+To generate all distribution formats directly from your machine into the `dist/` directory:
 
 ```bash
 ./package-all.sh
 ```
 
-This compiles and outputs all release formats into the `dist/` directory:
+Outputs generated:
 * `dist/AZTerm-x86_64.AppImage` (Universal Linux standalone executable)
-* `dist/azterm-linux-x86_64.tar.gz` (Generic Linux tarball)
+* `dist/azterm-0.1.0-1-x86_64.pkg.tar.zst` (Arch Linux native package)
 * `dist/azterm_0.1.0_amd64.deb` (Debian / Ubuntu package)
-* `dist/azterm-windows-x86_64.zip` (Windows 64-bit standalone executable)
+* `dist/azterm-linux-x86_64.tar.gz` (Generic Linux archive)
+* `dist/azterm-windows-x86_64.zip` (Windows 64-bit executable archive)
 
 ---
 
