@@ -320,7 +320,7 @@ impl TerminalSession {
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
-                    self.send_input("\x03"); // SIGINT
+                    self.send_input("\x03"); // Cancel line/command
                     return;
                 }
                 if i.key_pressed(egui::Key::X) {
@@ -385,6 +385,11 @@ impl TerminalSession {
                         modifiers,
                         ..
                     } => {
+                        if *key == egui::Key::Escape {
+                            self.send_input("\x1b");
+                            continue;
+                        }
+
                         if (modifiers.shift && *key == egui::Key::Insert)
                             || (modifiers.ctrl && modifiers.shift && *key == egui::Key::V)
                         {
@@ -435,8 +440,6 @@ impl TerminalSession {
                                     BackspaceSequence::Delete127 => Some(b"\x7f".to_vec()),
                                     BackspaceSequence::Backspace8 => Some(b"\x08".to_vec()),
                                 },
-                                egui::Key::Tab => Some(b"\t".to_vec()),
-                                egui::Key::Escape => Some(b"\x1b".to_vec()),
                                 egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
                                 egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
                                 egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
@@ -469,9 +472,7 @@ impl TerminalSession {
         settings: &AppSettings,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        if !ui.ctx().wants_keyboard_input() {
-            self.handle_keyboard_events(ui.ctx(), settings);
-        }
+        self.handle_keyboard_events(ui.ctx(), settings);
 
         let font_size = 14.0;
         let char_width = 8.4;
@@ -506,6 +507,10 @@ impl TerminalSession {
                     ),
                     egui::Sense::click_and_drag(),
                 );
+
+                if response.clicked() || response.dragged() || !response.has_focus() {
+                    response.request_focus();
+                }
 
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
 

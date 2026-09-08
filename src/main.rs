@@ -477,6 +477,34 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Line 1: Strip ALL Tab events from egui before any panel or button is evaluated!
+        let modal_open = self.show_update_modal || self.show_profile_modal || self.show_keygen_modal;
+        if self.active_view == ActiveView::Terminal && !modal_open {
+            let mut send_tab = false;
+
+            ctx.input_mut(|i| {
+                i.events.retain(|event| match event {
+                    egui::Event::Key { key: egui::Key::Tab, pressed, .. } => {
+                        if *pressed {
+                            send_tab = true;
+                        }
+                        false // Strip Tab from egui input events so nothing in egui ever sees Tab!
+                    }
+                    egui::Event::Text(t) if t == "\t" => {
+                        send_tab = true;
+                        false // Strip Text("\t") from egui
+                    }
+                    _ => true,
+                });
+            });
+
+            if send_tab {
+                if let Some(session) = self.sessions.get(self.active_tab_idx) {
+                    session.send_input("\t");
+                }
+            }
+        }
+
         for s in &mut self.sessions {
             s.poll_updates();
         }
@@ -492,7 +520,7 @@ impl eframe::App for AppState {
 
         self.sync_sftp_with_active_session();
 
-        // Top Navigation Bar
+        // Top Navigation Bar (uses non-focusable custom widgets)
         egui::TopBottomPanel::top("top_nav")
             .frame(egui::Frame::none().fill(COLOR_BG_PANEL).inner_margin(egui::Margin::symmetric(14.0, 8.0)))
             .show(ctx, |ui| {
@@ -505,22 +533,22 @@ impl eframe::App for AppState {
                     );
                     ui.add_space(8.0);
 
-                    if ui.selectable_label(self.active_view == ActiveView::Terminal, "Terminal").clicked() {
+                    if nav_tab_button(ui, "Terminal", self.active_view == ActiveView::Terminal) {
                         self.active_view = ActiveView::Terminal;
                     }
-                    if ui.selectable_label(self.active_view == ActiveView::SshBookmarks, "SSH Profiles").clicked() {
+                    if nav_tab_button(ui, "SSH Profiles", self.active_view == ActiveView::SshBookmarks) {
                         self.active_view = ActiveView::SshBookmarks;
                     }
-                    if ui.selectable_label(self.active_view == ActiveView::SftpBrowser, "SFTP Explorer").clicked() {
+                    if nav_tab_button(ui, "SFTP Explorer", self.active_view == ActiveView::SftpBrowser) {
                         self.active_view = ActiveView::SftpBrowser;
                     }
-                    if ui.selectable_label(self.active_view == ActiveView::Settings, "Settings").clicked() {
+                    if nav_tab_button(ui, "Settings", self.active_view == ActiveView::Settings) {
                         self.active_view = ActiveView::Settings;
                     }
 
                     ui.separator();
 
-                    if ui.button("+ New Shell").clicked() {
+                    if nav_action_button(ui, "+ New Shell") {
                         self.spawn_local_terminal(ctx.clone(), None);
                     }
 
@@ -538,36 +566,35 @@ impl eframe::App for AppState {
                             ui.horizontal(|ui| {
                                 for (i, session) in self.sessions.iter().enumerate() {
                                     let is_active = self.active_view == ActiveView::Terminal && self.active_tab_idx == i;
-                                    let tab_bg = if is_active { COLOR_BG_CARD } else { COLOR_BG_MAIN };
+                                    let label_text = if session.title.len() > max_chars {
+                                        format!("{}...", &session.title[..max_chars.saturating_sub(3)])
+                                    } else {
+                                        session.title.clone()
+                                    };
 
-                                    egui::Frame::none()
-                                        .fill(tab_bg)
-                                        .stroke(egui::Stroke::new(1.0_f32, if is_active { COLOR_ACCENT } else { COLOR_BORDER }))
-                                        .rounding(4.0)
-                                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                                        .show(ui, |ui| {
-                                            ui.set_width(computed_tab_width);
-                                            ui.horizontal(|ui| {
-                                                let label_text = if session.title.len() > max_chars {
-                                                    format!("{}...", &session.title[..max_chars.saturating_sub(3)])
-                                                } else {
-                                                    session.title.clone()
-                                                };
-                                                if ui.selectable_label(is_active, label_text).clicked() {
-                                                    self.active_tab_idx = i;
-                                                    self.active_view = ActiveView::Terminal;
+                                    let (tab_clicked, close_clicked) = session_tab_chip(
+                                        ui,
+                                        &label_text,
+                                        is_active,
+                                        computed_tab_width,
+                                        self.sessions.len() > 1,
+                                    );
 
-                                                    if let SessionType::Ssh { profile_id } = &session.session_type {
-                                                        if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
-                                                            self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
-                                                        }
-                                                    }
-                                                }
-                                                if self.sessions.len() > 1 && ui.small_button("×").clicked() {
-                                                    tab_to_close = Some(i);
-                                                }
-                                            });
-                                        });
+                                    if tab_clicked {
+                                        self.active_tab_idx = i;
+                                        self.active_view = ActiveView::Terminal;
+
+                                        if let SessionType::Ssh { profile_id } = &session.session_type {
+                                            if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
+                                                self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
+                                            }
+                                        }
+                                    }
+
+                                    if close_clicked {
+                                        tab_to_close = Some(i);
+                                    }
+
                                     ui.add_space(3.0);
                                 }
                             });
@@ -603,7 +630,7 @@ impl eframe::App for AppState {
                     } else {
                         "SFTP Drawer: CLOSED"
                     };
-                    if ui.selectable_label(self.settings.show_sftp_split_view, sftp_btn_text).clicked() {
+                    if nav_tab_button(ui, sftp_btn_text, self.settings.show_sftp_split_view) {
                         self.settings.show_sftp_split_view = !self.settings.show_sftp_split_view;
                         self.settings.save();
                         self.set_toast(if self.settings.show_sftp_split_view {
@@ -616,16 +643,7 @@ impl eframe::App for AppState {
                     if self.settings.check_updates {
                         if let Some(ref update_tag) = self.available_update {
                             ui.separator();
-                            let btn = egui::Button::new(
-                                egui::RichText::new(format!("⭐ Update: {}", update_tag))
-                                    .small()
-                                    .strong()
-                                    .color(COLOR_ACCENT),
-                            )
-                            .fill(COLOR_BG_CARD)
-                            .stroke(egui::Stroke::new(1.0, COLOR_ACCENT));
-
-                            if ui.add(btn).on_hover_text(format!("Click to view update options for {}", update_tag)).clicked() {
+                            if nav_action_button(ui, &format!("⭐ Update: {}", update_tag)) {
                                 self.show_update_modal = true;
                             }
                         }

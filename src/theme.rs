@@ -20,6 +20,109 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(14.0))
 }
 
+// Custom top navigation button that NEVER steals keyboard Tab focus
+pub fn nav_tab_button(ui: &mut egui::Ui, text: &str, is_active: bool) -> bool {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let padding = egui::vec2(10.0, 5.0);
+    let text_color = if is_active { COLOR_ACCENT } else { COLOR_TEXT_PRIMARY };
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, text_color);
+    let size = egui::vec2(galley.size().x + padding.x * 2.0, 26.0);
+
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let bg = if is_active {
+            COLOR_BG_CARD
+        } else if response.hovered() {
+            COLOR_BG_CARD.linear_multiply(0.6)
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let stroke = if is_active {
+            egui::Stroke::new(1.0_f32, COLOR_ACCENT)
+        } else {
+            egui::Stroke::NONE
+        };
+        ui.painter().rect(rect, 4.0, bg, stroke);
+        let text_pos = egui::pos2(rect.min.x + padding.x, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
+    }
+    response.clicked()
+}
+
+// Custom action button (e.g. "+ New Shell") that NEVER steals keyboard Tab focus
+pub fn nav_action_button(ui: &mut egui::Ui, text: &str) -> bool {
+    let font_id = egui::TextStyle::Button.resolve(ui.style());
+    let padding = egui::vec2(8.0, 4.0);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, COLOR_TEXT_PRIMARY);
+    let size = egui::vec2(galley.size().x + padding.x * 2.0, 24.0);
+
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let bg = if response.is_pointer_button_down_on() {
+            COLOR_BG_PANEL
+        } else if response.hovered() {
+            COLOR_BG_CARD
+        } else {
+            COLOR_BG_MAIN
+        };
+        ui.painter().rect(rect, 4.0, bg, egui::Stroke::new(1.0_f32, COLOR_BORDER));
+        let text_pos = egui::pos2(rect.min.x + padding.x, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
+    }
+    response.clicked()
+}
+
+// Custom session tab chip that NEVER steals keyboard Tab focus
+pub fn session_tab_chip(
+    ui: &mut egui::Ui,
+    title: &str,
+    is_active: bool,
+    width: f32,
+    show_close: bool,
+) -> (bool, bool) {
+    let size = egui::vec2(width, 26.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let mut close_clicked = false;
+    let clicked = response.clicked();
+
+    if ui.is_rect_visible(rect) {
+        let bg = if is_active { COLOR_BG_CARD } else { COLOR_BG_MAIN };
+        let stroke = if is_active {
+            egui::Stroke::new(1.0_f32, COLOR_ACCENT)
+        } else {
+            egui::Stroke::new(1.0_f32, COLOR_BORDER)
+        };
+        ui.painter().rect(rect, 4.0, bg, stroke);
+
+        let font_id = egui::TextStyle::Body.resolve(ui.style());
+        let text_color = if is_active { COLOR_TEXT_PRIMARY } else { COLOR_TEXT_MUTED };
+        let galley = ui.painter().layout_no_wrap(title.to_string(), font_id.clone(), text_color);
+        let text_pos = egui::pos2(rect.min.x + 6.0, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
+
+        if show_close {
+            let close_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - 10.0, rect.center().y),
+                egui::vec2(14.0, 14.0),
+            );
+            let close_resp = ui.interact(close_rect, ui.id().with(title).with("close"), egui::Sense::click());
+            if close_resp.clicked() {
+                close_clicked = true;
+            }
+            let x_color = if close_resp.hovered() { COLOR_DANGER } else { COLOR_TEXT_MUTED };
+            ui.painter().text(
+                close_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "×",
+                font_id,
+                x_color,
+            );
+        }
+    }
+
+    (clicked, close_clicked)
+}
+
 pub fn toggle_switch(ui: &mut egui::Ui, value: &mut bool, text: &str) -> egui::Response {
     ui.horizontal(|ui| {
         let desired_size = egui::vec2(36.0, 18.0);
