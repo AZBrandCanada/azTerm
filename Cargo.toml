@@ -1,6 +1,6 @@
 [package]
 name = "azterm"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Fast, modern native cross-platform terminal, SSH profile manager, and SFTP client"
 license = "MIT OR Apache-2.0"

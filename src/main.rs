@@ -40,6 +40,67 @@ enum SettingsCategory {
     System,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallMethod {
+    AppImage,
+    ScriptInstalled,
+    PackageManager(String),
+    Windows,
+    MacOS,
+    ManualBuild,
+}
+
+impl InstallMethod {
+    pub fn detect() -> Self {
+        if cfg!(windows) {
+            return InstallMethod::Windows;
+        }
+        if cfg!(target_os = "macos") {
+            return InstallMethod::MacOS;
+        }
+        if std::env::var_os("APPIMAGE").is_some() {
+            return InstallMethod::AppImage;
+        }
+
+        let exe_path = std::env::current_exe().unwrap_or_default();
+        let exe_str = exe_path.to_string_lossy();
+
+        if exe_str.contains("/target/debug/") || exe_str.contains("/target/release/") {
+            return InstallMethod::ManualBuild;
+        }
+
+        if exe_str == "/usr/bin/azterm" {
+            if let Ok(out) = std::process::Command::new("pacman").args(["-Q", "azterm"]).output() {
+                if out.status.success() {
+                    return InstallMethod::PackageManager("Arch Linux (pacman)".to_string());
+                }
+            }
+            if let Ok(out) = std::process::Command::new("dpkg").args(["-s", "azterm"]).output() {
+                if out.status.success() {
+                    return InstallMethod::PackageManager("Debian/Ubuntu (dpkg)".to_string());
+                }
+            }
+        }
+
+        if exe_str.starts_with("/usr/local/bin") || exe_str.contains("/.local/bin") || exe_str == "/usr/bin/azterm" {
+            return InstallMethod::ScriptInstalled;
+        }
+
+        InstallMethod::ManualBuild
+    }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            InstallMethod::AppImage => "AppImage (Standalone)".to_string(),
+            InstallMethod::ScriptInstalled => "One-Line Shell Script (install.sh)".to_string(),
+            InstallMethod::PackageManager(pkg) => format!("Package Manager: {}", pkg),
+            InstallMethod::Windows => "Windows Executable".to_string(),
+            InstallMethod::MacOS => "macOS Universal Binary".to_string(),
+            InstallMethod::ManualBuild => "Manual Source Build".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct CliLaunchOptions {
     working_directory: Option<String>,
@@ -115,6 +176,8 @@ struct AppState {
     available_update: Option<String>,
     update_rx: Option<Receiver<Option<String>>>,
     is_checking_update: bool,
+    show_update_modal: bool,
+    install_method: InstallMethod,
 
     // Profile Modal (Create / Edit)
     show_profile_modal: bool,
@@ -138,6 +201,7 @@ impl AppState {
     fn new(cc: &eframe::CreationContext<'_>, cli: CliLaunchOptions) -> Self {
         let settings = AppSettings::load();
         let ssh_store = SshStore::load();
+        let install_method = InstallMethod::detect();
 
         let mut app = Self {
             settings,
@@ -154,6 +218,8 @@ impl AppState {
             available_update: None,
             update_rx: None,
             is_checking_update: false,
+            show_update_modal: false,
+            install_method,
 
             show_profile_modal: false,
             editing_profile_id: None,
@@ -171,7 +237,7 @@ impl AppState {
             keygen_status: String::new(),
         };
 
-        // Check for updates if opened for the first time today
+        // Check for updates once per day if enabled
         app.trigger_update_check(false, cc.egui_ctx.clone());
 
         // Handle CLI Launch Parameters
@@ -231,6 +297,19 @@ impl AppState {
             let _ = tx.send(update_found);
             ctx.request_repaint();
         });
+    }
+
+    fn run_script_update_in_terminal(&mut self, ctx: egui::Context) {
+        let update_cmd = "curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash\n";
+        self.spawn_local_terminal(ctx, None);
+
+        if let Some(active_session) = self.sessions.get_mut(self.active_tab_idx) {
+            active_session.title = "AZTerm Updater".to_string();
+            active_session.send_input(update_cmd);
+        }
+        self.show_update_modal = false;
+        self.active_view = ActiveView::Terminal;
+        self.set_toast("Running update script in terminal tab...");
     }
 
     fn handle_ssh_url_launch(&mut self, url: &str, ctx: egui::Context) {
@@ -416,8 +495,8 @@ impl eframe::App for AppState {
         if let Some(ref rx) = self.update_rx {
             if let Ok(res) = rx.try_recv() {
                 self.is_checking_update = false;
-                if let Some(tag) = res {
-                    self.available_update = Some(tag);
+                if self.settings.check_updates {
+                    self.available_update = res;
                 }
             }
         }
@@ -547,22 +626,22 @@ impl eframe::App for AppState {
                         });
                     }
 
-                    // Update Notification Button in Status Bar
-                    if let Some(ref update_tag) = self.available_update {
-                        ui.separator();
-                        let btn = egui::Button::new(
-                            egui::RichText::new(format!("⭐ Update Available: {}", update_tag))
-                                .small()
-                                .strong()
-                                .color(COLOR_ACCENT),
-                        )
-                        .fill(COLOR_BG_CARD)
-                        .stroke(egui::Stroke::new(1.0, COLOR_ACCENT));
+                    // Update Available Trigger Button
+                    if self.settings.check_updates {
+                        if let Some(ref update_tag) = self.available_update {
+                            ui.separator();
+                            let btn = egui::Button::new(
+                                egui::RichText::new(format!("⭐ Update: {}", update_tag))
+                                    .small()
+                                    .strong()
+                                    .color(COLOR_ACCENT),
+                            )
+                            .fill(COLOR_BG_CARD)
+                            .stroke(egui::Stroke::new(1.0, COLOR_ACCENT));
 
-                        let resp = ui.add(btn);
-                        if resp.on_hover_text(format!("Click to open release {} on GitHub", update_tag)).clicked() {
-                            let url = format!("https://github.com/AZBrandCanada/azTerm/releases/tag/{}", update_tag);
-                            ctx.open_url(egui::OpenUrl::new_tab(url));
+                            if ui.add(btn).on_hover_text(format!("Click to view update options for {}", update_tag)).clicked() {
+                                self.show_update_modal = true;
+                            }
                         }
                     }
 
@@ -594,6 +673,93 @@ impl eframe::App for AppState {
                     });
                 });
             });
+
+        // Update Confirmation Modal
+        if self.show_update_modal {
+            if let Some(ref new_tag) = self.available_update.clone() {
+                egui::Window::new("AZTerm Update Available")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(460.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("A new version ({}) of AZTerm is ready!", new_tag))
+                                    .strong()
+                                    .size(15.0)
+                                    .color(COLOR_ACCENT),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("Current version: v{}", env!("CARGO_PKG_VERSION")))
+                                    .small()
+                                    .color(COLOR_TEXT_MUTED),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("Detected installation: {}", self.install_method.display_name()))
+                                    .small()
+                                    .color(COLOR_TEXT_PRIMARY),
+                            );
+
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            match &self.install_method {
+                                InstallMethod::ScriptInstalled | InstallMethod::PackageManager(_) => {
+                                    ui.label("Would you like to run the official updater script in a new terminal session?");
+                                    ui.add_space(6.0);
+                                    egui::Frame::none()
+                                        .fill(COLOR_BG_PANEL)
+                                        .rounding(4.0)
+                                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                                        .show(ui, |ui| {
+                                            ui.monospace("curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash");
+                                        });
+                                }
+                                InstallMethod::AppImage => {
+                                    ui.label("Download the latest standalone AppImage binary from GitHub:");
+                                }
+                                InstallMethod::Windows => {
+                                    ui.label("Download the latest Windows ZIP archive from GitHub:");
+                                }
+                                InstallMethod::MacOS => {
+                                    ui.label("Download the latest macOS universal package from GitHub:");
+                                }
+                                InstallMethod::ManualBuild => {
+                                    ui.label("You can recompile with cargo or run the installer script:");
+                                }
+                            }
+
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                match &self.install_method {
+                                    InstallMethod::ScriptInstalled | InstallMethod::ManualBuild => {
+                                        if ui.button(egui::RichText::new("Update Now (Run in Shell)").strong()).clicked() {
+                                            self.run_script_update_in_terminal(ctx.clone());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
+                                let release_url = format!("https://github.com/AZBrandCanada/azTerm/releases/tag/{}", new_tag);
+                                if ui.button("Open GitHub Release").clicked() {
+                                    ctx.open_url(egui::OpenUrl::new_tab(release_url));
+                                    self.show_update_modal = false;
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("Later").clicked() {
+                                        self.show_update_modal = false;
+                                    }
+                                });
+                            });
+                        });
+                    });
+            }
+        }
 
         // Keygen Modal Window
         if self.show_keygen_modal {
@@ -1161,7 +1327,15 @@ impl eframe::App for AppState {
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
-                                            changed |= setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates);
+                                            
+                                            let prev_check = self.settings.check_updates;
+                                            if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates) {
+                                                changed = true;
+                                                if !self.settings.check_updates {
+                                                    self.available_update = None;
+                                                    self.show_update_modal = false;
+                                                }
+                                            }
 
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
