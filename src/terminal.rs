@@ -317,10 +317,31 @@ impl TerminalSession {
     }
 
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+        // 1. Consume Tab and Shift+Tab so egui never shifts focus away to top bar/menus
+        let tab_pressed = ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
+                true
+            } else if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab) {
+                true
+            } else {
+                false
+            }
+        });
+
+        if tab_pressed {
+            self.send_input("\t");
+        }
+
+        // 2. Consume Escape so it passes straight to vim/nano/shell
+        let esc_pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if esc_pressed {
+            self.send_input("\x1b");
+        }
+
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
-                    self.send_input("\x03"); // SIGINT
+                    self.send_input("\x03"); // Cancel line/command
                     return;
                 }
                 if i.key_pressed(egui::Key::X) {
@@ -385,6 +406,11 @@ impl TerminalSession {
                         modifiers,
                         ..
                     } => {
+                        // Skip Tab and Escape as they were already handled above
+                        if *key == egui::Key::Tab || *key == egui::Key::Escape {
+                            continue;
+                        }
+
                         if (modifiers.shift && *key == egui::Key::Insert)
                             || (modifiers.ctrl && modifiers.shift && *key == egui::Key::V)
                         {
@@ -435,8 +461,6 @@ impl TerminalSession {
                                     BackspaceSequence::Delete127 => Some(b"\x7f".to_vec()),
                                     BackspaceSequence::Backspace8 => Some(b"\x08".to_vec()),
                                 },
-                                egui::Key::Tab => Some(b"\t".to_vec()),
-                                egui::Key::Escape => Some(b"\x1b".to_vec()),
                                 egui::Key::ArrowUp => Some(b"\x1b[A".to_vec()),
                                 egui::Key::ArrowDown => Some(b"\x1b[B".to_vec()),
                                 egui::Key::ArrowRight => Some(b"\x1b[C".to_vec()),
@@ -506,6 +530,14 @@ impl TerminalSession {
                     ),
                     egui::Sense::click_and_drag(),
                 );
+
+                // Lock keyboard focus to terminal so Tab stays in terminal
+                if response.clicked() || response.dragged() || ui.memory(|m| m.focus().is_none()) {
+                    ui.memory_mut(|m| {
+                        m.request_focus(response.id);
+                        m.lock_focus(response.id, true);
+                    });
+                }
 
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
 
