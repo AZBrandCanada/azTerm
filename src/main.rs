@@ -295,6 +295,34 @@ impl AppState {
 
         cc.egui_ctx.set_zoom_factor(settings.zoom_factor);
 
+        // Load system Nerd Fonts into egui so terminal glyphs and starship icons render properly
+        let mut fonts = egui::FontDefinitions::default();
+        let nerd_font_paths = [
+            "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
+            "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+            "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+        ];
+
+        for path in nerd_font_paths {
+            if let Ok(data) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    "nerd_symbols".to_string(),
+                    egui::FontData::from_owned(data),
+                );
+                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                    mono.push("nerd_symbols".to_string());
+                }
+                if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                    prop.push("nerd_symbols".to_string());
+                }
+                break;
+            }
+        }
+        cc.egui_ctx.set_fonts(fonts);
+
         let mut app = Self {
             settings,
             ssh_store,
@@ -1024,10 +1052,13 @@ impl eframe::App for AppState {
             ui::modals::render_ssh_auth_modal(self, ctx);
         }
 
+        self.sftp.render_transfer_history_window(ctx, &self.theme);
+
         let modal_open = self.show_update_modal
             || self.show_profile_modal
             || self.show_keygen_modal
-            || self.ssh_auth_modal.is_some();
+            || self.ssh_auth_modal.is_some()
+            || self.sftp.show_transfer_history;
 
         if self.active_view == ActiveView::Terminal && !modal_open {
             self.handle_terminal_shortcuts(ctx);
@@ -1051,9 +1082,6 @@ impl eframe::App for AppState {
         ui::navbar::render_top_nav(self, ctx);
         ui::navbar::render_tabs_bar(self, ctx);
         ui::navbar::render_status_bar(self, ctx);
-
-        // Always render transfer queue & history modal when toggled
-        self.sftp.render_transfer_history_window(ctx, &self.theme);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.theme.bg_main_color()))
