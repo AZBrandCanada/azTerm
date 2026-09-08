@@ -7,6 +7,105 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(target_os = "linux")]
+use arboard::{GetExtLinux, SetExtLinux};
+
+pub fn get_system_clipboard_text() -> Option<String> {
+    // 1. Try Wayland native wl-paste (cross-app compatible on Wayland)
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Ok(output) = std::process::Command::new("wl-paste")
+                .arg("--no-newline")
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Try arboard (with native Wayland data-control + X11 + Windows + macOS)
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(text) = cb.get_text() {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(text) = cb.get().clipboard(arboard::LinuxClipboardKind::Primary).text() {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to xclip on X11
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-o"])
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+
+    // 4. Fallback to xsel on X11
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("xsel")
+            .args(["-b", "-o"])
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+pub fn set_system_clipboard_text(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text);
+        #[cfg(target_os = "linux")]
+        {
+            let _ = cb.set().clipboard(arboard::LinuxClipboardKind::Primary).text(text.to_string());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Ok(mut child) = std::process::Command::new("wl-copy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
 fn vt_to_egui_color(color: vt100::Color, is_bg: bool) -> egui::Color32 {
     match color {
         vt100::Color::Default => {
@@ -85,6 +184,7 @@ pub struct TerminalSession {
     // Selection Tracking
     pub selection_start: Option<(u16, u16)>,
     pub selection_end: Option<(u16, u16)>,
+    pub is_dragging_selection: bool,
 }
 
 impl TerminalSession {
@@ -151,6 +251,7 @@ impl TerminalSession {
             auth_show_secret: false,
             selection_start: None,
             selection_end: None,
+            is_dragging_selection: false,
         }
     }
 
@@ -372,10 +473,8 @@ impl TerminalSession {
 
                             if !prompt.is_secret {
                                 if ui.button("Paste Clipboard").clicked() {
-                                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                                        if let Ok(text) = cb.get_text() {
-                                            self.auth_input = text.trim().to_string();
-                                        }
+                                    if let Some(text) = get_system_clipboard_text() {
+                                        self.auth_input = text.trim().to_string();
                                     }
                                 }
                             }
@@ -402,8 +501,64 @@ impl TerminalSession {
 
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
         ctx.input(|i| {
+            // Direct Ctrl shortcuts (SIGINT / line clearing / navigation)
+            if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
+                if i.key_pressed(egui::Key::C) {
+                    self.send_input("\x03"); // Cancel current command/input line
+                    return;
+                }
+                if i.key_pressed(egui::Key::X) {
+                    self.send_input("\x18"); // Cancel / CAN
+                    return;
+                }
+                if i.key_pressed(egui::Key::U) {
+                    self.send_input("\x15"); // Clear line backwards
+                    return;
+                }
+                if i.key_pressed(egui::Key::K) {
+                    self.send_input("\x0b"); // Kill line forwards
+                    return;
+                }
+                if i.key_pressed(egui::Key::L) {
+                    self.send_input("\x0c"); // Clear screen
+                    return;
+                }
+                if i.key_pressed(egui::Key::D) {
+                    self.send_input("\x04"); // EOF
+                    return;
+                }
+                if i.key_pressed(egui::Key::Z) {
+                    self.send_input("\x1a"); // Suspend
+                    return;
+                }
+                if i.key_pressed(egui::Key::A) {
+                    self.send_input("\x01"); // Start of line
+                    return;
+                }
+                if i.key_pressed(egui::Key::E) {
+                    self.send_input("\x05"); // End of line
+                    return;
+                }
+                if i.key_pressed(egui::Key::W) {
+                    self.send_input("\x17"); // Delete word
+                    return;
+                }
+            }
+
             for event in &i.events {
                 match event {
+                    egui::Event::Copy => {
+                        // When Ctrl+C is intercepted by egui, send SIGINT to cancel line if not selecting text
+                        if self.selection_start.is_none() {
+                            self.send_input("\x03");
+                        }
+                    }
+                    egui::Event::Cut => {
+                        self.send_input("\x18");
+                    }
+                    egui::Event::Paste(text) => {
+                        self.send_input(text);
+                    }
                     egui::Event::Text(text) => {
                         if !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
                             self.send_input(text);
@@ -415,8 +570,18 @@ impl TerminalSession {
                         modifiers,
                         ..
                     } => {
+                        // Keyboard shortcut pasting (Ctrl+Shift+V or Shift+Insert)
+                        if (modifiers.shift && *key == egui::Key::Insert)
+                            || (modifiers.ctrl && modifiers.shift && *key == egui::Key::V)
+                        {
+                            if let Some(clip) = get_system_clipboard_text() {
+                                self.send_input(&clip);
+                            }
+                            continue;
+                        }
+
                         let mut bytes: Option<Vec<u8>> = None;
-                        if modifiers.ctrl {
+                        if modifiers.ctrl && !modifiers.shift {
                             let ctrl_byte = match key {
                                 egui::Key::A => Some(1),
                                 egui::Key::B => Some(2),
@@ -449,7 +614,7 @@ impl TerminalSession {
                             if let Some(b) = ctrl_byte {
                                 bytes = Some(vec![b]);
                             }
-                        } else {
+                        } else if !modifiers.ctrl {
                             bytes = match key {
                                 egui::Key::Enter => Some(b"\r".to_vec()),
                                 egui::Key::Backspace => match settings.backspace_sequence {
@@ -477,9 +642,6 @@ impl TerminalSession {
                                 let _ = w.flush();
                             }
                         }
-                    }
-                    egui::Event::Paste(text) => {
-                        self.send_input(text);
                     }
                     _ => {}
                 }
@@ -536,7 +698,9 @@ impl TerminalSession {
                     egui::Sense::click_and_drag(),
                 );
 
-                // Mouse Pointer Drag Handling
+                // Mouse Pointer Selection Handling
+                let is_primary_down = ui.input(|i| i.pointer.primary_down());
+
                 if let Some(pos) = response.interact_pointer_pos() {
                     let rel_x = (pos.x - rect.min.x).max(0.0);
                     let rel_y = (pos.y - rect.min.y).max(0.0);
@@ -546,18 +710,20 @@ impl TerminalSession {
                     if response.drag_started_by(egui::PointerButton::Primary) {
                         self.selection_start = Some((r, c));
                         self.selection_end = Some((r, c));
-                    } else if response.dragged_by(egui::PointerButton::Primary) {
+                        self.is_dragging_selection = true;
+                    } else if self.is_dragging_selection && is_primary_down {
                         self.selection_end = Some((r, c));
                     }
                 }
 
-                // Copy on Drag Release
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    if settings.copy_on_select {
-                        let selected = self.extract_selected_text();
-                        if !selected.trim().is_empty() {
-                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                let _ = cb.set_text(selected.clone());
+                // Copy on Drag Release & Dismiss highlight immediately
+                if self.is_dragging_selection && !is_primary_down {
+                    self.is_dragging_selection = false;
+                    if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+                        if start != end && settings.copy_on_select {
+                            let selected = self.extract_selected_text();
+                            if !selected.trim().is_empty() {
+                                set_system_clipboard_text(&selected);
                                 let preview = if selected.len() > 24 {
                                     format!("{}...", &selected[..21].replace('\n', " "))
                                 } else {
@@ -570,21 +736,33 @@ impl TerminalSession {
                             }
                         }
                     }
+                    self.selection_start = None;
+                    self.selection_end = None;
                 }
 
-                // Paste on Right Click
-                if settings.paste_on_right_click
-                    && response.clicked_by(egui::PointerButton::Secondary)
-                {
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        if let Ok(clip) = cb.get_text() {
-                            if !clip.is_empty() {
-                                self.send_input(&clip);
-                                *toast = Some((
-                                    "Pasted from clipboard".to_string(),
-                                    std::time::Instant::now(),
-                                ));
-                            }
+                // Single click clears any lingering selection
+                if response.clicked_by(egui::PointerButton::Primary) {
+                    self.selection_start = None;
+                    self.selection_end = None;
+                    self.is_dragging_selection = false;
+                }
+
+                // Paste on Right Click from system clipboard
+                let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
+                let is_hovered = rect.contains(pointer_pos);
+
+                let right_clicked = response.clicked_by(egui::PointerButton::Secondary)
+                    || response.secondary_clicked()
+                    || (is_hovered && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary) || i.pointer.button_released(egui::PointerButton::Secondary)));
+
+                if settings.paste_on_right_click && right_clicked {
+                    if let Some(clip) = get_system_clipboard_text() {
+                        if !clip.is_empty() {
+                            self.send_input(&clip);
+                            *toast = Some((
+                                "Pasted from clipboard".to_string(),
+                                std::time::Instant::now(),
+                            ));
                         }
                     }
                 }
