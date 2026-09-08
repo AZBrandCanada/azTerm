@@ -2,8 +2,8 @@ mod db;
 mod settings;
 mod sftp;
 mod ssh;
-mod terminal;
 mod theme;
+mod terminal;
 
 use db::{Database, SavedSessionState};
 use eframe::egui;
@@ -395,6 +395,7 @@ impl AppState {
             SessionType::Local { working_dir: work_dir },
             c,
             ctx,
+            self.settings.scrollback_lines,
         );
         self.sessions.push(session);
         self.active_tab_idx = self.sessions.len() - 1;
@@ -412,6 +413,7 @@ impl AppState {
             SessionType::Ssh { profile_id: profile.id.clone() },
             cmd,
             ctx,
+            self.settings.scrollback_lines,
         );
         self.sessions.push(session);
         self.active_tab_idx = self.sessions.len() - 1;
@@ -477,7 +479,6 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Intercept and strip Tab from egui's input queue before ANY widget runs
         let modal_open = self.show_update_modal || self.show_profile_modal || self.show_keygen_modal;
         if self.active_view == ActiveView::Terminal && !modal_open {
             let mut send_tab = false;
@@ -499,7 +500,7 @@ impl eframe::App for AppState {
             });
 
             if send_tab {
-                if let Some(session) = self.sessions.get(self.active_tab_idx) {
+                if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
                     session.send_input("\t");
                 }
             }
@@ -560,7 +561,6 @@ impl eframe::App for AppState {
                     let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(70.0, 160.0);
                     let max_chars = ((computed_tab_width - 28.0) / 7.2).max(3.0) as usize;
 
-                    // Tab ScrollArea with hidden scrollbar to prevent covering close buttons
                     egui::ScrollArea::horizontal()
                         .auto_shrink([false, false])
                         .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -674,7 +674,13 @@ impl eframe::App for AppState {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let Some(session) = self.sessions.get(self.active_tab_idx) {
-                            ui.label(egui::RichText::new(format!("{}x{}", session.cols, session.rows)).small().color(COLOR_TEXT_MUTED));
+                            let scroll_info = if session.scroll_offset > 0 {
+                                format!("-{} lines | {}x{}", session.scroll_offset, session.cols, session.rows)
+                            } else {
+                                format!("{}x{}", session.cols, session.rows)
+                            };
+                            let col = if session.scroll_offset > 0 { COLOR_ACCENT } else { COLOR_TEXT_MUTED };
+                            ui.label(egui::RichText::new(scroll_info).small().color(col));
                         }
                     });
                 });
@@ -1230,13 +1236,34 @@ impl eframe::App for AppState {
                                     match self.settings_category {
                                         SettingsCategory::Terminal => {
                                             ui.label(egui::RichText::new("Terminal Interaction").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and visual cues.").small().color(COLOR_TEXT_MUTED));
+                                            ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and scrollback depth.").small().color(COLOR_TEXT_MUTED));
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut self.settings.cursor_blink);
                                             changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut self.settings.copy_on_select);
                                             changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut self.settings.paste_on_right_click);
-                                            
+
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Scrollback Buffer Depth").strong().color(COLOR_TEXT_PRIMARY));
+                                                    ui.label(egui::RichText::new("Total lines of output history retained per tab (scroll with mouse wheel).").small().color(COLOR_TEXT_MUTED));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    egui::ComboBox::from_id_source("scrollback_depth_combo")
+                                                        .selected_text(format!("{} lines", self.settings.scrollback_lines))
+                                                        .show_ui(ui, |ui| {
+                                                            if ui.selectable_value(&mut self.settings.scrollback_lines, 2000, "2,000 lines").clicked() { changed = true; }
+                                                            if ui.selectable_value(&mut self.settings.scrollback_lines, 5000, "5,000 lines").clicked() { changed = true; }
+                                                            if ui.selectable_value(&mut self.settings.scrollback_lines, 10000, "10,000 lines").clicked() { changed = true; }
+                                                            if ui.selectable_value(&mut self.settings.scrollback_lines, 25000, "25,000 lines").clicked() { changed = true; }
+                                                            if ui.selectable_value(&mut self.settings.scrollback_lines, 50000, "50,000 lines").clicked() { changed = true; }
+                                                        });
+                                                });
+                                            });
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.add_space(6.0);
+
                                             setting_row_disabled(ui, "Right Click Auto Select Word", "Double click/right click to select full alphanumeric words.", self.settings.right_click_select_word);
                                             setting_row_disabled(ui, "Hold Ctrl / Meta to Open Links", "Require modifier key press before launching detected URL hyperlinks.", self.settings.must_hold_ctrl_for_links);
                                             setting_row_disabled(ui, "Command Suggestions", "Display autocompletion hints based on history.", self.settings.show_command_suggestions);
@@ -1300,7 +1327,7 @@ impl eframe::App for AppState {
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut self.settings.show_sftp_split_view);
-                                            
+
                                             setting_row_disabled(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", self.settings.sftp_path_sync);
                                             setting_row_disabled(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", self.settings.auto_refresh_sftp);
                                             setting_row_disabled(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", self.settings.show_hidden_sftp);
@@ -1312,7 +1339,7 @@ impl eframe::App for AppState {
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
-                                            
+
                                             if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates) {
                                                 changed = true;
                                                 if !self.settings.check_updates {
@@ -1343,7 +1370,7 @@ impl eframe::App for AppState {
                                             ui.add_space(6.0);
                                             ui.separator();
                                             ui.add_space(6.0);
-                                            
+
                                             setting_row_disabled(ui, "Allow Multi-Instance Execution", "Permit launching multiple independent AZTerm window processes.", self.settings.allow_multi_instance);
                                             setting_row_disabled(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", self.settings.confirm_before_exit);
                                             setting_row_disabled(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", self.settings.hide_ip);

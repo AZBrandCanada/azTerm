@@ -164,10 +164,11 @@ pub struct TerminalSession {
     pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub rows: u16,
     pub cols: u16,
+    pub scroll_offset: usize,
 
-    // Selection Tracking
-    pub selection_start: Option<(u16, u16)>,
-    pub selection_end: Option<(u16, u16)>,
+    // Selection Tracking in absolute buffer line coordinates (abs_line, col)
+    pub selection_start: Option<(i64, u16)>,
+    pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
 }
 
@@ -178,6 +179,7 @@ impl TerminalSession {
         session_type: SessionType,
         cmd: CommandBuilder,
         ctx: egui::Context,
+        scrollback_len: usize,
     ) -> Self {
         let rows = 28;
         let cols = 90;
@@ -224,19 +226,21 @@ impl TerminalSession {
             id,
             title,
             session_type,
-            parser: vt100::Parser::new(rows, cols, 2000),
+            parser: vt100::Parser::new(rows, cols, scrollback_len.max(1000)),
             rx,
             writer,
             master_pty,
             rows,
             cols,
+            scroll_offset: 0,
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
         }
     }
 
-    pub fn send_input(&self, text: &str) {
+    pub fn send_input(&mut self, text: &str) {
+        self.scroll_offset = 0;
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(text.as_bytes());
             let _ = w.flush();
@@ -244,32 +248,37 @@ impl TerminalSession {
     }
 
     pub fn poll_updates(&mut self) {
+        let mut received = false;
         while let Ok(bytes) = self.rx.try_recv() {
             self.parser.process(&bytes);
+            received = true;
+        }
+        if received && self.scroll_offset == 0 {
+            self.parser.set_scrollback(0);
         }
     }
 
-    fn is_cell_selected(&self, r: u16, c: u16) -> bool {
+    fn is_cell_selected(&self, abs_line: i64, c: u16) -> bool {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
             if start == end {
                 return false;
             }
-            let (mut r1, mut c1) = start;
-            let (mut r2, mut c2) = end;
-            if r1 > r2 || (r1 == r2 && c1 > c2) {
-                std::mem::swap(&mut r1, &mut r2);
+            let (mut l1, mut c1) = start;
+            let (mut l2, mut c2) = end;
+            if l1 > l2 || (l1 == l2 && c1 > c2) {
+                std::mem::swap(&mut l1, &mut l2);
                 std::mem::swap(&mut c1, &mut c2);
             }
-            if r < r1 || r > r2 {
+            if abs_line < l1 || abs_line > l2 {
                 return false;
             }
-            if r == r1 && r == r2 {
+            if abs_line == l1 && abs_line == l2 {
                 return c >= c1 && c <= c2;
             }
-            if r == r1 {
+            if abs_line == l1 {
                 return c >= c1;
             }
-            if r == r2 {
+            if abs_line == l2 {
                 return c <= c2;
             }
             true
@@ -278,25 +287,32 @@ impl TerminalSession {
         }
     }
 
-    fn extract_selected_text(&self) -> String {
+    fn extract_selected_text(&mut self, max_scroll: usize) -> String {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
-            let (mut r1, mut c1) = start;
-            let (mut r2, mut c2) = end;
-            if r1 > r2 || (r1 == r2 && c1 > c2) {
-                std::mem::swap(&mut r1, &mut r2);
+            let (mut l1, mut c1) = start;
+            let (mut l2, mut c2) = end;
+            if l1 > l2 || (l1 == l2 && c1 > c2) {
+                std::mem::swap(&mut l1, &mut l2);
                 std::mem::swap(&mut c1, &mut c2);
             }
 
-            let screen = self.parser.screen();
             let mut result = String::new();
 
-            for r in r1..=r2 {
-                let start_c = if r == r1 { c1 } else { 0 };
-                let end_c = if r == r2 { c2 } else { self.cols.saturating_sub(1) };
+            for l in l1..=l2 {
+                let needed_offset = (max_scroll as i64 - l).max(0) as usize;
+                self.parser.set_scrollback(needed_offset);
+                let screen = self.parser.screen();
+
+                let screen_r = (l - (max_scroll as i64 - needed_offset as i64)).clamp(0, self.rows.saturating_sub(1) as i64) as u16;
+                let start_c = if l == l1 { c1 } else { 0 };
+                let end_c = if l == l2 { c2 } else { self.cols.saturating_sub(1) };
                 let mut line = String::new();
 
                 for c in start_c..=end_c {
-                    if let Some(cell) = screen.cell(r, c) {
+                    if let Some(cell) = screen.cell(screen_r, c) {
+                        if cell.is_wide_continuation() {
+                            continue;
+                        }
                         let text = cell.contents();
                         if text.is_empty() {
                             line.push(' ');
@@ -306,57 +322,60 @@ impl TerminalSession {
                     }
                 }
                 result.push_str(line.trim_end());
-                if r != r2 {
+                if l != l2 {
                     result.push('\n');
                 }
             }
+
+            // Restore user's current scroll view
+            self.parser.set_scrollback(self.scroll_offset);
             result
         } else {
             String::new()
         }
     }
 
-    fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+    fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings, max_scroll: usize) {
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
-                    self.send_input("\x03"); // Cancel line/command
+                    self.send_input("\x03");
                     return;
                 }
                 if i.key_pressed(egui::Key::X) {
-                    self.send_input("\x18"); // Cancel
+                    self.send_input("\x18");
                     return;
                 }
                 if i.key_pressed(egui::Key::U) {
-                    self.send_input("\x15"); // Clear line backwards
+                    self.send_input("\x15");
                     return;
                 }
                 if i.key_pressed(egui::Key::K) {
-                    self.send_input("\x0b"); // Kill line forwards
+                    self.send_input("\x0b");
                     return;
                 }
                 if i.key_pressed(egui::Key::L) {
-                    self.send_input("\x0c"); // Clear screen
+                    self.send_input("\x0c");
                     return;
                 }
                 if i.key_pressed(egui::Key::D) {
-                    self.send_input("\x04"); // EOF
+                    self.send_input("\x04");
                     return;
                 }
                 if i.key_pressed(egui::Key::Z) {
-                    self.send_input("\x1a"); // Suspend
+                    self.send_input("\x1a");
                     return;
                 }
                 if i.key_pressed(egui::Key::A) {
-                    self.send_input("\x01"); // Start of line
+                    self.send_input("\x01");
                     return;
                 }
                 if i.key_pressed(egui::Key::E) {
-                    self.send_input("\x05"); // End of line
+                    self.send_input("\x05");
                     return;
                 }
                 if i.key_pressed(egui::Key::W) {
-                    self.send_input("\x17"); // Delete word
+                    self.send_input("\x17");
                     return;
                 }
             }
@@ -388,6 +407,28 @@ impl TerminalSession {
                         if *key == egui::Key::Escape {
                             self.send_input("\x1b");
                             continue;
+                        }
+
+                        // Shift + Page Navigation for Scrollback History
+                        if modifiers.shift {
+                            if *key == egui::Key::PageUp {
+                                let jump = (self.rows.saturating_sub(2) as usize).max(1);
+                                self.scroll_offset = (self.scroll_offset + jump).min(max_scroll);
+                                continue;
+                            }
+                            if *key == egui::Key::PageDown {
+                                let jump = (self.rows.saturating_sub(2) as usize).max(1);
+                                self.scroll_offset = self.scroll_offset.saturating_sub(jump);
+                                continue;
+                            }
+                            if *key == egui::Key::Home {
+                                self.scroll_offset = max_scroll;
+                                continue;
+                            }
+                            if *key == egui::Key::End {
+                                self.scroll_offset = 0;
+                                continue;
+                            }
                         }
 
                         if (modifiers.shift && *key == egui::Key::Insert)
@@ -454,6 +495,7 @@ impl TerminalSession {
                         }
 
                         if let Some(b) = bytes {
+                            self.scroll_offset = 0;
                             if let Ok(mut w) = self.writer.lock() {
                                 let _ = w.write_all(&b);
                                 let _ = w.flush();
@@ -472,15 +514,25 @@ impl TerminalSession {
         settings: &AppSettings,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        self.handle_keyboard_events(ui.ctx(), settings);
+        // Query max available scrollback lines from vt100 engine
+        self.parser.set_scrollback(usize::MAX);
+        let max_scroll = self.parser.screen().scrollback();
+        self.scroll_offset = self.scroll_offset.min(max_scroll);
+        self.parser.set_scrollback(self.scroll_offset);
+
+        self.handle_keyboard_events(ui.ctx(), settings, max_scroll);
 
         let font_size = 14.0;
         let char_width = 8.4;
         let row_height = 17.5;
+        let scrollbar_width = 14.0;
+        let inner_padding = 16.0;
 
         let avail = ui.available_size();
-        let new_cols = ((avail.x - 20.0) / char_width).max(20.0) as u16;
-        let new_rows = ((avail.y - 20.0) / row_height).max(5.0) as u16;
+        let usable_w = (avail.x - inner_padding - scrollbar_width).max(120.0);
+        let usable_h = (avail.y - inner_padding).max(60.0);
+        let new_cols = ((usable_w / char_width).floor() as u16).max(20);
+        let new_rows = ((usable_h / row_height).floor() as u16).max(5);
 
         if new_cols != self.cols || new_rows != self.rows {
             self.cols = new_cols;
@@ -496,44 +548,120 @@ impl TerminalSession {
             }
         }
 
+        let term_grid_size = egui::vec2(
+            self.cols as f32 * char_width,
+            self.rows as f32 * row_height,
+        );
+        let total_size = egui::vec2(term_grid_size.x + scrollbar_width + 6.0, term_grid_size.y);
+
         egui::Frame::none()
             .fill(COLOR_BG_MAIN)
-            .inner_margin(egui::Margin::same(10.0))
+            .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui| {
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(
-                        self.cols as f32 * char_width,
-                        self.rows as f32 * row_height,
-                    ),
+                let (full_rect, response) = ui.allocate_exact_size(
+                    total_size,
                     egui::Sense::click_and_drag(),
+                );
+
+                let grid_rect = egui::Rect::from_min_size(full_rect.min, term_grid_size);
+                let sb_track = egui::Rect::from_min_max(
+                    egui::pos2(grid_rect.max.x + 4.0, grid_rect.min.y),
+                    egui::pos2(full_rect.max.x, grid_rect.max.y),
                 );
 
                 if response.clicked() || response.dragged() || !response.has_focus() {
                     response.request_focus();
                 }
 
+                let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
+                let is_hovered = full_rect.contains(pointer_pos);
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
 
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let rel_x = (pos.x - rect.min.x).max(0.0);
-                    let rel_y = (pos.y - rect.min.y).max(0.0);
-                    let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
-                    let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
+                // Mouse Wheel Scrolling
+                if is_hovered {
+                    let scroll_y = ui.input(|i| {
+                        if i.raw_scroll_delta.y != 0.0 {
+                            i.raw_scroll_delta.y
+                        } else {
+                            i.smooth_scroll_delta.y
+                        }
+                    });
 
-                    if response.drag_started_by(egui::PointerButton::Primary) {
-                        self.selection_start = Some((r, c));
-                        self.selection_end = Some((r, c));
-                        self.is_dragging_selection = true;
-                    } else if self.is_dragging_selection && is_primary_down {
-                        self.selection_end = Some((r, c));
+                    if scroll_y != 0.0 {
+                        let lines = ((scroll_y.abs() / 18.0).round() as usize).max(1) * 3;
+                        if scroll_y > 0.0 {
+                            self.scroll_offset = (self.scroll_offset + lines).min(max_scroll);
+                        } else {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+                        }
+                        self.parser.set_scrollback(self.scroll_offset);
+
+                        // If user is actively dragging while scrolling with wheel, dynamically extend selection
+                        if self.is_dragging_selection && is_primary_down {
+                            let visible_top = max_scroll as i64 - self.scroll_offset as i64;
+                            let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
+                            let rel_y = (pointer_pos.y - grid_rect.min.y).clamp(0.0, grid_rect.height() - 1.0);
+                            let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
+                            let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
+                            self.selection_end = Some((visible_top + r as i64, c));
+                        }
+                        ui.ctx().request_repaint();
                     }
                 }
 
+                // Selection & Drag Auto-scrolling
+                let visible_top_line = max_scroll as i64 - self.scroll_offset as i64;
+
+                if self.is_dragging_selection && is_primary_down {
+                    if pointer_pos.y < grid_rect.min.y {
+                        // Dragged above the top -> auto-scroll up
+                        let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
+                        let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
+                        self.scroll_offset = (self.scroll_offset + auto_scroll_lines).min(max_scroll);
+                        self.parser.set_scrollback(self.scroll_offset);
+
+                        let new_top = max_scroll as i64 - self.scroll_offset as i64;
+                        self.selection_end = Some((new_top, 0));
+                        ui.ctx().request_repaint();
+                    } else if pointer_pos.y > grid_rect.max.y {
+                        // Dragged below the bottom -> auto-scroll down
+                        let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
+                        let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
+                        self.scroll_offset = self.scroll_offset.saturating_sub(auto_scroll_lines);
+                        self.parser.set_scrollback(self.scroll_offset);
+
+                        let new_top = max_scroll as i64 - self.scroll_offset as i64;
+                        let bottom_line = new_top + self.rows.saturating_sub(1) as i64;
+                        self.selection_end = Some((bottom_line, self.cols.saturating_sub(1)));
+                        ui.ctx().request_repaint();
+                    } else {
+                        // Pointer is within vertical bounds
+                        let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
+                        let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
+                        let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
+                        let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
+                        self.selection_end = Some((visible_top_line + r as i64, c));
+                    }
+                } else if let Some(pos) = response.interact_pointer_pos() {
+                    if grid_rect.contains(pos) && response.drag_started_by(egui::PointerButton::Primary) {
+                        let rel_x = (pos.x - grid_rect.min.x).max(0.0);
+                        let rel_y = (pos.y - grid_rect.min.y).max(0.0);
+                        let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
+                        let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
+                        let abs_l = visible_top_line + r as i64;
+
+                        self.selection_start = Some((abs_l, c));
+                        self.selection_end = Some((abs_l, c));
+                        self.is_dragging_selection = true;
+                    }
+                }
+
+                // Mouse release after dragging selection
                 if self.is_dragging_selection && !is_primary_down {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
                         if start != end && settings.copy_on_select {
-                            let selected = self.extract_selected_text();
+                            let selected = self.extract_selected_text(max_scroll);
                             if !selected.trim().is_empty() {
                                 set_system_clipboard_text(&selected);
                                 let preview = if selected.len() > 24 {
@@ -548,18 +676,16 @@ impl TerminalSession {
                             }
                         }
                     }
+                }
+
+                // Simple click clears active selection
+                if response.clicked_by(egui::PointerButton::Primary)
+                    && !sb_track.contains(pointer_pos)
+                    && !self.is_dragging_selection
+                {
                     self.selection_start = None;
                     self.selection_end = None;
                 }
-
-                if response.clicked_by(egui::PointerButton::Primary) {
-                    self.selection_start = None;
-                    self.selection_end = None;
-                    self.is_dragging_selection = false;
-                }
-
-                let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
-                let is_hovered = rect.contains(pointer_pos);
 
                 let right_clicked = response.clicked_by(egui::PointerButton::Secondary)
                     || response.secondary_clicked()
@@ -577,25 +703,73 @@ impl TerminalSession {
                     }
                 }
 
+                // Interactive Scrollbar
+                ui.painter().rect_filled(sb_track, 4.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6));
+
+                let sb_id = ui.id().with(self.id).with("term_sb");
+                let sb_resp = ui.interact(sb_track, sb_id, egui::Sense::click_and_drag());
+
+                if max_scroll > 0 {
+                    let total_lines = (max_scroll + self.rows as usize) as f32;
+                    let visible_ratio = (self.rows as f32 / total_lines).clamp(0.04, 1.0);
+                    let thumb_height = (sb_track.height() * visible_ratio).clamp(20.0, sb_track.height());
+                    let scroll_ratio = (self.scroll_offset as f32 / max_scroll as f32).clamp(0.0, 1.0);
+                    let thumb_y = sb_track.bottom() - thumb_height - scroll_ratio * (sb_track.height() - thumb_height);
+
+                    let sb_thumb = egui::Rect::from_min_size(
+                        egui::pos2(sb_track.left() + 1.0, thumb_y),
+                        egui::vec2(sb_track.width() - 2.0, thumb_height),
+                    );
+
+                    if sb_resp.clicked() || sb_resp.dragged() {
+                        if let Some(ptr) = sb_resp.interact_pointer_pos() {
+                            let rel_y = (sb_track.bottom() - ptr.y) / sb_track.height();
+                            self.scroll_offset = (rel_y.clamp(0.0, 1.0) * max_scroll as f32).round() as usize;
+                            self.scroll_offset = self.scroll_offset.min(max_scroll);
+                            self.parser.set_scrollback(self.scroll_offset);
+                            ui.ctx().request_repaint();
+                        }
+                    }
+
+                    let thumb_color = if sb_resp.dragged() {
+                        COLOR_ACCENT
+                    } else if sb_resp.hovered() {
+                        COLOR_ACCENT_HOVER
+                    } else if self.scroll_offset > 0 {
+                        COLOR_INDIGO
+                    } else {
+                        egui::Color32::from_rgb(55, 65, 81)
+                    };
+                    ui.painter().rect_filled(sb_thumb, 4.0, thumb_color);
+                }
+
+                // Render Terminal Screen Grid
                 let screen = self.parser.screen();
                 let (rows, cols) = screen.size();
                 let (cursor_r, cursor_c) = screen.cursor_position();
                 let hide_cursor = screen.hide_cursor();
 
                 let show_cursor = !hide_cursor
+                    && self.scroll_offset == 0
                     && (!settings.cursor_blink
                         || (ui.input(|i| (i.time * 2.0).fract() < 0.5)));
 
                 for r in 0..rows {
-                    let row_y = rect.min.y + r as f32 * row_height;
+                    let row_y = grid_rect.min.y + r as f32 * row_height;
+                    let cell_abs_line = visible_top_line + r as i64;
                     let mut job = egui::text::LayoutJob::default();
                     job.wrap.max_width = f32::INFINITY;
 
                     for c in 0..cols {
-                        let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
-                        let is_selected = self.is_cell_selected(r, c);
                         let default_cell = vt100::Cell::default();
                         let cell = screen.cell(r, c).unwrap_or(&default_cell);
+
+                        if cell.is_wide_continuation() {
+                            continue;
+                        }
+
+                        let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
+                        let is_selected = self.is_cell_selected(cell_abs_line, c);
                         let cell_text = cell.contents();
                         let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
 
@@ -630,7 +804,39 @@ impl TerminalSession {
                     }
 
                     let galley = ui.painter().layout_job(job);
-                    ui.painter().galley(egui::pos2(rect.min.x, row_y), galley, egui::Color32::WHITE);
+                    ui.painter().galley(egui::pos2(grid_rect.min.x, row_y), galley, egui::Color32::WHITE);
+                }
+
+                // Floating Jump to Bottom Chip
+                if self.scroll_offset > 0 {
+                    let chip_w = 175.0;
+                    let chip_h = 24.0;
+                    let chip_rect = egui::Rect::from_min_size(
+                        egui::pos2(grid_rect.max.x - chip_w - 8.0, grid_rect.max.y - chip_h - 6.0),
+                        egui::vec2(chip_w, chip_h),
+                    );
+                    let chip_resp = ui.interact(chip_rect, ui.id().with(self.id).with("jump_chip"), egui::Sense::click());
+                    let is_chip_hov = chip_resp.hovered();
+
+                    ui.painter().rect(
+                        chip_rect,
+                        4.0,
+                        if is_chip_hov { COLOR_BG_CARD } else { COLOR_BG_PANEL },
+                        egui::Stroke::new(1.0_f32, COLOR_ACCENT),
+                    );
+                    ui.painter().text(
+                        chip_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("↓ Scrolled (-{}) • Live View", self.scroll_offset),
+                        egui::FontId::proportional(12.0),
+                        if is_chip_hov { COLOR_ACCENT_HOVER } else { COLOR_ACCENT },
+                    );
+
+                    if chip_resp.clicked() {
+                        self.scroll_offset = 0;
+                        self.parser.set_scrollback(0);
+                        ui.ctx().request_repaint();
+                    }
                 }
             });
     }

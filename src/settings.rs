@@ -7,6 +7,10 @@ pub enum BackspaceSequence {
     Backspace8, // ^H (0x08)
 }
 
+fn default_scrollback_lines() -> usize {
+    10000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub default_shell: String,
@@ -38,6 +42,9 @@ pub struct AppSettings {
     pub show_command_suggestions: bool,
     pub auto_reconnect_terminal: bool,
     pub backspace_sequence: BackspaceSequence,
+
+    #[serde(default = "default_scrollback_lines")]
+    pub scrollback_lines: usize,
 }
 
 impl Default for AppSettings {
@@ -79,6 +86,7 @@ impl Default for AppSettings {
             show_command_suggestions: true,
             auto_reconnect_terminal: false,
             backspace_sequence: BackspaceSequence::Delete127,
+            scrollback_lines: 10000,
         }
     }
 }
