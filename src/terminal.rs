@@ -216,7 +216,6 @@ impl TerminalSession {
             return;
         }
 
-        // Check if target offset is safe to read
         self.parser.set_scrollback(target);
         let valid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = self.parser.screen().cell(0, 0);
@@ -227,7 +226,6 @@ impl TerminalSession {
             return;
         }
 
-        // Binary search the exact maximum safe offset currently in vt100 history
         let mut low = 0;
         let mut high = target;
         let mut best = 0;
@@ -259,6 +257,33 @@ impl TerminalSession {
         self.safe_set_scrollback(0);
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(text.as_bytes());
+            let _ = w.flush();
+        }
+    }
+
+    /// Properly sends pasted text: uses Bracketed Paste Mode if enabled by the application,
+    /// or normalizes newlines to \r (Carriage Return) to prevent staircase indentation bugs.
+    pub fn send_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.safe_set_scrollback(0);
+
+        let bracketed = self.parser.screen().bracketed_paste();
+        let payload = if bracketed {
+            // Strip raw ESC to avoid escape sequence injection attacks
+            let sanitized = text.replace('\x1b', "");
+            // Normalize CRLF or lone CR to standard LF inside bracketed paste
+            let normalized = sanitized.replace("\r\n", "\n").replace('\r', "\n");
+            format!("\x1b[200~{}\x1b[201~", normalized)
+        } else {
+            // When bracketed paste is off, standard terminal convention (Alacritty, Kitty, WezTerm):
+            // Deliver line breaks as carriage returns (\r) to return to column 0 without staircase effect
+            text.replace("\r\n", "\r").replace('\n', "\r")
+        };
+
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(payload.as_bytes());
             let _ = w.flush();
         }
     }
@@ -316,6 +341,40 @@ impl TerminalSession {
         } else {
             false
         }
+    }
+
+    fn find_word_bounds(&self, r: u16, c: u16) -> Option<(u16, u16)> {
+        let screen = self.parser.screen();
+        let cols = self.cols;
+        if c >= cols {
+            return None;
+        }
+
+        let is_word_char = |col: u16| -> bool {
+            if let Some(cell) = screen.cell(r, col) {
+                let text = cell.contents();
+                if let Some(ch) = text.chars().next() {
+                    return ch.is_alphanumeric() || ch == '_' || ch == '-' || ch == '.' || ch == '/' || ch == ':';
+                }
+            }
+            false
+        };
+
+        if !is_word_char(c) {
+            return Some((c, c));
+        }
+
+        let mut start_c = c;
+        while start_c > 0 && is_word_char(start_c - 1) {
+            start_c -= 1;
+        }
+
+        let mut end_c = c;
+        while end_c + 1 < cols && is_word_char(end_c + 1) {
+            end_c += 1;
+        }
+
+        Some((start_c, end_c))
     }
 
     fn extract_selected_text(&mut self) -> String {
@@ -416,7 +475,7 @@ impl TerminalSession {
                         self.send_input("\x18");
                     }
                     egui::Event::Paste(text) => {
-                        self.send_input(text);
+                        self.send_paste(text);
                     }
                     egui::Event::Text(text) => {
                         if !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
@@ -459,7 +518,7 @@ impl TerminalSession {
                             || (modifiers.ctrl && modifiers.shift && *key == egui::Key::V)
                         {
                             if let Some(clip) = get_system_clipboard_text() {
-                                self.send_input(&clip);
+                                self.send_paste(&clip);
                             }
                             continue;
                         }
@@ -539,8 +598,17 @@ impl TerminalSession {
         self.safe_set_scrollback(self.scroll_offset);
 
         let font_size = 14.0;
-        let char_width = 8.4;
-        let row_height = 17.5;
+        let font_id = egui::FontId::monospace(font_size);
+
+        // Dynamically measure the exact monospace font metrics in points at the current zoom factor
+        let probe = ui.painter().layout_no_wrap(
+            "MMMMMMMMMMMMMMMMMMMM".to_string(),
+            font_id.clone(),
+            egui::Color32::WHITE,
+        );
+        let char_width = (probe.size().x / 20.0).max(1.0);
+        let row_height = probe.size().y.max(1.0);
+
         let scrollbar_width = 14.0;
         let inner_padding = 16.0;
 
@@ -601,7 +669,13 @@ impl TerminalSession {
                 let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
                 let is_hovered = full_rect.contains(pointer_pos);
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
+                let is_primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+                let is_primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
                 let is_ctrl = ui.input(|i| i.modifiers.ctrl);
+
+                if grid_rect.contains(pointer_pos) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                }
 
                 if response.clicked()
                     || response.secondary_clicked()
@@ -642,14 +716,64 @@ impl TerminalSession {
                         if self.is_dragging_selection && is_primary_down {
                             let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                             let rel_y = (pointer_pos.y - grid_rect.min.y).clamp(0.0, grid_rect.height() - 1.0);
-                            let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
-                            let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
+                            let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
+                            let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
                             self.selection_end = Some((r as i64, c));
                         }
                         ui.ctx().request_repaint();
                     }
                 }
 
+                // Double-click and triple-click selection handling
+                if response.triple_clicked() && grid_rect.contains(pointer_pos) {
+                    let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
+                    let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
+                    self.selection_start = Some((r as i64, 0));
+                    self.selection_end = Some((r as i64, self.cols.saturating_sub(1)));
+                    self.is_dragging_selection = false;
+                    if settings.copy_on_select {
+                        let selected = self.extract_selected_text();
+                        if !selected.trim().is_empty() {
+                            set_system_clipboard_text(&selected);
+                            *toast = Some(("Copied line".to_string(), std::time::Instant::now()));
+                        }
+                    }
+                } else if response.double_clicked() && grid_rect.contains(pointer_pos) {
+                    let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
+                    let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
+                    let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
+                    let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
+
+                    if let Some((start_c, end_c)) = self.find_word_bounds(r, c) {
+                        self.selection_start = Some((r as i64, start_c));
+                        self.selection_end = Some((r as i64, end_c));
+                        self.is_dragging_selection = false;
+                        if settings.copy_on_select {
+                            let selected = self.extract_selected_text();
+                            if !selected.trim().is_empty() {
+                                set_system_clipboard_text(&selected);
+                                let preview = if selected.len() > 24 {
+                                    format!("{}...", &selected[..21].replace('\n', " "))
+                                } else {
+                                    selected.replace('\n', " ")
+                                };
+                                *toast = Some((format!("Copied: \"{}\"", preview), std::time::Instant::now()));
+                            }
+                        }
+                    }
+                } else if is_primary_pressed && grid_rect.contains(pointer_pos) && !sb_track.contains(pointer_pos) {
+                    // Instant pixel-accurate selection initiation on click down
+                    let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
+                    let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
+                    let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
+                    let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
+
+                    self.selection_start = Some((r as i64, c));
+                    self.selection_end = Some((r as i64, c));
+                    self.is_dragging_selection = true;
+                }
+
+                // Continuous, smooth selection update while dragging
                 if self.is_dragging_selection && is_primary_down {
                     if pointer_pos.y < grid_rect.min.y {
                         let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
@@ -666,27 +790,21 @@ impl TerminalSession {
                     } else {
                         let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                         let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
-                        let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
-                        let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
+                        let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
+                        let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
                         self.selection_end = Some((r as i64, c));
-                    }
-                } else if let Some(pos) = response.interact_pointer_pos() {
-                    if grid_rect.contains(pos) && response.drag_started_by(egui::PointerButton::Primary) {
-                        let rel_x = (pos.x - grid_rect.min.x).max(0.0);
-                        let rel_y = (pos.y - grid_rect.min.y).max(0.0);
-                        let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
-                        let r = ((rel_y / row_height) as u16).min(self.rows.saturating_sub(1));
-
-                        self.selection_start = Some((r as i64, c));
-                        self.selection_end = Some((r as i64, c));
-                        self.is_dragging_selection = true;
                     }
                 }
 
-                if self.is_dragging_selection && !is_primary_down {
+                // Release selection drag
+                if self.is_dragging_selection && is_primary_released {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
-                        if start != end && settings.copy_on_select {
+                        if start == end {
+                            // User clicked without dragging: clear selection cleanly
+                            self.selection_start = None;
+                            self.selection_end = None;
+                        } else if settings.copy_on_select {
                             let selected = self.extract_selected_text();
                             if !selected.trim().is_empty() {
                                 set_system_clipboard_text(&selected);
@@ -704,14 +822,6 @@ impl TerminalSession {
                     }
                 }
 
-                if response.clicked_by(egui::PointerButton::Primary)
-                    && !sb_track.contains(pointer_pos)
-                    && !self.is_dragging_selection
-                {
-                    self.selection_start = None;
-                    self.selection_end = None;
-                }
-
                 let right_clicked = response.clicked_by(egui::PointerButton::Secondary)
                     || response.secondary_clicked()
                     || (is_hovered && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary) || i.pointer.button_released(egui::PointerButton::Secondary)));
@@ -719,7 +829,7 @@ impl TerminalSession {
                 if settings.paste_on_right_click && right_clicked {
                     if let Some(clip) = get_system_clipboard_text() {
                         if !clip.is_empty() {
-                            self.send_input(&clip);
+                            self.send_paste(&clip);
                             *toast = Some((
                                 "Pasted from clipboard".to_string(),
                                 std::time::Instant::now(),
@@ -818,7 +928,7 @@ impl TerminalSession {
                                 display_char,
                                 0.0,
                                 egui::TextFormat {
-                                    font_id: egui::FontId::monospace(font_size),
+                                    font_id: font_id.clone(),
                                     color: fg,
                                     background: if bg != theme.bg_main_color() {
                                         bg
