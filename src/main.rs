@@ -12,6 +12,8 @@ use settings::{AppSettings, BackspaceSequence};
 use sftp::{SftpManager, SftpTarget};
 use ssh::{SshAuthType, SshProfile, SshStore};
 use std::path::Path;
+use std::sync::mpsc::{channel, Receiver};
+use std::thread;
 use terminal::{SessionType, TerminalSession};
 use theme::*;
 
@@ -83,6 +85,18 @@ fn parse_cli_arguments() -> CliLaunchOptions {
     opts
 }
 
+fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
+    let parse_v = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split('.')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .collect()
+    };
+    let l_parts = parse_v(latest_tag);
+    let c_parts = parse_v(current_ver);
+    l_parts > c_parts
+}
+
 struct AppState {
     settings: AppSettings,
     ssh_store: SshStore,
@@ -96,6 +110,11 @@ struct AppState {
 
     // Toast feedback: (Message, Timestamp)
     toast_message: Option<(String, std::time::Instant)>,
+
+    // Auto-update state
+    available_update: Option<String>,
+    update_rx: Option<Receiver<Option<String>>>,
+    is_checking_update: bool,
 
     // Profile Modal (Create / Edit)
     show_profile_modal: bool,
@@ -113,9 +132,6 @@ struct AppState {
     keygen_name: String,
     generated_pub_key: String,
     keygen_status: String,
-
-    // Settings search
-    settings_search: String,
 }
 
 impl AppState {
@@ -135,6 +151,10 @@ impl AppState {
             settings_category: SettingsCategory::Terminal,
             toast_message: None,
 
+            available_update: None,
+            update_rx: None,
+            is_checking_update: false,
+
             show_profile_modal: false,
             editing_profile_id: None,
             new_ssh_name: String::new(),
@@ -149,9 +169,10 @@ impl AppState {
             keygen_name: "prod_server".to_string(),
             generated_pub_key: String::new(),
             keygen_status: String::new(),
-
-            settings_search: String::new(),
         };
+
+        // Check for updates if opened for the first time today
+        app.trigger_update_check(false, cc.egui_ctx.clone());
 
         // Handle CLI Launch Parameters
         if let Some(dir) = cli.working_directory {
@@ -163,6 +184,53 @@ impl AppState {
         }
 
         app
+    }
+
+    fn trigger_update_check(&mut self, force: bool, ctx: egui::Context) {
+        if !self.settings.check_updates && !force {
+            return;
+        }
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if !force && self.settings.last_update_check_date == today {
+            return;
+        }
+
+        self.settings.last_update_check_date = today;
+        self.settings.save();
+
+        self.is_checking_update = true;
+        let (tx, rx) = channel::<Option<String>>();
+        self.update_rx = Some(rx);
+
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+        thread::spawn(move || {
+            let output = std::process::Command::new("curl")
+                .args([
+                    "-s",
+                    "-H", "User-Agent: AZTerm-App",
+                    "https://api.github.com/repos/AZBrandCanada/azTerm/releases/latest",
+                ])
+                .output();
+
+            let mut update_found: Option<String> = None;
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                            if is_newer_version(tag, &current_version) {
+                                update_found = Some(tag.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = tx.send(update_found);
+            ctx.request_repaint();
+        });
     }
 
     fn handle_ssh_url_launch(&mut self, url: &str, ctx: egui::Context) {
@@ -344,6 +412,16 @@ impl eframe::App for AppState {
             s.poll_updates(&self.settings);
         }
 
+        // Poll background update checks
+        if let Some(ref rx) = self.update_rx {
+            if let Ok(res) = rx.try_recv() {
+                self.is_checking_update = false;
+                if let Some(tag) = res {
+                    self.available_update = Some(tag);
+                }
+            }
+        }
+
         // Live sync active tab SSH profile with SFTP pane
         self.sync_sftp_with_active_session();
 
@@ -467,6 +545,25 @@ impl eframe::App for AppState {
                         } else {
                             "SFTP split panel closed"
                         });
+                    }
+
+                    // Update Notification Button in Status Bar
+                    if let Some(ref update_tag) = self.available_update {
+                        ui.separator();
+                        let btn = egui::Button::new(
+                            egui::RichText::new(format!("⭐ Update Available: {}", update_tag))
+                                .small()
+                                .strong()
+                                .color(COLOR_ACCENT),
+                        )
+                        .fill(COLOR_BG_CARD)
+                        .stroke(egui::Stroke::new(1.0, COLOR_ACCENT));
+
+                        let resp = ui.add(btn);
+                        if resp.on_hover_text(format!("Click to open release {} on GitHub", update_tag)).clicked() {
+                            let url = format!("https://github.com/AZBrandCanada/azTerm/releases/tag/{}", update_tag);
+                            ctx.open_url(egui::OpenUrl::new_tab(url));
+                        }
                     }
 
                     if let Some(ref status) = self.sftp.transfer_status {
@@ -906,7 +1003,7 @@ impl eframe::App for AppState {
                     });
                 }
                 ActiveView::Settings => {
-                    // Professional Sidebar + Settings Panel Layout
+                    // Sidebar + Settings Panel Layout
                     ui.columns(2, |columns| {
                         columns[0].set_max_width(210.0);
                         columns[0].vertical(|ui| {
@@ -977,7 +1074,6 @@ impl eframe::App for AppState {
                                             changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut self.settings.copy_on_select);
                                             changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut self.settings.paste_on_right_click);
                                             
-                                            // Placeholders
                                             setting_row_disabled(ui, "Right Click Auto Select Word", "Double click/right click to select full alphanumeric words.", self.settings.right_click_select_word);
                                             setting_row_disabled(ui, "Hold Ctrl / Meta to Open Links", "Require modifier key press before launching detected URL hyperlinks.", self.settings.must_hold_ctrl_for_links);
                                             setting_row_disabled(ui, "Command Suggestions", "Display autocompletion hints based on history.", self.settings.show_command_suggestions);
@@ -1031,7 +1127,6 @@ impl eframe::App for AppState {
                                             ui.separator();
                                             ui.add_space(8.0);
 
-                                            // Placeholders
                                             setting_row_disabled(ui, "Terminal Log Directory", "Target filesystem folder for saved session transcripts.", false);
                                             setting_row_disabled(ui, "Save Terminal Session Logs", "Write all output streams into timestamped log files.", self.settings.save_terminal_log);
                                             setting_row_disabled(ui, "Timestamp Log Entries", "Prefix each logged output line with local ISO timestamp.", self.settings.add_timestamp_to_log);
@@ -1043,7 +1138,6 @@ impl eframe::App for AppState {
 
                                             changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut self.settings.show_sftp_split_view);
                                             
-                                            // Placeholders
                                             setting_row_disabled(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", self.settings.sftp_path_sync);
                                             setting_row_disabled(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", self.settings.auto_refresh_sftp);
                                             setting_row_disabled(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", self.settings.show_hidden_sftp);
@@ -1063,19 +1157,41 @@ impl eframe::App for AppState {
                                         }
                                         SettingsCategory::System => {
                                             ui.label(egui::RichText::new("Application & System").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Window behavior, multi-instance options, and security masks.").small().color(COLOR_TEXT_MUTED));
+                                            ui.label(egui::RichText::new("Window behavior, multi-instance options, and update checks.").small().color(COLOR_TEXT_MUTED));
                                             ui.add_space(12.0);
 
                                             changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
+                                            changed |= setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates);
+
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Manual Update Check").strong().color(COLOR_TEXT_PRIMARY));
+                                                    let status_text = if self.is_checking_update {
+                                                        "Checking GitHub releases...".to_string()
+                                                    } else if let Some(ref tag) = self.available_update {
+                                                        format!("New version available: {}", tag)
+                                                    } else {
+                                                        format!("Current version is v{}", env!("CARGO_PKG_VERSION"))
+                                                    };
+                                                    ui.label(egui::RichText::new(status_text).small().color(COLOR_TEXT_MUTED));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.button("Check for Updates Now").clicked() {
+                                                        self.trigger_update_check(true, ctx.clone());
+                                                        self.set_toast("Checking for updates...");
+                                                    }
+                                                });
+                                            });
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.add_space(6.0);
                                             
-                                            // Placeholders
                                             setting_row_disabled(ui, "Allow Multi-Instance Execution", "Permit launching multiple independent AZTerm window processes.", self.settings.allow_multi_instance);
                                             setting_row_disabled(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", self.settings.confirm_before_exit);
                                             setting_row_disabled(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", self.settings.hide_ip);
                                             setting_row_disabled(ui, "Use System Title Bar", "Delegate window decorations to your desktop window manager.", self.settings.use_system_titlebar);
                                             setting_row_disabled(ui, "Disable Connection History", "Do not cache recent SSH session targets in SQLite.", self.settings.disable_connection_history);
                                             setting_row_disabled(ui, "Debug Logging Mode", "Emit verbose PTY and layout traces to stderr.", self.settings.debug_mode);
-                                            setting_row_disabled(ui, "Check for Updates on Startup", "Query upstream GitHub releases for new version tags.", self.settings.check_updates);
                                         }
                                     }
                                 });
