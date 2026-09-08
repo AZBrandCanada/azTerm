@@ -14,20 +14,27 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
         return;
     }
 
-    let available_rect = ui.available_rect_before_wrap();
+    let total_area = ui.available_rect_before_wrap();
+
+    // Side-by-side partitioning: Terminal takes 65% and SFTP drawer takes 35%
     let (term_area_rect, sftp_pane_rect) = if app.settings.show_sftp_split_view {
-        let w = available_rect.width() * 0.65;
+        let split_w = (total_area.width() * 0.65).max(120.0);
+        let sftp_w = (total_area.width() - split_w - 6.0).max(120.0);
         (
-            egui::Rect::from_min_size(available_rect.min, egui::vec2(w, available_rect.height())),
-            Some(egui::Rect::from_min_size(egui::pos2(available_rect.min.x + w, available_rect.min.y), egui::vec2(available_rect.width() - w, available_rect.height()))),
+            egui::Rect::from_min_size(total_area.min, egui::vec2(split_w, total_area.height())),
+            Some(egui::Rect::from_min_size(
+                egui::pos2(total_area.min.x + split_w + 6.0, total_area.min.y),
+                egui::vec2(sftp_w, total_area.height()),
+            )),
         )
     } else {
-        (available_rect, None)
+        (total_area, None)
     };
 
     let mut actions = Vec::new();
     let mut pane_rects = Vec::new();
 
+    // Render terminal workspace directly into term_area_rect without double-allocating UI wrappers
     if let Some(ws) = app.workspaces.get_mut(app.active_workspace_idx) {
         let is_multi_pane = !ws.is_single_pane();
         let max_session = ws.maximized_session;
@@ -225,19 +232,29 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
         }
     }
 
+    // Render SFTP drawer cleanly on the right
     if let Some(sftp_rect) = sftp_pane_rect {
-        app.theme.card_frame().show(ui, |ui| {
-            ui.allocate_ui_at_rect(sftp_rect, |ui| {
+        ui.allocate_ui_at_rect(sftp_rect, |ui| {
+            app.theme.card_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("SFTP Sync Pane");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Upload Selected").clicked() {
-                            app.sftp.upload_selected();
+                        let transfer_count = app.sftp.transfers.lock().map(|t| t.len()).unwrap_or(0);
+                        let badge_text = if transfer_count > 0 {
+                            format!("⇅ Transfers ({})", transfer_count)
+                        } else {
+                            "⇅ Transfers".to_string()
+                        };
+                        if ui.button(badge_text).clicked() {
+                            app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
                         }
                     });
                 });
                 ui.separator();
-                app.sftp.right_pane.render(ui, &app.theme);
+                let auth_req = app.sftp.right_pane.render(ui, &app.theme);
+                if let Some((p, pane_id)) = auth_req {
+                    app.open_ssh_auth_modal(p, pane_id, ctx.clone());
+                }
             });
         });
     }

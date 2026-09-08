@@ -15,6 +15,7 @@ use sftp::{SftpManager, SftpTarget};
 use ssh::{SshProfile, SshStore};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use terminal::{SessionType, TerminalSession};
 use theme::*;
@@ -226,6 +227,16 @@ fn handle_window_resize_borders(ctx: &egui::Context, is_maximized: bool) {
     }
 }
 
+pub struct SshAuthModalState {
+    pub profile: SshProfile,
+    pub output: Arc<Mutex<String>>,
+    pub writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    pub input_text: String,
+    pub show_plain: bool,
+    pub is_connected: bool,
+    pub target_pane_id: String,
+}
+
 pub struct AppState {
     pub settings: AppSettings,
     pub ssh_store: SshStore,
@@ -270,6 +281,8 @@ pub struct AppState {
     pub keygen_name: String,
     pub generated_pub_key: String,
     pub keygen_status: String,
+
+    pub ssh_auth_modal: Option<SshAuthModalState>,
 }
 
 impl AppState {
@@ -326,6 +339,8 @@ impl AppState {
             keygen_name: "prod_server".to_string(),
             generated_pub_key: String::new(),
             keygen_status: String::new(),
+
+            ssh_auth_modal: None,
         };
 
         app.trigger_update_check(false, cc.egui_ctx.clone());
@@ -339,6 +354,83 @@ impl AppState {
         }
 
         app
+    }
+
+    pub fn open_ssh_auth_modal(&mut self, profile: SshProfile, target_pane_id: String, ctx: egui::Context) {
+        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+        if socket_path.exists() {
+            if target_pane_id == "sftp_left" {
+                self.sftp.left_pane.refresh();
+            } else {
+                self.sftp.right_pane.refresh();
+            }
+            return;
+        }
+
+        let pty_system = portable_pty::native_pty_system();
+        let pair = match pty_system.openpty(portable_pty::PtySize {
+            rows: 16,
+            cols: 72,
+            pixel_width: 0,
+            pixel_height: 0,
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_toast(format!("Failed to open PTY: {}", e));
+                return;
+            }
+        };
+
+        let cmd = profile.to_command();
+        if let Err(e) = pair.slave.spawn_command(cmd) {
+            self.set_toast(format!("Failed to spawn SSH: {}", e));
+            return;
+        }
+
+        let mut reader = match pair.master.try_clone_reader() {
+            Ok(r) => r,
+            Err(e) => {
+                self.set_toast(format!("Failed to clone PTY reader: {}", e));
+                return;
+            }
+        };
+
+        let writer = match pair.master.take_writer() {
+            Ok(w) => Arc::new(Mutex::new(w)),
+            Err(e) => {
+                self.set_toast(format!("Failed to take PTY writer: {}", e));
+                return;
+            }
+        };
+
+        let output = Arc::new(Mutex::new(String::new()));
+        let output_clone = output.clone();
+        let ctx_clone = ctx.clone();
+
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let chunk = String::from_utf8_lossy(&buf[..n]);
+                if let Ok(mut text) = output_clone.lock() {
+                    text.push_str(&chunk);
+                }
+                ctx_clone.request_repaint();
+            }
+        });
+
+        self.ssh_auth_modal = Some(SshAuthModalState {
+            profile,
+            output,
+            writer,
+            input_text: String::new(),
+            show_plain: false,
+            is_connected: false,
+            target_pane_id,
+        });
     }
 
     pub fn trigger_update_check(&mut self, force: bool, ctx: egui::Context) {
@@ -928,7 +1020,15 @@ impl eframe::App for AppState {
             ui::modals::render_profile_modal(self, ctx);
         }
 
-        let modal_open = self.show_update_modal || self.show_profile_modal || self.show_keygen_modal;
+        if self.ssh_auth_modal.is_some() {
+            ui::modals::render_ssh_auth_modal(self, ctx);
+        }
+
+        let modal_open = self.show_update_modal
+            || self.show_profile_modal
+            || self.show_keygen_modal
+            || self.ssh_auth_modal.is_some();
+
         if self.active_view == ActiveView::Terminal && !modal_open {
             self.handle_terminal_shortcuts(ctx);
         }
@@ -951,6 +1051,9 @@ impl eframe::App for AppState {
         ui::navbar::render_top_nav(self, ctx);
         ui::navbar::render_tabs_bar(self, ctx);
         ui::navbar::render_status_bar(self, ctx);
+
+        // Always render transfer queue & history modal when toggled
+        self.sftp.render_transfer_history_window(ctx, &self.theme);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.theme.bg_main_color()))
