@@ -477,7 +477,7 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Line 1: Strip ALL Tab events from egui before any panel or button is evaluated!
+        // Intercept and strip Tab from egui's input queue before ANY widget runs
         let modal_open = self.show_update_modal || self.show_profile_modal || self.show_keygen_modal;
         if self.active_view == ActiveView::Terminal && !modal_open {
             let mut send_tab = false;
@@ -488,11 +488,11 @@ impl eframe::App for AppState {
                         if *pressed {
                             send_tab = true;
                         }
-                        false // Strip Tab from egui input events so nothing in egui ever sees Tab!
+                        false
                     }
                     egui::Event::Text(t) if t == "\t" => {
                         send_tab = true;
-                        false // Strip Text("\t") from egui
+                        false
                     }
                     _ => true,
                 });
@@ -520,7 +520,7 @@ impl eframe::App for AppState {
 
         self.sync_sftp_with_active_session();
 
-        // Top Navigation Bar (uses non-focusable custom widgets)
+        // Top Navigation Bar
         egui::TopBottomPanel::top("top_nav")
             .frame(egui::Frame::none().fill(COLOR_BG_PANEL).inner_margin(egui::Margin::symmetric(14.0, 8.0)))
             .show(ctx, |ui| {
@@ -557,11 +557,13 @@ impl eframe::App for AppState {
                     let mut tab_to_close: Option<usize> = None;
                     let avail_w = (ui.available_width() - 16.0).max(80.0);
                     let num_tabs = self.sessions.len().max(1) as f32;
-                    let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(65.0, 160.0);
-                    let max_chars = ((computed_tab_width - 26.0) / 7.2).max(3.0) as usize;
+                    let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(70.0, 160.0);
+                    let max_chars = ((computed_tab_width - 28.0) / 7.2).max(3.0) as usize;
 
+                    // Tab ScrollArea with hidden scrollbar to prevent covering close buttons
                     egui::ScrollArea::horizontal()
                         .auto_shrink([false, false])
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 for (i, session) in self.sessions.iter().enumerate() {
@@ -574,6 +576,7 @@ impl eframe::App for AppState {
 
                                     let (tab_clicked, close_clicked) = session_tab_chip(
                                         ui,
+                                        session.id,
                                         &label_text,
                                         is_active,
                                         computed_tab_width,

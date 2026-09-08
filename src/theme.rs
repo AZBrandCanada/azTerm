@@ -72,9 +72,10 @@ pub fn nav_action_button(ui: &mut egui::Ui, text: &str) -> bool {
     response.clicked()
 }
 
-// Custom session tab chip that NEVER steals keyboard Tab focus
+// Custom session tab chip with unique ID and unblocked close button
 pub fn session_tab_chip(
     ui: &mut egui::Ui,
+    id_salt: usize,
     title: &str,
     is_active: bool,
     width: f32,
@@ -82,8 +83,8 @@ pub fn session_tab_chip(
 ) -> (bool, bool) {
     let size = egui::vec2(width, 26.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let mut close_clicked = false;
-    let clicked = response.clicked();
+    let mut close_clicked = response.middle_clicked(); // Middle-click closes tab
+    let mut clicked = response.clicked();
 
     if ui.is_rect_visible(rect) {
         let bg = if is_active { COLOR_BG_CARD } else { COLOR_BG_MAIN };
@@ -97,19 +98,35 @@ pub fn session_tab_chip(
         let font_id = egui::TextStyle::Body.resolve(ui.style());
         let text_color = if is_active { COLOR_TEXT_PRIMARY } else { COLOR_TEXT_MUTED };
         let galley = ui.painter().layout_no_wrap(title.to_string(), font_id.clone(), text_color);
-        let text_pos = egui::pos2(rect.min.x + 6.0, rect.center().y - galley.size().y / 2.0);
+        let text_pos = egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0);
         ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
 
         if show_close {
             let close_rect = egui::Rect::from_center_size(
-                egui::pos2(rect.right() - 10.0, rect.center().y),
-                egui::vec2(14.0, 14.0),
+                egui::pos2(rect.right() - 12.0, rect.center().y),
+                egui::vec2(16.0, 16.0),
             );
-            let close_resp = ui.interact(close_rect, ui.id().with(title).with("close"), egui::Sense::click());
+            let close_resp = ui.interact(
+                close_rect,
+                ui.id().with(id_salt).with("tab_close_btn"),
+                egui::Sense::click(),
+            );
+
             if close_resp.clicked() {
                 close_clicked = true;
+                clicked = false; // Do not switch active tab if close button clicked
             }
-            let x_color = if close_resp.hovered() { COLOR_DANGER } else { COLOR_TEXT_MUTED };
+
+            let (x_color, x_bg) = if close_resp.hovered() {
+                (egui::Color32::WHITE, COLOR_DANGER)
+            } else {
+                (COLOR_TEXT_MUTED, egui::Color32::TRANSPARENT)
+            };
+
+            if x_bg != egui::Color32::TRANSPARENT {
+                ui.painter().circle_filled(close_rect.center(), 7.0, x_bg);
+            }
+
             ui.painter().text(
                 close_rect.center(),
                 egui::Align2::CENTER_CENTER,
