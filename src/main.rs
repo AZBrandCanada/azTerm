@@ -380,14 +380,14 @@ fn render_single_pane(
         rect.max,
     );
 
-    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, border_color));
+    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, border_color));
 
     if show_header {
         let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
         let header_bg = if is_focused { theme.bg_card_color() } else { theme.bg_panel_color() };
         ui.painter().rect_filled(header_rect, egui::Rounding { nw: 4.0, ne: 4.0, sw: 0.0, se: 0.0 }, header_bg);
 
-        let drag_area_w = (header_rect.width() - 240.0).max(40.0);
+        let drag_area_w = (header_rect.width() - 250.0).max(40.0);
         let drag_area_rect = egui::Rect::from_min_size(header_rect.min, egui::vec2(drag_area_w, header_height));
         let drag_resp = ui.interact(drag_area_rect, ui.id().with("pane_hdr_drag").with(session.id), egui::Sense::click_and_drag());
 
@@ -431,13 +431,15 @@ fn render_single_pane(
         });
     }
 
+    let mut pane_clicked = false;
     ui.allocate_ui_at_rect(body_rect, |ui| {
-        let child_resp = ui.interact(body_rect, ui.id().with("pane_body_focus").with(session.id), egui::Sense::click());
-        if child_resp.clicked() {
-            *active_session_id = session.id;
-        }
-        session.render(ui, settings, theme, is_focused, toast);
+        pane_clicked = session.render(ui, settings, theme, is_focused, toast);
     });
+
+    if pane_clicked {
+        *active_session_id = session.id;
+        ui.ctx().request_repaint();
+    }
 }
 
 struct AppState {
@@ -492,6 +494,8 @@ impl AppState {
         let install_method = InstallMethod::detect();
         let custom_themes = Database::load_custom_themes();
         let theme = Database::load_active_theme().unwrap_or_default();
+
+        cc.egui_ctx.set_zoom_factor(settings.zoom_factor);
 
         let mut app = Self {
             settings,
@@ -761,15 +765,15 @@ impl AppState {
         }
     }
 
-    fn close_session(&mut self, session_id: usize) {
+    fn close_session(&mut self, session_id: usize, ctx: egui::Context) {
         self.sessions.retain(|s| s.id != session_id);
 
-        let mut ws_to_remove: Option<usize> = None;
+        let mut ws_idx_to_remove: Option<usize> = None;
 
         for (w_idx, ws) in self.workspaces.iter_mut().enumerate() {
             if ws.contains(session_id) {
                 if ws.is_single_pane() {
-                    ws_to_remove = Some(w_idx);
+                    ws_idx_to_remove = Some(w_idx);
                 } else {
                     ws.root.remove_leaf(session_id);
                     if ws.maximized_session == Some(session_id) {
@@ -781,13 +785,17 @@ impl AppState {
             }
         }
 
-        if let Some(idx) = ws_to_remove {
+        if let Some(idx) = ws_idx_to_remove {
             self.workspaces.remove(idx);
-            if self.active_workspace_idx >= self.workspaces.len() && !self.workspaces.is_empty() {
-                self.active_workspace_idx = self.workspaces.len() - 1;
-            }
-            if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
-                self.active_session_id = ws.root.first_leaf();
+            if self.workspaces.is_empty() {
+                self.spawn_local_terminal(ctx, None);
+            } else {
+                if self.active_workspace_idx >= self.workspaces.len() {
+                    self.active_workspace_idx = self.workspaces.len() - 1;
+                }
+                if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
+                    self.active_session_id = ws.root.first_leaf();
+                }
             }
         }
 
@@ -796,16 +804,25 @@ impl AppState {
 
     fn tile_quad_grid(&mut self) {
         if self.workspaces.len() < 2 {
+            self.set_toast("Need at least 2 open tabs to arrange a grid");
             return;
         }
 
-        let curr_ws = &mut self.workspaces[self.active_workspace_idx];
+        let curr_ws = &self.workspaces[self.active_workspace_idx];
         let base_id = curr_ws.root.first_leaf();
 
         let mut other_leaves = Vec::new();
+        let mut consumed_ws_indices = Vec::new();
+
         for (i, ws) in self.workspaces.iter().enumerate() {
             if i != self.active_workspace_idx {
-                other_leaves.extend(ws.leaves());
+                for l in ws.leaves() {
+                    other_leaves.push(l);
+                }
+                consumed_ws_indices.push(i);
+                if other_leaves.len() >= 3 {
+                    break;
+                }
             }
         }
 
@@ -849,11 +866,20 @@ impl AppState {
             top_split
         };
 
-        let active_w_id = self.workspaces[self.active_workspace_idx].id;
-        self.workspaces.retain(|w| w.id == active_w_id);
-        self.active_workspace_idx = 0;
-        self.workspaces[0].root = quad_root;
-        self.workspaces[0].maximized_session = None;
+        let mut i = 0;
+        self.workspaces.retain(|_| {
+            let retain = !consumed_ws_indices.contains(&i);
+            i += 1;
+            retain
+        });
+
+        if let Some(ws) = self.workspaces.get_mut(0) {
+            ws.root = quad_root;
+            ws.maximized_session = None;
+            self.active_workspace_idx = 0;
+            self.active_session_id = base_id;
+        }
+
         self.set_toast("Arranged into tiled grid");
         self.persist_sessions();
     }
@@ -919,6 +945,321 @@ impl eframe::App for AppState {
             handle_window_resize_borders(ctx, is_max);
         }
 
+        // Global Zoom Shortcuts (Ctrl +, Ctrl -, Ctrl 0, and Ctrl + MouseWheel)
+        let is_ctrl = ctx.input(|i| i.modifiers.ctrl && !i.modifiers.alt);
+        let mut zoom_delta = 0.0_f32;
+
+        if is_ctrl {
+            let plus_pressed = ctx.input(|i| {
+                i.key_pressed(egui::Key::Plus)
+                    || i.key_pressed(egui::Key::Equals)
+                    || i.events.iter().any(|e| match e {
+                        egui::Event::Key { key: egui::Key::Plus, pressed: true, .. }
+                        | egui::Event::Key { key: egui::Key::Equals, pressed: true, .. } => true,
+                        egui::Event::Text(t) => t == "+" || t == "=",
+                        _ => false,
+                    })
+            });
+
+            let minus_pressed = ctx.input(|i| {
+                i.key_pressed(egui::Key::Minus)
+                    || i.events.iter().any(|e| match e {
+                        egui::Event::Key { key: egui::Key::Minus, pressed: true, .. } => true,
+                        egui::Event::Text(t) => t == "-",
+                        _ => false,
+                    })
+            });
+
+            let zero_pressed = ctx.input(|i| {
+                i.key_pressed(egui::Key::Num0)
+                    || i.events.iter().any(|e| match e {
+                        egui::Event::Key { key: egui::Key::Num0, pressed: true, .. } => true,
+                        egui::Event::Text(t) => t == "0",
+                        _ => false,
+                    })
+            });
+
+            let wheel_delta = ctx.input(|i| {
+                if i.raw_scroll_delta.y != 0.0 {
+                    i.raw_scroll_delta.y
+                } else {
+                    i.smooth_scroll_delta.y
+                }
+            });
+
+            if zero_pressed {
+                self.settings.zoom_factor = 1.0;
+                ctx.set_zoom_factor(1.0);
+                self.settings.save();
+                self.set_toast("Zoom Reset (100%)");
+            } else if plus_pressed || wheel_delta > 10.0 {
+                zoom_delta += 0.1;
+            } else if minus_pressed || wheel_delta < -10.0 {
+                zoom_delta -= 0.1;
+            }
+        }
+
+        if zoom_delta != 0.0 {
+            let new_zoom = (self.settings.zoom_factor + zoom_delta).clamp(0.6, 2.5);
+            if (new_zoom - self.settings.zoom_factor).abs() > 0.01 {
+                self.settings.zoom_factor = (new_zoom * 10.0).round() / 10.0;
+                ctx.set_zoom_factor(self.settings.zoom_factor);
+                self.settings.save();
+                self.set_toast(format!("Zoom: {}%", (self.settings.zoom_factor * 100.0).round() as u32));
+            }
+        }
+
+        // Modals
+        if self.show_update_modal {
+            if let Some(ref new_tag) = self.available_update.clone() {
+                egui::Window::new("AZTerm Update Available")
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(460.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("A new version ({}) of AZTerm is ready!", new_tag))
+                                    .strong()
+                                    .size(15.0)
+                                    .color(self.theme.accent_color()),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("Current version: v{}", env!("CARGO_PKG_VERSION")))
+                                    .small()
+                                    .color(self.theme.text_muted_color()),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(format!("Detected installation: {}", self.install_method.display_name()))
+                                    .small()
+                                    .color(self.theme.text_primary_color()),
+                            );
+
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            match &self.install_method {
+                                InstallMethod::ScriptInstalled | InstallMethod::PackageManager(_) => {
+                                    ui.label("Would you like to run the official updater script in a new terminal session?");
+                                    ui.add_space(6.0);
+                                    egui::Frame::none()
+                                        .fill(self.theme.bg_panel_color())
+                                        .rounding(4.0)
+                                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                                        .show(ui, |ui| {
+                                            ui.monospace("curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash");
+                                        });
+                                }
+                                InstallMethod::AppImage => {
+                                    ui.label("Download the latest standalone AppImage binary from GitHub:");
+                                }
+                                InstallMethod::Windows => {
+                                    ui.label("Download the latest Windows ZIP archive from GitHub:");
+                                }
+                                InstallMethod::MacOS => {
+                                    ui.label("Download the latest macOS universal package from GitHub:");
+                                }
+                                InstallMethod::ManualBuild => {
+                                    ui.label("You can recompile with cargo or run the installer script:");
+                                }
+                            }
+
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                match &self.install_method {
+                                    InstallMethod::ScriptInstalled | InstallMethod::ManualBuild => {
+                                        if ui.button(egui::RichText::new("Update Now (Run in Shell)").strong()).clicked() {
+                                            self.run_script_update_in_terminal(ctx.clone());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
+                                let release_url = format!("https://github.com/AZBrandCanada/azTerm/releases/tag/{}", new_tag);
+                                if ui.button("Open GitHub Release").clicked() {
+                                    ctx.open_url(egui::OpenUrl::new_tab(release_url));
+                                    self.show_update_modal = false;
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("Later").clicked() {
+                                        self.show_update_modal = false;
+                                    }
+                                });
+                            });
+                        });
+                    });
+            }
+        }
+
+        if self.show_keygen_modal {
+            egui::Window::new("Generate Ed25519 SSH Keypair")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .max_height(480.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                ui.label("Key identifier name:");
+                                ui.text_edit_singleline(&mut self.keygen_name);
+                                ui.add_space(8.0);
+
+                                if ui.button("Generate Keypair").clicked() {
+                                    match SshStore::generate_ed25519_keypair(&self.keygen_name) {
+                                        Ok((priv_path, pub_key)) => {
+                                            self.generated_pub_key = pub_key;
+                                            self.keygen_status = format!("Key generated and saved to: {}", priv_path);
+                                        }
+                                        Err(e) => {
+                                            self.keygen_status = format!("Error: {}", e);
+                                        }
+                                    }
+                                }
+
+                                if !self.generated_pub_key.is_empty() {
+                                    ui.add_space(8.0);
+                                    ui.label(egui::RichText::new("Public Key (Paste into remote ~/.ssh/authorized_keys):").strong());
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut self.generated_pub_key)
+                                            .desired_rows(5)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    if ui.button("Copy Public Key to Clipboard").clicked() {
+                                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                                            let _ = cb.set_text(self.generated_pub_key.clone());
+                                            self.set_toast("Public key copied to clipboard");
+                                        }
+                                    }
+                                }
+
+                                if !self.keygen_status.is_empty() {
+                                    ui.add_space(6.0);
+                                    ui.label(&self.keygen_status);
+                                }
+                            });
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                self.show_keygen_modal = false;
+                            }
+                        });
+                    });
+                });
+        }
+
+        if self.show_profile_modal {
+            let modal_title = if self.editing_profile_id.is_some() {
+                "Edit SSH Profile"
+            } else {
+                "Create New SSH Profile"
+            };
+
+            egui::Window::new(modal_title)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(540.0)
+                .max_height(540.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(420.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::Grid::new("profile_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
+                                    ui.label("Profile Name:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_name);
+                                    ui.end_row();
+
+                                    ui.label("Host / IP:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_host);
+                                    ui.end_row();
+
+                                    ui.label("Port:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_port);
+                                    ui.end_row();
+
+                                    ui.label("Username:");
+                                    ui.text_edit_singleline(&mut self.new_ssh_user);
+                                    ui.end_row();
+
+                                    ui.label("Authentication:");
+                                    ui.horizontal(|ui| {
+                                        ui.radio_value(&mut self.new_ssh_auth_choice, 0, "Password / Agent");
+                                        ui.radio_value(&mut self.new_ssh_auth_choice, 1, "Key File");
+                                        ui.radio_value(&mut self.new_ssh_auth_choice, 2, "Paste Key");
+                                    });
+                                    ui.end_row();
+
+                                    if self.new_ssh_auth_choice == 1 {
+                                        ui.label("Key File Path:");
+                                        ui.text_edit_singleline(&mut self.new_ssh_key_path);
+                                        ui.end_row();
+                                    } else if self.new_ssh_auth_choice == 2 {
+                                        ui.label("Paste Private Key:");
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut self.new_ssh_pasted_key)
+                                                .desired_rows(6)
+                                                .desired_width(f32::INFINITY)
+                                                .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----\n..."),
+                                        );
+                                        ui.end_row();
+                                    }
+                                });
+                            });
+
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Save Profile").clicked() {
+                                let port = self.new_ssh_port.parse().unwrap_or(22);
+                                let auth_type = if self.new_ssh_auth_choice == 1 && !self.new_ssh_key_path.trim().is_empty() {
+                                    SshStore::ensure_secure_permissions(&self.new_ssh_key_path);
+                                    SshAuthType::KeyFile(self.new_ssh_key_path.clone())
+                                } else if self.new_ssh_auth_choice == 2 && !self.new_ssh_pasted_key.trim().is_empty() {
+                                    let key_id = format!("{}_{}", self.new_ssh_host, port);
+                                    let _ = SshStore::save_pasted_key(&key_id, &self.new_ssh_pasted_key);
+                                    SshAuthType::PastedKey { key_id }
+                                } else {
+                                    SshAuthType::PasswordOrAgent
+                                };
+
+                                if let Some(ref edit_id) = self.editing_profile_id {
+                                    if let Some(existing) = self.ssh_store.profiles.iter_mut().find(|p| p.id == *edit_id) {
+                                        existing.name = self.new_ssh_name.clone();
+                                        existing.host = self.new_ssh_host.clone();
+                                        existing.port = port;
+                                        existing.username = self.new_ssh_user.clone();
+                                        existing.auth_type = auth_type;
+                                    }
+                                    self.set_toast("SSH Profile Updated");
+                                } else {
+                                    let mut profile = SshProfile::new(&self.new_ssh_name, &self.new_ssh_host, port, &self.new_ssh_user);
+                                    profile.auth_type = auth_type;
+                                    self.ssh_store.profiles.push(profile);
+                                    self.set_toast("SSH Profile Created");
+                                }
+
+                                self.ssh_store.save();
+                                self.show_profile_modal = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.show_profile_modal = false;
+                            }
+                        });
+                    });
+                });
+        }
+
         let modal_open = self.show_update_modal || self.show_profile_modal || self.show_keygen_modal;
         if self.active_view == ActiveView::Terminal && !modal_open {
             let mut send_tab = false;
@@ -962,7 +1303,7 @@ impl eframe::App for AppState {
                         ws.maximized_session = if ws.maximized_session.is_some() { None } else { Some(self.active_session_id) };
                     }
                 } else if ctx.input(|i| i.key_pressed(egui::Key::W)) {
-                    self.close_session(self.active_session_id);
+                    self.close_session(self.active_session_id, ctx.clone());
                 }
             }
 
@@ -997,7 +1338,7 @@ impl eframe::App for AppState {
 
         self.sync_sftp_with_active_session();
 
-        // LINE 1: Top Navigation and Integrated Window Bar
+        // LINE 1: Top Navigation and Window Bar
         egui::TopBottomPanel::top("top_nav")
             .frame(egui::Frame::none().fill(self.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 7.0)))
             .show(ctx, |ui| {
@@ -1061,7 +1402,7 @@ impl eframe::App for AppState {
                             }
                         }
                         if self.workspaces.len() > 1 {
-                            if ui.button("Tile All Tabs (Grid)").on_hover_text("Tile all open tabs into a 2x2 grid").clicked() {
+                            if ui.button("Tile All Tabs (Grid)").on_hover_text("Tile all open tabs into an even 2x2 grid").clicked() {
                                 self.tile_quad_grid();
                             }
                         }
@@ -1070,7 +1411,7 @@ impl eframe::App for AppState {
                     if !self.settings.use_system_titlebar {
                         let controls_w = 96.0_f32;
                         let drag_width = (ui.available_width() - controls_w).max(10.0);
-                        let (drag_rect, drag_resp) = ui.allocate_exact_size(
+                        let (_drag_rect, drag_resp) = ui.allocate_exact_size(
                             egui::vec2(drag_width, 26.0),
                             egui::Sense::click_and_drag(),
                         );
@@ -1120,7 +1461,7 @@ impl eframe::App for AppState {
                 });
             });
 
-        // LINE 2: Dedicated Tab Bar (Only shown if 2 or more tabs are open)
+        // LINE 2: Dedicated Tab Bar (Hidden if only 1 single-pane tab is open)
         if self.workspaces.len() > 1 {
             egui::TopBottomPanel::top("session_tabs_bar")
                 .frame(
@@ -1193,11 +1534,15 @@ impl eframe::App for AppState {
                                 self.sessions.retain(|s| s.id != leaf_id);
                             }
                             self.workspaces.remove(i);
-                            if self.active_workspace_idx >= self.workspaces.len() && !self.workspaces.is_empty() {
-                                self.active_workspace_idx = self.workspaces.len() - 1;
-                            }
-                            if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
-                                self.active_session_id = ws.root.first_leaf();
+                            if self.workspaces.is_empty() {
+                                self.spawn_local_terminal(ctx.clone(), None);
+                            } else {
+                                if self.active_workspace_idx >= self.workspaces.len() {
+                                    self.active_workspace_idx = self.workspaces.len() - 1;
+                                }
+                                if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
+                                    self.active_session_id = ws.root.first_leaf();
+                                }
                             }
                             self.persist_sessions();
                         }
@@ -1331,11 +1676,19 @@ impl eframe::App for AppState {
                     let is_primary_down = ui.input(|i| i.pointer.primary_down());
                     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
 
-                    let active_drag_session: Option<usize> = self.dragging_pane_id.or_else(|| {
-                        self.dragging_tab_idx.and_then(|idx| {
+                    let is_dragging_own_tab = self.dragging_tab_idx == Some(self.active_workspace_idx);
+
+                    let active_drag_session: Option<usize> = if self.dragging_pane_id.is_some() {
+                        self.dragging_pane_id
+                    } else if let Some(idx) = self.dragging_tab_idx {
+                        if !is_dragging_own_tab {
                             self.workspaces.get(idx).map(|w| w.root.first_leaf())
-                        })
-                    });
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
 
                     if let (Some(dragged_sess_id), Some(ptr)) = (active_drag_session, pointer_pos) {
                         if is_primary_down {
@@ -1359,7 +1712,7 @@ impl eframe::App for AppState {
                                 ui.painter().rect_stroke(
                                     snap_rect,
                                     6.0,
-                                    egui::Stroke::new(2.0, self.theme.accent_color()),
+                                    egui::Stroke::new(2.0_f32, self.theme.accent_color()),
                                 );
                                 ui.painter().text(
                                     snap_rect.center(),
@@ -1368,10 +1721,10 @@ impl eframe::App for AppState {
                                     egui::FontId::proportional(14.0),
                                     egui::Color32::WHITE,
                                 );
-                            } else if ptr.y < term_area_rect.min.y {
+                            } else if ptr.y < term_area_rect.min.y && self.dragging_pane_id.is_some() {
                                 let badge_rect = egui::Rect::from_center_size(ptr, egui::vec2(160.0, 26.0));
                                 ui.painter().rect_filled(badge_rect, 4.0, self.theme.bg_card_color());
-                                ui.painter().rect_stroke(badge_rect, 4.0, egui::Stroke::new(1.0, self.theme.accent_color()));
+                                ui.painter().rect_stroke(badge_rect, 4.0, egui::Stroke::new(1.0_f32, self.theme.accent_color()));
                                 ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER, "Drop to Pop Out as Tab", egui::FontId::proportional(12.0), self.theme.accent_color());
                             }
                         } else {
@@ -1388,25 +1741,33 @@ impl eframe::App for AppState {
 
                                             if let Some(drag_ws_idx) = self.dragging_tab_idx {
                                                 if drag_ws_idx < self.workspaces.len() && drag_ws_idx != self.active_workspace_idx {
+                                                    let incoming_tree = self.workspaces[drag_ws_idx].root.clone();
                                                     self.workspaces.remove(drag_ws_idx);
                                                     if drag_ws_idx < self.active_workspace_idx {
                                                         self.active_workspace_idx -= 1;
                                                     }
+                                                    let split_id = self.next_split_id;
+                                                    self.next_split_id += 1;
+
+                                                    if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                                        ws.root.split_leaf_with_node(pane_id, incoming_tree, dir, insert_after, split_id);
+                                                        self.active_session_id = dragged_sess_id;
+                                                        self.set_toast("Tiled tab into workspace");
+                                                        self.persist_sessions();
+                                                    }
                                                 }
                                             } else if self.dragging_pane_id.is_some() {
                                                 if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
-                                                    ws.root.remove_leaf(dragged_sess_id);
+                                                    if !ws.is_single_pane() {
+                                                        ws.root.remove_leaf(dragged_sess_id);
+                                                        let split_id = self.next_split_id;
+                                                        self.next_split_id += 1;
+                                                        ws.root.split_leaf(pane_id, dragged_sess_id, dir, insert_after, split_id);
+                                                        self.active_session_id = dragged_sess_id;
+                                                        self.set_toast("Moved tile");
+                                                        self.persist_sessions();
+                                                    }
                                                 }
-                                            }
-
-                                            let split_id = self.next_split_id;
-                                            self.next_split_id += 1;
-
-                                            if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
-                                                ws.root.split_leaf(pane_id, dragged_sess_id, dir, insert_after, split_id);
-                                                self.active_session_id = dragged_sess_id;
-                                                self.set_toast("Moved tile");
-                                                self.persist_sessions();
                                             }
                                             docked = true;
                                             break;
@@ -1416,13 +1777,16 @@ impl eframe::App for AppState {
 
                                 if !docked && ptr.y < term_area_rect.min.y && self.dragging_pane_id.is_some() {
                                     if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
-                                        ws.root.remove_leaf(dragged_sess_id);
-                                        let new_ws = WorkspaceTab::new(dragged_sess_id, dragged_sess_id, format!("Local #{}", dragged_sess_id));
-                                        self.workspaces.push(new_ws);
-                                        self.active_workspace_idx = self.workspaces.len() - 1;
-                                        self.active_session_id = dragged_sess_id;
-                                        self.set_toast("Popped out to its own tab");
-                                        self.persist_sessions();
+                                        if !ws.is_single_pane() {
+                                            ws.root.remove_leaf(dragged_sess_id);
+                                            let session_title = self.sessions.iter().find(|s| s.id == dragged_sess_id).map(|s| s.title.clone()).unwrap_or_else(|| format!("Local #{}", dragged_sess_id));
+                                            let new_ws = WorkspaceTab::new(dragged_sess_id, dragged_sess_id, session_title);
+                                            self.workspaces.push(new_ws);
+                                            self.active_workspace_idx = self.workspaces.len() - 1;
+                                            self.active_session_id = dragged_sess_id;
+                                            self.set_toast("Popped out to its own tab");
+                                            self.persist_sessions();
+                                        }
                                     }
                                 }
                             }
@@ -1439,25 +1803,32 @@ impl eframe::App for AppState {
                             }
                             PaneAction::ToggleMaximize(id) => {
                                 if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
-                                    ws.maximized_session = if ws.maximized_session == Some(id) { None } else { Some(id) };
+                                    if !ws.is_single_pane() {
+                                        ws.maximized_session = if ws.maximized_session == Some(id) { None } else { Some(id) };
+                                    }
                                 }
                             }
                             PaneAction::PopToTab(id) => {
                                 if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
-                                    ws.root.remove_leaf(id);
-                                    if ws.maximized_session == Some(id) {
-                                        ws.maximized_session = None;
+                                    if ws.is_single_pane() {
+                                        self.set_toast("Pane is already in its own tab");
+                                    } else {
+                                        ws.root.remove_leaf(id);
+                                        if ws.maximized_session == Some(id) {
+                                            ws.maximized_session = None;
+                                        }
+                                        let session_title = self.sessions.iter().find(|s| s.id == id).map(|s| s.title.clone()).unwrap_or_else(|| format!("Local #{}", id));
+                                        let new_ws = WorkspaceTab::new(id, id, session_title);
+                                        self.workspaces.push(new_ws);
+                                        self.active_workspace_idx = self.workspaces.len() - 1;
+                                        self.active_session_id = id;
+                                        self.set_toast("Popped out to its own tab");
+                                        self.persist_sessions();
                                     }
-                                    let new_ws = WorkspaceTab::new(id, id, format!("Local #{}", id));
-                                    self.workspaces.push(new_ws);
-                                    self.active_workspace_idx = self.workspaces.len() - 1;
-                                    self.active_session_id = id;
-                                    self.set_toast("Popped out to its own tab");
-                                    self.persist_sessions();
                                 }
                             }
                             PaneAction::Close(id) => {
-                                self.close_session(id);
+                                self.close_session(id, ctx.clone());
                             }
                             PaneAction::Focus(id) => {
                                 self.active_session_id = id;
@@ -1502,11 +1873,11 @@ impl eframe::App for AppState {
                             }
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("Key Generator").clicked() {
-                                    self.show_keygen_modal = true;
-                                }
                                 if ui.button("+ New SSH Profile").clicked() {
                                     self.open_create_profile_modal();
+                                }
+                                if ui.button("Key Generator").clicked() {
+                                    self.show_keygen_modal = true;
                                 }
                             });
                         });
@@ -1743,6 +2114,7 @@ impl eframe::App for AppState {
                                 self.settings.save();
                                 self.theme = ThemeConfig::default();
                                 Database::save_active_theme(&self.theme);
+                                ctx.set_zoom_factor(1.0);
                                 self.set_toast("Defaults Restored");
                             }
                         });
@@ -1769,6 +2141,24 @@ impl eframe::App for AppState {
                                                 ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(self.settings.use_system_titlebar));
                                                 changed = true;
                                             }
+
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Window Zoom Level").strong().color(self.theme.text_primary_color()));
+                                                    ui.label(egui::RichText::new("Current scale (Ctrl +, Ctrl -, Ctrl 0 to reset).").small().color(self.theme.text_muted_color()));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    if ui.button("Reset (100%)").clicked() {
+                                                        self.settings.zoom_factor = 1.0;
+                                                        ctx.set_zoom_factor(1.0);
+                                                        changed = true;
+                                                    }
+                                                    ui.label(format!("{}%", (self.settings.zoom_factor * 100.0).round() as u32));
+                                                });
+                                            });
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
 
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {

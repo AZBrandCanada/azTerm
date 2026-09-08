@@ -482,14 +482,10 @@ impl TerminalSession {
         theme: &ThemeConfig,
         has_focus: bool,
         toast: &mut Option<(String, std::time::Instant)>,
-    ) {
+    ) -> bool {
         let max_scroll = self.max_scroll;
         self.scroll_offset = self.scroll_offset.min(max_scroll);
         self.parser.set_scrollback(self.scroll_offset);
-
-        if has_focus {
-            self.handle_keyboard_events(ui.ctx(), settings);
-        }
 
         let font_size = 14.0;
         let char_width = 8.4;
@@ -525,6 +521,8 @@ impl TerminalSession {
         );
         let total_size = egui::vec2(term_grid_size.x + scrollbar_width + 6.0, term_grid_size.y);
 
+        let mut user_clicked_pane = false;
+
         egui::Frame::none()
             .fill(theme.bg_main_color())
             .inner_margin(egui::Margin::same(6.0))
@@ -540,15 +538,31 @@ impl TerminalSession {
                     egui::pos2(full_rect.max.x, grid_rect.max.y),
                 );
 
-                if has_focus && !response.has_focus() {
-                    response.request_focus();
-                }
-
                 let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
                 let is_hovered = full_rect.contains(pointer_pos);
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
+                let is_ctrl = ui.input(|i| i.modifiers.ctrl);
 
-                if is_hovered {
+                if response.clicked()
+                    || response.secondary_clicked()
+                    || response.drag_started()
+                    || (is_hovered && ui.input(|i| i.pointer.any_pressed()))
+                {
+                    user_clicked_pane = true;
+                    response.request_focus();
+                }
+
+                let active_focus = has_focus || user_clicked_pane;
+
+                if active_focus && !response.has_focus() {
+                    response.request_focus();
+                }
+
+                if active_focus {
+                    self.handle_keyboard_events(ui.ctx(), settings);
+                }
+
+                if is_hovered && !is_ctrl {
                     let scroll_y = ui.input(|i| {
                         if i.raw_scroll_delta.y != 0.0 {
                             i.raw_scroll_delta.y
@@ -705,14 +719,13 @@ impl TerminalSession {
                     ui.painter().rect_filled(sb_thumb, 4.0, thumb_color);
                 }
 
-                // Crash-proof render wrapper
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let screen = self.parser.screen();
                     let (rows, cols) = screen.size();
                     let (cursor_r, cursor_c) = screen.cursor_position();
                     let hide_cursor = screen.hide_cursor();
 
-                    let show_cursor = has_focus
+                    let show_cursor = active_focus
                         && !hide_cursor
                         && self.scroll_offset == 0
                         && (!settings.cursor_blink
@@ -803,5 +816,7 @@ impl TerminalSession {
                     }
                 }
             });
+
+        user_clicked_pane
     }
 }
