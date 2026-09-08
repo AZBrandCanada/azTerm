@@ -11,7 +11,13 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "[1/5] Checking Debian/Ubuntu system dependencies..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential git pkg-config libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
+# Install build tools, graphics headers, and python-nautilus for native context menu integration
+sudo apt-get install -y -qq \
+    build-essential git pkg-config libxkbcommon-dev libssl-dev \
+    libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev python3-nautilus
+
+# Remove the hardcoded old GNOME Terminal extension if present
+sudo apt-get remove -y -qq nautilus-extension-gnome-terminal 2>/dev/null || true
 
 if ! command -v cargo &>/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -43,7 +49,8 @@ echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release
 
 echo "[4/5] Installing binary, desktop files, and context menu integrations..."
-sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/kio/servicemenus /usr/share/nemo/actions
+sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps \
+              /usr/share/kio/servicemenus /usr/share/nemo/actions /usr/share/nautilus-python/extensions
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
 declare -A SEEN_LOCS
@@ -89,18 +96,64 @@ if [ -f "assets/azterm.svg" ]; then
     install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
 fi
 
-# Ubuntu / GNOME Files (Nautilus) Integration
-mkdir -p "$HOME/.local/share/nautilus/scripts"
-cat << 'EOF' > "$HOME/.local/share/nautilus/scripts/Open in azTerm"
-#!/usr/bin/env bash
-# If a folder was selected, enter it; otherwise use the current directory ($PWD)
-target="${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS%%$'\n'*}"
-if [ -n "$target" ] && [ -d "$target" ]; then
-    cd "$target"
-fi
-exec /usr/local/bin/azterm
+# Native Ubuntu / Nautilus (GNOME Files) Top-Level Context Menu
+sudo tee /usr/share/nautilus-python/extensions/open_azterm.py > /dev/null << 'EOF'
+import os
+import subprocess
+from urllib.parse import unquote, urlparse
+from gi.repository import Nautilus, GObject
+
+class AzTermExtension(GObject.GObject, Nautilus.MenuProvider):
+    def __init__(self):
+        super().__init__()
+
+    def _launch(self, menu, path):
+        if path and os.path.exists(path):
+            subprocess.Popen(["/usr/local/bin/azterm"], cwd=path)
+
+    def _get_path(self, item):
+        try:
+            loc = item.get_location()
+            if loc and loc.get_path():
+                return loc.get_path()
+        except Exception:
+            pass
+        try:
+            uri = item.get_uri()
+            if uri.startswith("file://"):
+                return unquote(urlparse(uri).path)
+        except Exception:
+            pass
+        return None
+
+    def get_file_items(self, *args):
+        files = args[-1]
+        if len(files) != 1 or not files[0].is_directory():
+            return []
+        path = self._get_path(files[0])
+        if not path:
+            return []
+        item = Nautilus.MenuItem(
+            name="AzTerm::OpenFolder",
+            label="Open in azTerm",
+            tip="Open azTerm in selected folder"
+        )
+        item.connect("activate", self._launch, path)
+        return [item]
+
+    def get_background_items(self, *args):
+        folder = args[-1]
+        path = self._get_path(folder)
+        if not path:
+            return []
+        item = Nautilus.MenuItem(
+            name="AzTerm::OpenBackground",
+            label="Open in azTerm",
+            tip="Open azTerm in current directory"
+        )
+        item.connect("activate", self._launch, path)
+        return [item]
 EOF
-chmod +x "$HOME/.local/share/nautilus/scripts/Open in azTerm"
 
 # KDE Dolphin ServiceMenu
 if [ -f "assets/servicemenus/azterm_open.desktop" ]; then
@@ -117,7 +170,7 @@ if [ -f "assets/nemo/azterm.nemo_action" ]; then
     sudo install -Dm644 assets/nemo/azterm.nemo_action /usr/share/nemo/actions/azterm.nemo_action 2>/dev/null || true
 fi
 
-# Register as default Debian/Ubuntu terminal alternative
+# Set azterm as the default x-terminal-emulator alternative
 if command -v update-alternatives &>/dev/null; then
     sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/azterm 50 2>/dev/null || true
     sudo update-alternatives --set x-terminal-emulator /usr/local/bin/azterm 2>/dev/null || true
@@ -134,7 +187,7 @@ elif command -v kbuildsycoca5 &>/dev/null; then
     kbuildsycoca5 --noincremental 2>/dev/null || true
 fi
 
-# Reload Nautilus if it is currently running
+# Restart Nautilus so the new menu loads immediately
 if command -v nautilus &>/dev/null; then
     nautilus -q 2>/dev/null || true
 fi
@@ -144,5 +197,5 @@ hash -r 2>/dev/null || true
 echo "=========================================================="
 echo " AZTerm updated successfully on Debian/Ubuntu!"
 echo " Active binary: $(which azterm)"
-echo " In Nautilus (Files): Right-click -> Scripts -> Open in azTerm"
+echo " Right-click anywhere in Files -> 'Open in azTerm' is active!"
 echo "=========================================================="
