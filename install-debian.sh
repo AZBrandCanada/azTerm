@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
 set -e
 
+BUILD_DIR="$HOME/.cache/azterm-build"
+REPO_URL="https://github.com/AZBrandCanada/azTerm.git"
+
 echo "[1/5] Checking Debian/Ubuntu system dependencies..."
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential pkg-config libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
+sudo apt-get install -y -qq build-essential git pkg-config libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
 
 if ! command -v cargo &>/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
 fi
 
-echo "[2/5] Compiling AZTerm in release mode..."
+echo "[2/5] Preparing source repository in persistent build cache..."
+mkdir -p "$HOME/.cache"
+if [ -d "$BUILD_DIR/.git" ]; then
+    cd "$BUILD_DIR"
+    git fetch --all --tags -q
+    git reset --hard origin/main -q || git reset --hard origin/master -q
+    git pull -q
+else
+    git clone "$REPO_URL" "$BUILD_DIR"
+    cd "$BUILD_DIR"
+fi
+
+echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release --locked
 
-echo "[3/5] Setting up system and user paths..."
-sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
-
 echo "[4/5] Installing binary and desktop integration..."
+sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
+
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
 fi

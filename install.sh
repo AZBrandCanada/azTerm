@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 set -e
 
+BUILD_DIR="$HOME/.cache/azterm-build"
+REPO_URL="https://github.com/AZBrandCanada/azTerm.git"
+
 echo "[1/5] Checking build dependencies..."
 if command -v pacman &>/dev/null; then
-    sudo pacman -S --needed --noconfirm base-devel libxkbcommon openssl libxcb libx11 wayland mesa
+    sudo pacman -S --needed --noconfirm base-devel git libxkbcommon openssl libxcb libx11 wayland mesa
 elif command -v apt-get &>/dev/null; then
     sudo apt-get update -qq
-    sudo apt-get install -y -qq build-essential libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
+    sudo apt-get install -y -qq build-essential git pkg-config libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
 elif command -v dnf &>/dev/null; then
-    sudo dnf install -y libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
+    sudo dnf install -y git libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
 fi
 
 if ! command -v cargo &>/dev/null; then
@@ -17,15 +20,27 @@ if ! command -v cargo &>/dev/null; then
     source "$HOME/.cargo/env"
 fi
 
-echo "[2/5] Compiling AZTerm in release mode..."
+echo "[2/5] Preparing source repository in persistent build cache ($BUILD_DIR)..."
+mkdir -p "$HOME/.cache"
+if [ -d "$BUILD_DIR/.git" ]; then
+    echo "Found existing build cache, fetching latest updates..."
+    cd "$BUILD_DIR"
+    git fetch --all --tags -q
+    git reset --hard origin/main -q || git reset --hard origin/master -q
+    git pull -q
+else
+    echo "Cloning repository..."
+    git clone "$REPO_URL" "$BUILD_DIR"
+    cd "$BUILD_DIR"
+fi
+
+echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release --locked
 
-echo "[3/5] Setting up system and user paths..."
-sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
-
 echo "[4/5] Installing binary and desktop integration..."
-# Using install -Dm755 unlinks any running binary to prevent "Text file busy"
+sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
+
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
 fi
@@ -41,4 +56,4 @@ if command -v gtk-update-icon-cache &>/dev/null; then
     sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi
 
-echo "AZTerm successfully installed/updated!"
+echo "AZTerm successfully installed and ready to use!"
