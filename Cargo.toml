@@ -2,9 +2,24 @@
 name = "azterm"
 version = "0.1.6"
 edition = "2021"
+authors = ["AZBrandCanada Developers"]
 description = "Fast, modern native cross-platform terminal, SSH profile manager, and SFTP client"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+homepage = "https://github.com/AZBrandCanada/azTerm"
 repository = "https://github.com/AZBrandCanada/azTerm"
+keywords = ["terminal", "terminal-emulator", "ssh", "sftp", "gui"]
+categories = ["command-line-utilities", "development-tools"]
+
+exclude = [
+    "assets/*.webp",
+    "assets/*.png",
+    "dist/*",
+    "*.AppImage",
+    "*.deb",
+    "*.tar.gz",
+    "*.zip",
+]
 
 [dependencies]
 eframe = { version = "0.28", default-features = true }
