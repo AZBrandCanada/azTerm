@@ -52,24 +52,46 @@ fi
 echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release
 
-echo "[4/5] Installing binary to all system and user PATH locations..."
-# 1. System wide
+echo "[4/5] Self-healing and installing to all detected PATH locations..."
+
+# 1. Primary system install
 sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
-if [ -f "/usr/bin/azterm" ] || [ -L "/usr/bin/azterm" ]; then
-    sudo install -Dm755 target/release/azterm /usr/bin/azterm
+# 2. Self-heal: Scan and overwrite all duplicate binary locations across PATH
+declare -A SEEN_LOCS
+LOCATIONS=(
+    "/usr/local/bin/azterm"
+    "/usr/bin/azterm"
+    "$HOME/.local/bin/azterm"
+    "$HOME/.cargo/bin/azterm"
+    "$HOME/bin/azterm"
+)
+
+# Dynamically find any active binary locations in PATH
+if command -v which &>/dev/null; then
+    while IFS= read -r path; do
+        if [ -n "$path" ]; then
+            LOCATIONS+=("$path")
+        fi
+    done < <(which -a azterm 2>/dev/null || true)
 fi
 
-# 2. User level (handles ~/.cargo/bin and ~/.local/bin PATH precedence on Ubuntu)
-mkdir -p "$HOME/.local/bin"
-install -Dm755 target/release/azterm "$HOME/.local/bin/azterm"
+for loc in "${LOCATIONS[@]}"; do
+    if [ -n "$loc" ] && [ -z "${SEEN_LOCS[$loc]}" ]; then
+        SEEN_LOCS["$loc"]=1
+        if [ -e "$loc" ] || [ -L "$loc" ] || [ "$loc" = "$HOME/.local/bin/azterm" ]; then
+            dir_name=$(dirname "$loc")
+            if [ -w "$dir_name" ]; then
+                install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+            else
+                sudo install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+            fi
+        fi
+    fi
+done
 
-if [ -f "$HOME/.cargo/bin/azterm" ]; then
-    install -Dm755 target/release/azterm "$HOME/.cargo/bin/azterm"
-fi
-
-# Desktop & icon entries (system + user)
+# 3. Update desktop entries & icons (system + user)
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
     mkdir -p "$HOME/.local/share/applications"
@@ -90,7 +112,10 @@ if command -v gtk-update-icon-cache &>/dev/null; then
     sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi
 
+# Reset shell command hash table
+hash -r 2>/dev/null || true
+
 echo "=========================================================="
-echo " AZTerm updated successfully!"
-echo " Binary path: $(which azterm)"
+echo " AZTerm updated and self-healed successfully!"
+echo " Active binary: $(which azterm)"
 echo "=========================================================="

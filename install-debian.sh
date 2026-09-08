@@ -42,20 +42,40 @@ fi
 echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release
 
-echo "[4/5] Installing binary to all system and user PATH locations..."
+echo "[4/5] Self-healing and installing to all detected PATH locations..."
 sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
-if [ -f "/usr/bin/azterm" ] || [ -L "/usr/bin/azterm" ]; then
-    sudo install -Dm755 target/release/azterm /usr/bin/azterm
+declare -A SEEN_LOCS
+LOCATIONS=(
+    "/usr/local/bin/azterm"
+    "/usr/bin/azterm"
+    "$HOME/.local/bin/azterm"
+    "$HOME/.cargo/bin/azterm"
+    "$HOME/bin/azterm"
+)
+
+if command -v which &>/dev/null; then
+    while IFS= read -r path; do
+        if [ -n "$path" ]; then
+            LOCATIONS+=("$path")
+        fi
+    done < <(which -a azterm 2>/dev/null || true)
 fi
 
-mkdir -p "$HOME/.local/bin"
-install -Dm755 target/release/azterm "$HOME/.local/bin/azterm"
-
-if [ -f "$HOME/.cargo/bin/azterm" ]; then
-    install -Dm755 target/release/azterm "$HOME/.cargo/bin/azterm"
-fi
+for loc in "${LOCATIONS[@]}"; do
+    if [ -n "$loc" ] && [ -z "${SEEN_LOCS[$loc]}" ]; then
+        SEEN_LOCS["$loc"]=1
+        if [ -e "$loc" ] || [ -L "$loc" ] || [ "$loc" = "$HOME/.local/bin/azterm" ]; then
+            dir_name=$(dirname "$loc")
+            if [ -w "$dir_name" ]; then
+                install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+            else
+                sudo install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+            fi
+        fi
+    fi
+done
 
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
@@ -73,7 +93,9 @@ sudo update-desktop-database -q /usr/share/applications || true
 update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
 sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 
+hash -r 2>/dev/null || true
+
 echo "=========================================================="
 echo " AZTerm updated successfully on Debian/Ubuntu!"
-echo " Binary path: $(which azterm)"
+echo " Active binary: $(which azterm)"
 echo "=========================================================="
