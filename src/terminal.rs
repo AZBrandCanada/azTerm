@@ -133,6 +133,7 @@ pub struct TerminalSession {
     pub rows: u16,
     pub cols: u16,
     pub scroll_offset: usize,
+    pub max_scroll: usize,
 
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
@@ -200,6 +201,7 @@ impl TerminalSession {
             rows,
             cols,
             scroll_offset: 0,
+            max_scroll: 0,
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
@@ -208,6 +210,7 @@ impl TerminalSession {
 
     pub fn send_input(&mut self, text: &str) {
         self.scroll_offset = 0;
+        self.parser.set_scrollback(0);
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(text.as_bytes());
             let _ = w.flush();
@@ -217,6 +220,8 @@ impl TerminalSession {
     pub fn poll_updates(&mut self) {
         let mut received = false;
         while let Ok(bytes) = self.rx.try_recv() {
+            let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+            self.max_scroll = (self.max_scroll + newlines).min(10000);
             self.parser.process(&bytes);
             received = true;
         }
@@ -254,7 +259,7 @@ impl TerminalSession {
         }
     }
 
-    fn extract_selected_text(&mut self, max_scroll: usize) -> String {
+    fn extract_selected_text(&mut self) -> String {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
             let (mut l1, mut c1) = start;
             let (mut l2, mut c2) = end;
@@ -264,13 +269,10 @@ impl TerminalSession {
             }
 
             let mut result = String::new();
+            let screen = self.parser.screen();
 
             for l in l1..=l2 {
-                let needed_offset = (max_scroll as i64 - l).max(0) as usize;
-                self.parser.set_scrollback(needed_offset);
-                let screen = self.parser.screen();
-
-                let screen_r = (l - (max_scroll as i64 - needed_offset as i64)).clamp(0, self.rows.saturating_sub(1) as i64) as u16;
+                let screen_r = (l.max(0) as u16).min(self.rows.saturating_sub(1));
                 let start_c = if l == l1 { c1 } else { 0 };
                 let end_c = if l == l2 { c2 } else { self.cols.saturating_sub(1) };
                 let mut line = String::new();
@@ -294,14 +296,14 @@ impl TerminalSession {
                 }
             }
 
-            self.parser.set_scrollback(self.scroll_offset);
             result
         } else {
             String::new()
         }
     }
 
-    fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings, max_scroll: usize) {
+    fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+        let max_scroll = self.max_scroll;
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
@@ -379,19 +381,23 @@ impl TerminalSession {
                             if *key == egui::Key::PageUp {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
                                 self.scroll_offset = (self.scroll_offset + jump).min(max_scroll);
+                                self.parser.set_scrollback(self.scroll_offset);
                                 continue;
                             }
                             if *key == egui::Key::PageDown {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
                                 self.scroll_offset = self.scroll_offset.saturating_sub(jump);
+                                self.parser.set_scrollback(self.scroll_offset);
                                 continue;
                             }
                             if *key == egui::Key::Home {
                                 self.scroll_offset = max_scroll;
+                                self.parser.set_scrollback(self.scroll_offset);
                                 continue;
                             }
                             if *key == egui::Key::End {
                                 self.scroll_offset = 0;
+                                self.parser.set_scrollback(0);
                                 continue;
                             }
                         }
@@ -460,11 +466,7 @@ impl TerminalSession {
                         }
 
                         if let Some(b) = bytes {
-                            self.scroll_offset = 0;
-                            if let Ok(mut w) = self.writer.lock() {
-                                let _ = w.write_all(&b);
-                                let _ = w.flush();
-                            }
+                            self.send_input(&String::from_utf8_lossy(&b));
                         }
                     }
                     _ => {}
@@ -478,14 +480,16 @@ impl TerminalSession {
         ui: &mut egui::Ui,
         settings: &AppSettings,
         theme: &ThemeConfig,
+        has_focus: bool,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        self.parser.set_scrollback(usize::MAX);
-        let max_scroll = self.parser.screen().scrollback();
+        let max_scroll = self.max_scroll;
         self.scroll_offset = self.scroll_offset.min(max_scroll);
         self.parser.set_scrollback(self.scroll_offset);
 
-        self.handle_keyboard_events(ui.ctx(), settings, max_scroll);
+        if has_focus {
+            self.handle_keyboard_events(ui.ctx(), settings);
+        }
 
         let font_size = 14.0;
         let char_width = 8.4;
@@ -494,14 +498,16 @@ impl TerminalSession {
         let inner_padding = 16.0;
 
         let avail = ui.available_size();
-        let usable_w = (avail.x - inner_padding - scrollbar_width).max(120.0);
-        let usable_h = (avail.y - inner_padding).max(60.0);
-        let new_cols = ((usable_w / char_width).floor() as u16).max(20);
-        let new_rows = ((usable_h / row_height).floor() as u16).max(5);
+        let usable_w = (avail.x - inner_padding - scrollbar_width).max(80.0);
+        let usable_h = (avail.y - inner_padding).max(40.0);
+        let new_cols = ((usable_w / char_width).floor() as u16).max(15);
+        let new_rows = ((usable_h / row_height).floor() as u16).max(4);
 
         if new_cols != self.cols || new_rows != self.rows {
             self.cols = new_cols;
             self.rows = new_rows;
+            self.parser.set_scrollback(0);
+            self.scroll_offset = 0;
             self.parser.set_size(new_rows, new_cols);
             if let Ok(master) = self.master_pty.lock() {
                 let _ = master.resize(PtySize {
@@ -521,7 +527,7 @@ impl TerminalSession {
 
         egui::Frame::none()
             .fill(theme.bg_main_color())
-            .inner_margin(egui::Margin::same(8.0))
+            .inner_margin(egui::Margin::same(6.0))
             .show(ui, |ui| {
                 let (full_rect, response) = ui.allocate_exact_size(
                     total_size,
@@ -534,7 +540,7 @@ impl TerminalSession {
                     egui::pos2(full_rect.max.x, grid_rect.max.y),
                 );
 
-                if response.clicked() || response.dragged() || !response.has_focus() {
+                if has_focus && !response.has_focus() {
                     response.request_focus();
                 }
 
@@ -619,7 +625,7 @@ impl TerminalSession {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
                         if start != end && settings.copy_on_select {
-                            let selected = self.extract_selected_text(max_scroll);
+                            let selected = self.extract_selected_text();
                             if !selected.trim().is_empty() {
                                 set_system_clipboard_text(&selected);
                                 let preview = if selected.len() > 24 {
@@ -699,72 +705,76 @@ impl TerminalSession {
                     ui.painter().rect_filled(sb_thumb, 4.0, thumb_color);
                 }
 
-                let screen = self.parser.screen();
-                let (rows, cols) = screen.size();
-                let (cursor_r, cursor_c) = screen.cursor_position();
-                let hide_cursor = screen.hide_cursor();
+                // Crash-proof render wrapper
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let screen = self.parser.screen();
+                    let (rows, cols) = screen.size();
+                    let (cursor_r, cursor_c) = screen.cursor_position();
+                    let hide_cursor = screen.hide_cursor();
 
-                let show_cursor = !hide_cursor
-                    && self.scroll_offset == 0
-                    && (!settings.cursor_blink
-                        || (ui.input(|i| (i.time * 2.0).fract() < 0.5)));
+                    let show_cursor = has_focus
+                        && !hide_cursor
+                        && self.scroll_offset == 0
+                        && (!settings.cursor_blink
+                            || (ui.input(|i| (i.time * 2.0).fract() < 0.5)));
 
-                for r in 0..rows {
-                    let row_y = grid_rect.min.y + r as f32 * row_height;
-                    let cell_abs_line = visible_top_line + r as i64;
-                    let mut job = egui::text::LayoutJob::default();
-                    job.wrap.max_width = f32::INFINITY;
+                    for r in 0..rows {
+                        let row_y = grid_rect.min.y + r as f32 * row_height;
+                        let cell_abs_line = visible_top_line + r as i64;
+                        let mut job = egui::text::LayoutJob::default();
+                        job.wrap.max_width = f32::INFINITY;
 
-                    for c in 0..cols {
-                        let default_cell = vt100::Cell::default();
-                        let cell = screen.cell(r, c).unwrap_or(&default_cell);
+                        for c in 0..cols {
+                            let default_cell = vt100::Cell::default();
+                            let cell = screen.cell(r, c).unwrap_or(&default_cell);
 
-                        if cell.is_wide_continuation() {
-                            continue;
-                        }
-
-                        let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
-                        let is_selected = self.is_cell_selected(cell_abs_line, c);
-                        let cell_text = cell.contents();
-                        let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
-
-                        let mut fg = vt_to_egui_color(cell.fgcolor(), false, theme);
-                        let mut bg = vt_to_egui_color(cell.bgcolor(), true, theme);
-
-                        if is_selected {
-                            fg = theme.bg_main_color();
-                            bg = theme.accent_color();
-                        } else if cell.inverse() || is_cursor {
-                            std::mem::swap(&mut fg, &mut bg);
-                            if is_cursor && bg == fg {
-                                fg = theme.bg_main_color();
-                                bg = theme.text_primary_color();
+                            if cell.is_wide_continuation() {
+                                continue;
                             }
+
+                            let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
+                            let is_selected = self.is_cell_selected(cell_abs_line, c);
+                            let cell_text = cell.contents();
+                            let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
+
+                            let mut fg = vt_to_egui_color(cell.fgcolor(), false, theme);
+                            let mut bg = vt_to_egui_color(cell.bgcolor(), true, theme);
+
+                            if is_selected {
+                                fg = theme.bg_main_color();
+                                bg = theme.accent_color();
+                            } else if cell.inverse() || is_cursor {
+                                std::mem::swap(&mut fg, &mut bg);
+                                if is_cursor && bg == fg {
+                                    fg = theme.bg_main_color();
+                                    bg = theme.text_primary_color();
+                                }
+                            }
+
+                            job.append(
+                                display_char,
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: egui::FontId::monospace(font_size),
+                                    color: fg,
+                                    background: if bg != theme.bg_main_color() {
+                                        bg
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    },
+                                    ..Default::default()
+                                },
+                            );
                         }
 
-                        job.append(
-                            display_char,
-                            0.0,
-                            egui::TextFormat {
-                                font_id: egui::FontId::monospace(font_size),
-                                color: fg,
-                                background: if bg != theme.bg_main_color() {
-                                    bg
-                                } else {
-                                    egui::Color32::TRANSPARENT
-                                },
-                                ..Default::default()
-                            },
-                        );
+                        let galley = ui.painter().layout_job(job);
+                        ui.painter().galley(egui::pos2(grid_rect.min.x, row_y), galley, egui::Color32::WHITE);
                     }
-
-                    let galley = ui.painter().layout_job(job);
-                    ui.painter().galley(egui::pos2(grid_rect.min.x, row_y), galley, egui::Color32::WHITE);
-                }
+                }));
 
                 if self.scroll_offset > 0 {
-                    let chip_w = 175.0;
-                    let chip_h = 24.0;
+                    let chip_w = 160.0;
+                    let chip_h = 22.0;
                     let chip_rect = egui::Rect::from_min_size(
                         egui::pos2(grid_rect.max.x - chip_w - 8.0, grid_rect.max.y - chip_h - 6.0),
                         egui::vec2(chip_w, chip_h),
@@ -781,8 +791,8 @@ impl TerminalSession {
                     ui.painter().text(
                         chip_rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        format!("↓ Scrolled (-{}) • Live View", self.scroll_offset),
-                        egui::FontId::proportional(12.0),
+                        format!("↓ Scrolled (-{}) • Live", self.scroll_offset),
+                        egui::FontId::proportional(11.0),
                         if is_chip_hov { theme.accent_hover_color() } else { theme.accent_color() },
                     );
 

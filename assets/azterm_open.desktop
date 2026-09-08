@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+MimeType=inode/directory;
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+Actions=open_in_azterm;
+X-KDE-Priority=TopLevel
+
+[Desktop Action open_in_azterm]
+Name=Open in AZTerm Here
+Icon=azterm
+Exec=azterm -d "%f"

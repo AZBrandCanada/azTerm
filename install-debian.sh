@@ -42,8 +42,8 @@ fi
 echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release
 
-echo "[4/5] Self-healing and installing to all detected PATH locations..."
-sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
+echo "[4/5] Installing binary, desktop files, and context menu integrations..."
+sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/kio/servicemenus /usr/share/nemo/actions
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
 declare -A SEEN_LOCS
@@ -88,10 +88,31 @@ if [ -f "assets/azterm.svg" ]; then
     install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
 fi
 
-echo "[5/5] Updating desktop & icon caches..."
-sudo update-desktop-database -q /usr/share/applications || true
+# KDE Dolphin ServiceMenu
+if [ -f "assets/servicemenus/azterm_open.desktop" ]; then
+    sudo install -Dm755 assets/servicemenus/azterm_open.desktop /usr/share/kio/servicemenus/azterm_open.desktop
+    mkdir -p "$HOME/.local/share/kio/servicemenus"
+    install -Dm755 assets/servicemenus/azterm_open.desktop "$HOME/.local/share/kio/servicemenus/azterm_open.desktop"
+    chmod +x "$HOME/.local/share/kio/servicemenus/azterm_open.desktop"
+fi
+
+# Nemo File Manager Action
+if [ -f "assets/nemo/azterm.nemo_action" ]; then
+    mkdir -p "$HOME/.local/share/nemo/actions"
+    install -Dm644 assets/nemo/azterm.nemo_action "$HOME/.local/share/nemo/actions/azterm.nemo_action"
+    sudo install -Dm644 assets/nemo/azterm.nemo_action /usr/share/nemo/actions/azterm.nemo_action 2>/dev/null || true
+fi
+
+echo "[5/5] Updating desktop, icon, and KDE servicemenu caches..."
+sudo update-desktop-database -q /usr/share/applications 2>/dev/null || true
 update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
-sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+sudo gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
+
+if command -v kbuildsycoca6 &>/dev/null; then
+    kbuildsycoca6 --noincremental 2>/dev/null || true
+elif command -v kbuildsycoca5 &>/dev/null; then
+    kbuildsycoca5 --noincremental 2>/dev/null || true
+fi
 
 hash -r 2>/dev/null || true
 
