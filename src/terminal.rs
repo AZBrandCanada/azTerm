@@ -11,7 +11,6 @@ use std::thread;
 use arboard::{GetExtLinux, SetExtLinux};
 
 pub fn get_system_clipboard_text() -> Option<String> {
-    // 1. Try Wayland native wl-paste (cross-app compatible on Wayland)
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -29,7 +28,6 @@ pub fn get_system_clipboard_text() -> Option<String> {
         }
     }
 
-    // 2. Try arboard (with native Wayland data-control + X11 + Windows + macOS)
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
@@ -46,7 +44,6 @@ pub fn get_system_clipboard_text() -> Option<String> {
         }
     }
 
-    // 3. Fallback to xclip on X11
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("xclip")
@@ -62,7 +59,6 @@ pub fn get_system_clipboard_text() -> Option<String> {
         }
     }
 
-    // 4. Fallback to xsel on X11
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("xsel")
@@ -158,13 +154,6 @@ pub enum SessionType {
     Ssh { profile_id: String },
 }
 
-#[derive(Debug, Clone)]
-pub struct AuthPrompt {
-    pub title: String,
-    pub prompt_line: String,
-    pub is_secret: bool,
-}
-
 pub struct TerminalSession {
     pub id: usize,
     pub title: String,
@@ -175,11 +164,6 @@ pub struct TerminalSession {
     pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub rows: u16,
     pub cols: u16,
-
-    // Center Auth Popup State
-    pub active_auth_prompt: Option<AuthPrompt>,
-    pub auth_input: String,
-    pub auth_show_secret: bool,
 
     // Selection Tracking
     pub selection_start: Option<(u16, u16)>,
@@ -246,9 +230,6 @@ impl TerminalSession {
             master_pty,
             rows,
             cols,
-            active_auth_prompt: None,
-            auth_input: String::new(),
-            auth_show_secret: false,
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
@@ -262,62 +243,9 @@ impl TerminalSession {
         }
     }
 
-    pub fn send_auth_response(&self, text: &str) {
-        if let Ok(mut w) = self.writer.lock() {
-            let clean = text.trim_end_matches(&['\r', '\n'][..]);
-            let mut data = clean.as_bytes().to_vec();
-            data.push(b'\r');
-            let _ = w.write_all(&data);
-            let _ = w.flush();
-        }
-    }
-
-    pub fn poll_updates(&mut self, settings: &AppSettings) {
-        let keywords: Vec<String> = settings
-            .two_factor_keywords
-            .split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-
+    pub fn poll_updates(&mut self) {
         while let Ok(bytes) = self.rx.try_recv() {
             self.parser.process(&bytes);
-            let text = String::from_utf8_lossy(&bytes);
-            let lower = text.to_lowercase();
-
-            if self.active_auth_prompt.is_none() {
-                let mut found_2fa = false;
-                for kw in &keywords {
-                    if lower.contains(kw) {
-                        self.active_auth_prompt = Some(AuthPrompt {
-                            title: "2FA / OTP Verification".to_string(),
-                            prompt_line: text.trim().to_string(),
-                            is_secret: false,
-                        });
-                        self.auth_input.clear();
-                        found_2fa = true;
-                        break;
-                    }
-                }
-
-                if !found_2fa {
-                    if lower.contains("passphrase for key") || lower.contains("enter passphrase") {
-                        self.active_auth_prompt = Some(AuthPrompt {
-                            title: "SSH Key Passphrase".to_string(),
-                            prompt_line: text.trim().to_string(),
-                            is_secret: true,
-                        });
-                        self.auth_input.clear();
-                    } else if (lower.contains("password:") || lower.contains("'s password:")) && !lower.contains("one-time") {
-                        self.active_auth_prompt = Some(AuthPrompt {
-                            title: "SSH Password Authentication".to_string(),
-                            prompt_line: text.trim().to_string(),
-                            is_secret: true,
-                        });
-                        self.auth_input.clear();
-                    }
-                }
-            }
         }
     }
 
@@ -388,127 +316,15 @@ impl TerminalSession {
         }
     }
 
-    fn render_auth_modal(&mut self, ctx: &egui::Context, toast: &mut Option<(String, std::time::Instant)>) {
-        let prompt = match self.active_auth_prompt.clone() {
-            Some(p) => p,
-            None => return,
-        };
-
-        egui::Area::new(egui::Id::new("center_auth_prompt"))
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                egui::Frame::none()
-                    .fill(COLOR_BG_CARD)
-                    .stroke(egui::Stroke::new(1.5_f32, COLOR_ACCENT))
-                    .rounding(8.0)
-                    .inner_margin(egui::Margin::same(20.0))
-                    .show(ui, |ui| {
-                        ui.set_width(420.0);
-
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new(&prompt.title)
-                                    .strong()
-                                    .size(16.0)
-                                    .color(COLOR_ACCENT),
-                            );
-                        });
-                        ui.add_space(8.0);
-
-                        if !prompt.prompt_line.is_empty() {
-                            egui::Frame::none()
-                                .fill(COLOR_BG_PANEL)
-                                .rounding(4.0)
-                                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(&prompt.prompt_line)
-                                            .small()
-                                            .color(COLOR_TEXT_PRIMARY),
-                                    );
-                                });
-                            ui.add_space(8.0);
-                        }
-
-                        let label_text = if prompt.is_secret {
-                            "Enter Password / Passphrase:"
-                        } else {
-                            "Enter 6-Digit OTP / Token:"
-                        };
-                        ui.label(egui::RichText::new(label_text).small().color(COLOR_TEXT_MUTED));
-                        ui.add_space(4.0);
-
-                        let mut submit = false;
-
-                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            submit = true;
-                        }
-                        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            self.active_auth_prompt = None;
-                        }
-
-                        ui.horizontal(|ui| {
-                            let edit = egui::TextEdit::singleline(&mut self.auth_input)
-                                .password(prompt.is_secret && !self.auth_show_secret)
-                                .desired_width(
-                                    ui.available_width()
-                                        - if prompt.is_secret { 65.0 } else { 0.0 },
-                                );
-                            let res = ui.add(edit);
-                            res.request_focus();
-
-                            if prompt.is_secret {
-                                if ui.button(if self.auth_show_secret { "Hide" } else { "Show" }).clicked() {
-                                    self.auth_show_secret = !self.auth_show_secret;
-                                }
-                            }
-                        });
-
-                        ui.add_space(14.0);
-                        ui.horizontal(|ui| {
-                            if ui.button(egui::RichText::new("Submit").strong()).clicked() {
-                                submit = true;
-                            }
-
-                            if !prompt.is_secret {
-                                if ui.button("Paste Clipboard").clicked() {
-                                    if let Some(text) = get_system_clipboard_text() {
-                                        self.auth_input = text.trim().to_string();
-                                    }
-                                }
-                            }
-
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("Dismiss / Terminal").clicked() {
-                                    self.active_auth_prompt = None;
-                                }
-                            });
-                        });
-
-                        if submit {
-                            self.send_auth_response(&self.auth_input);
-                            self.auth_input.clear();
-                            self.active_auth_prompt = None;
-                            *toast = Some((
-                                "Authentication submitted".to_string(),
-                                std::time::Instant::now(),
-                            ));
-                        }
-                    });
-            });
-    }
-
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
         ctx.input(|i| {
-            // Direct Ctrl shortcuts (SIGINT / line clearing / navigation)
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
-                    self.send_input("\x03"); // Cancel current command/input line
+                    self.send_input("\x03"); // SIGINT
                     return;
                 }
                 if i.key_pressed(egui::Key::X) {
-                    self.send_input("\x18"); // Cancel / CAN
+                    self.send_input("\x18"); // Cancel
                     return;
                 }
                 if i.key_pressed(egui::Key::U) {
@@ -548,7 +364,6 @@ impl TerminalSession {
             for event in &i.events {
                 match event {
                     egui::Event::Copy => {
-                        // When Ctrl+C is intercepted by egui, send SIGINT to cancel line if not selecting text
                         if self.selection_start.is_none() {
                             self.send_input("\x03");
                         }
@@ -570,7 +385,6 @@ impl TerminalSession {
                         modifiers,
                         ..
                     } => {
-                        // Keyboard shortcut pasting (Ctrl+Shift+V or Shift+Insert)
                         if (modifiers.shift && *key == egui::Key::Insert)
                             || (modifiers.ctrl && modifiers.shift && *key == egui::Key::V)
                         {
@@ -655,15 +469,10 @@ impl TerminalSession {
         settings: &AppSettings,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        // 1. Auth modal (if active)
-        self.render_auth_modal(ui.ctx(), toast);
-
-        // 2. Keyboard routing (if no modal & no text widget has focus)
-        if self.active_auth_prompt.is_none() && !ui.ctx().wants_keyboard_input() {
+        if !ui.ctx().wants_keyboard_input() {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 
-        // 3. Dynamic Resize & Painter
         let font_size = 14.0;
         let char_width = 8.4;
         let row_height = 17.5;
@@ -698,7 +507,6 @@ impl TerminalSession {
                     egui::Sense::click_and_drag(),
                 );
 
-                // Mouse Pointer Selection Handling
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
 
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -716,7 +524,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Copy on Drag Release & Dismiss highlight immediately
                 if self.is_dragging_selection && !is_primary_down {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
@@ -740,14 +547,12 @@ impl TerminalSession {
                     self.selection_end = None;
                 }
 
-                // Single click clears any lingering selection
                 if response.clicked_by(egui::PointerButton::Primary) {
                     self.selection_start = None;
                     self.selection_end = None;
                     self.is_dragging_selection = false;
                 }
 
-                // Paste on Right Click from system clipboard
                 let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
                 let is_hovered = rect.contains(pointer_pos);
 
@@ -767,7 +572,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Draw Terminal Character Grid
                 let screen = self.parser.screen();
                 let (rows, cols) = screen.size();
                 let (cursor_r, cursor_c) = screen.cursor_position();
