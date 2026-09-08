@@ -11,7 +11,7 @@ elif command -v apt-get &>/dev/null; then
     sudo apt-get update -qq
     sudo apt-get install -y -qq build-essential git pkg-config libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
 elif command -v dnf &>/dev/null; then
-    sudo dnf install -y git libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
+    sudo dnf install -y git gcc gcc-c++ make pkgconf-pkg-config libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
 fi
 
 if ! command -v cargo &>/dev/null; then
@@ -41,6 +41,11 @@ echo "[4/5] Installing binary and desktop integration..."
 sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
+# If previously installed via .deb to /usr/bin, update it too so Ubuntu never runs the old version
+if [ -f "/usr/bin/azterm" ] || [ -L "/usr/bin/azterm" ]; then
+    sudo install -Dm755 target/release/azterm /usr/bin/azterm
+fi
+
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
 fi
@@ -56,4 +61,4 @@ if command -v gtk-update-icon-cache &>/dev/null; then
     sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 fi
 
-echo "AZTerm successfully installed and ready to use!"
+echo "AZTerm successfully installed and updated!"

@@ -9,13 +9,7 @@ pub enum BackspaceSequence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
-    // Shell Configuration
     pub default_shell: String,
-
-    // 2FA / Auth
-    pub two_factor_keywords: String,
-
-    // General & Application
     pub auto_refresh_sftp: bool,
     pub show_hidden_sftp: bool,
     pub support_screen_reader: bool,
@@ -31,7 +25,6 @@ pub struct AppSettings {
     pub disable_developer_tools: bool,
     pub debug_mode: bool,
 
-    // Terminal Interaction
     pub terminal_log_path: String,
     pub save_terminal_log: bool,
     pub add_timestamp_to_log: bool,
@@ -58,7 +51,6 @@ impl Default for AppSettings {
 
         Self {
             default_shell,
-            two_factor_keywords: "verification code,otp,one-time,two-factor,2fa,totp,authenticator,duo,yubikey".to_string(),
             auto_refresh_sftp: false,
             show_hidden_sftp: true,
             support_screen_reader: false,

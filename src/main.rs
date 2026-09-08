@@ -36,7 +36,6 @@ enum SettingsCategory {
     Terminal,
     ShellEnv,
     Sftp,
-    Security,
     System,
 }
 
@@ -169,17 +168,14 @@ struct AppState {
     ssh_subview: SshSubView,
     settings_category: SettingsCategory,
 
-    // Toast feedback: (Message, Timestamp)
     toast_message: Option<(String, std::time::Instant)>,
 
-    // Auto-update state
     available_update: Option<String>,
     update_rx: Option<Receiver<Option<String>>>,
     is_checking_update: bool,
     show_update_modal: bool,
     install_method: InstallMethod,
 
-    // Profile Modal (Create / Edit)
     show_profile_modal: bool,
     editing_profile_id: Option<String>,
     new_ssh_name: String,
@@ -190,7 +186,6 @@ struct AppState {
     new_ssh_key_path: String,
     new_ssh_pasted_key: String,
 
-    // Key Generator Modal
     show_keygen_modal: bool,
     keygen_name: String,
     generated_pub_key: String,
@@ -237,10 +232,8 @@ impl AppState {
             keygen_status: String::new(),
         };
 
-        // Check for updates once per day if enabled
         app.trigger_update_check(false, cc.egui_ctx.clone());
 
-        // Handle CLI Launch Parameters
         if let Some(dir) = cli.working_directory {
             app.spawn_local_terminal(cc.egui_ctx.clone(), Some(dir));
         } else if let Some(url) = cli.ssh_url {
@@ -424,9 +417,7 @@ impl AppState {
         self.active_tab_idx = self.sessions.len() - 1;
         self.active_view = ActiveView::Terminal;
 
-        // Point SFTP pane to this profile
         self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(profile.clone()));
-
         self.persist_sessions();
     }
 
@@ -486,12 +477,10 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll terminal outputs
         for s in &mut self.sessions {
-            s.poll_updates(&self.settings);
+            s.poll_updates();
         }
 
-        // Poll background update checks
         if let Some(ref rx) = self.update_rx {
             if let Ok(res) = rx.try_recv() {
                 self.is_checking_update = false;
@@ -501,7 +490,6 @@ impl eframe::App for AppState {
             }
         }
 
-        // Live sync active tab SSH profile with SFTP pane
         self.sync_sftp_with_active_session();
 
         // Top Navigation Bar
@@ -538,7 +526,6 @@ impl eframe::App for AppState {
 
                     ui.separator();
 
-                    // Dynamic Auto-Sizing Tabs
                     let mut tab_to_close: Option<usize> = None;
                     let avail_w = (ui.available_width() - 16.0).max(80.0);
                     let num_tabs = self.sessions.len().max(1) as f32;
@@ -626,7 +613,6 @@ impl eframe::App for AppState {
                         });
                     }
 
-                    // Update Available Trigger Button
                     if self.settings.check_updates {
                         if let Some(ref update_tag) = self.available_update {
                             ui.separator();
@@ -650,7 +636,6 @@ impl eframe::App for AppState {
                         ui.label(egui::RichText::new(status).small().color(COLOR_ACCENT));
                     }
 
-                    // Toast Feedback Message
                     if let Some((msg, time)) = &self.toast_message {
                         if time.elapsed().as_secs_f32() < 3.0 {
                             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
@@ -1096,7 +1081,6 @@ impl eframe::App for AppState {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(10.0);
 
-                        // Dual Pane Action Toolbar
                         card_frame().show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("Dual-Session SFTP File Transfer").strong().color(COLOR_ACCENT));
@@ -1114,9 +1098,7 @@ impl eframe::App for AppState {
 
                         ui.add_space(10.0);
 
-                        // 2 Columns: Left Pane vs Right Pane
                         ui.columns(2, |cols| {
-                            // Left Pane
                             card_frame().show(&mut cols[0], |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Left Pane:").strong());
@@ -1139,7 +1121,6 @@ impl eframe::App for AppState {
                                 self.sftp.left_pane.render(ui);
                             });
 
-                            // Right Pane
                             card_frame().show(&mut cols[1], |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Right Pane:").strong());
@@ -1169,7 +1150,6 @@ impl eframe::App for AppState {
                     });
                 }
                 ActiveView::Settings => {
-                    // Sidebar + Settings Panel Layout
                     ui.columns(2, |columns| {
                         columns[0].set_max_width(210.0);
                         columns[0].vertical(|ui| {
@@ -1204,10 +1184,6 @@ impl eframe::App for AppState {
                             ui.add_space(4.0);
                             if nav_item(ui, SettingsCategory::Sftp, "SFTP & Transfers", self.settings_category) {
                                 self.settings_category = SettingsCategory::Sftp;
-                            }
-                            ui.add_space(4.0);
-                            if nav_item(ui, SettingsCategory::Security, "Security & 2FA", self.settings_category) {
-                                self.settings_category = SettingsCategory::Security;
                             }
                             ui.add_space(4.0);
                             if nav_item(ui, SettingsCategory::System, "Application & System", self.settings_category) {
@@ -1309,18 +1285,6 @@ impl eframe::App for AppState {
                                             setting_row_disabled(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", self.settings.show_hidden_sftp);
                                             setting_row_disabled(ui, "Disable SFTP Transfer History", "Do not write upload/download records to disk.", self.settings.disable_sftp_history);
                                         }
-                                        SettingsCategory::Security => {
-                                            ui.label(egui::RichText::new("Security & 2FA").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Configure multi-factor authentication triggers and prompt detection.").small().color(COLOR_TEXT_MUTED));
-                                            ui.add_space(12.0);
-
-                                            ui.label(egui::RichText::new("2FA Verification Trigger Keywords").strong().color(COLOR_TEXT_PRIMARY));
-                                            ui.label(egui::RichText::new("Comma-separated list of terms that trigger the interactive OTP submission banner.").small().color(COLOR_TEXT_MUTED));
-                                            ui.add_space(6.0);
-                                            if ui.add(egui::TextEdit::multiline(&mut self.settings.two_factor_keywords).desired_rows(3).desired_width(f32::INFINITY)).changed() {
-                                                changed = true;
-                                            }
-                                        }
                                         SettingsCategory::System => {
                                             ui.label(egui::RichText::new("Application & System").strong().size(16.0).color(COLOR_ACCENT));
                                             ui.label(egui::RichText::new("Window behavior, multi-instance options, and update checks.").small().color(COLOR_TEXT_MUTED));
@@ -1328,7 +1292,6 @@ impl eframe::App for AppState {
 
                                             changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
                                             
-                                            let prev_check = self.settings.check_updates;
                                             if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates) {
                                                 changed = true;
                                                 if !self.settings.check_updates {
