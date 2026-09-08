@@ -4,6 +4,11 @@ set -e
 BUILD_DIR="$HOME/.cache/azterm-build"
 REPO_URL="https://github.com/AZBrandCanada/azTerm.git"
 
+if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+fi
+export PATH="$HOME/.cargo/bin:$PATH"
+
 echo "[1/5] Checking Fedora system dependencies..."
 sudo dnf install -y git gcc gcc-c++ make pkgconf-pkg-config libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
 
@@ -11,6 +16,7 @@ if ! command -v cargo &>/dev/null; then
     sudo dnf install -y rust cargo || {
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         source "$HOME/.cargo/env"
+        export PATH="$HOME/.cargo/bin:$PATH"
     }
 fi
 
@@ -18,16 +24,24 @@ echo "[2/5] Preparing source repository in persistent build cache..."
 mkdir -p "$HOME/.cache"
 if [ -d "$BUILD_DIR/.git" ]; then
     cd "$BUILD_DIR"
-    git fetch --all --tags -q
-    git reset --hard origin/main -q || git reset --hard origin/master -q
-    git pull -q
+    git fetch --all --tags || true
+    git checkout -f main 2>/dev/null || git checkout -f master 2>/dev/null || true
+    git reset --hard origin/main 2>/dev/null || git reset --hard origin/master 2>/dev/null || true
+    git clean -fd || true
 else
+    rm -rf "$BUILD_DIR"
+    git clone "$REPO_URL" "$BUILD_DIR"
+    cd "$BUILD_DIR"
+fi
+
+if [ ! -f "$BUILD_DIR/Cargo.toml" ]; then
+    rm -rf "$BUILD_DIR"
     git clone "$REPO_URL" "$BUILD_DIR"
     cd "$BUILD_DIR"
 fi
 
 echo "[3/5] Compiling AZTerm in release mode..."
-cargo build --release --locked
+cargo build --release
 
 echo "[4/5] Installing binary and desktop integration..."
 sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
