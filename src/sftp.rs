@@ -1,5 +1,5 @@
 use crate::ssh::{SshAuthType, SshProfile, SshStore};
-use crate::theme::*;
+use crate::theme::ThemeConfig;
 use eframe::egui;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -144,7 +144,6 @@ impl PaneBrowser {
 
         let mut cmd = Command::new("ssh");
 
-        // Reuse live authenticated socket from terminal session
         if socket_path.exists() {
             cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
         } else {
@@ -215,7 +214,6 @@ impl PaneBrowser {
     }
 
     pub fn poll(&mut self) {
-        // Auto-detect when SSH connection is established in terminal
         if let SftpTarget::RemoteSsh(profile) = &self.target {
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
             let is_connected = socket_path.exists();
@@ -260,11 +258,10 @@ impl PaneBrowser {
         }
     }
 
-    pub fn render(&mut self, ui: &mut egui::Ui) {
+    pub fn render(&mut self, ui: &mut egui::Ui, theme: &ThemeConfig) {
         self.poll();
 
         ui.vertical(|ui| {
-            // Path Navigation Header
             ui.horizontal(|ui| {
                 if ui.button("Up").clicked() {
                     self.go_up();
@@ -281,14 +278,13 @@ impl PaneBrowser {
             ui.add_space(4.0);
 
             if self.is_loading {
-                ui.label(egui::RichText::new("Loading directory contents...").small().color(COLOR_ACCENT));
+                ui.label(egui::RichText::new("Loading directory contents...").small().color(theme.accent_color()));
             } else if let Some(ref err) = self.error_message {
-                ui.label(egui::RichText::new(err).small().color(if err.contains("Waiting") { COLOR_ACCENT } else { COLOR_DANGER }));
+                ui.label(egui::RichText::new(err).small().color(if err.contains("Waiting") { theme.accent_color() } else { theme.danger_color() }));
             }
 
             ui.separator();
 
-            // File Table Listing
             let mut nav_to: Option<String> = None;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -298,9 +294,9 @@ impl PaneBrowser {
                         .striped(true)
                         .spacing([12.0, 4.0])
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("Name").strong().color(COLOR_TEXT_MUTED));
-                            ui.label(egui::RichText::new("Permissions").strong().color(COLOR_TEXT_MUTED));
-                            ui.label(egui::RichText::new("Size").strong().color(COLOR_TEXT_MUTED));
+                            ui.label(egui::RichText::new("Name").strong().color(theme.text_muted_color()));
+                            ui.label(egui::RichText::new("Permissions").strong().color(theme.text_muted_color()));
+                            ui.label(egui::RichText::new("Size").strong().color(theme.text_muted_color()));
                             ui.end_row();
 
                             for entry in &self.entries {
@@ -328,7 +324,7 @@ impl PaneBrowser {
                                     nav_to = Some(next_path);
                                 }
 
-                                ui.label(egui::RichText::new(&entry.permissions).small().color(COLOR_TEXT_MUTED));
+                                ui.label(egui::RichText::new(&entry.permissions).small().color(theme.text_muted_color()));
                                 if entry.is_dir {
                                     ui.label("-");
                                 } else {

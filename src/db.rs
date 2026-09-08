@@ -1,5 +1,6 @@
 use crate::settings::AppSettings;
 use crate::ssh::SshProfile;
+use crate::theme::ThemeConfig;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -53,6 +54,22 @@ impl Database {
                 kind TEXT NOT NULL,
                 title TEXT NOT NULL,
                 target TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS custom_themes (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS active_theme (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL
             )",
             [],
         )?;
@@ -145,6 +162,61 @@ impl Database {
                 }) {
                     for r in rows.flatten() {
                         list.push(r);
+                    }
+                }
+            }
+        }
+        list
+    }
+
+    pub fn save_active_theme(theme: &ThemeConfig) {
+        if let Some(conn) = Self::get_connection() {
+            if let Ok(json) = serde_json::to_string(theme) {
+                let _ = conn.execute(
+                    "INSERT INTO active_theme (id, data) VALUES (1, ?1)
+                     ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+                    params![json],
+                );
+            }
+        }
+    }
+
+    pub fn load_active_theme() -> Option<ThemeConfig> {
+        let conn = Self::get_connection()?;
+        let mut stmt = conn.prepare("SELECT data FROM active_theme WHERE id = 1").ok()?;
+        let json: String = stmt.query_row([], |row| row.get(0)).ok()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    pub fn save_custom_themes(themes: &[ThemeConfig]) {
+        if let Some(mut conn) = Self::get_connection() {
+            if let Ok(tx) = conn.transaction() {
+                let _ = tx.execute("DELETE FROM custom_themes", []);
+                for t in themes {
+                    if let Ok(json) = serde_json::to_string(t) {
+                        let _ = tx.execute(
+                            "INSERT INTO custom_themes (id, data) VALUES (?1, ?2)",
+                            params![t.id, json],
+                        );
+                    }
+                }
+                let _ = tx.commit();
+            }
+        }
+    }
+
+    pub fn load_custom_themes() -> Vec<ThemeConfig> {
+        let mut list = Vec::new();
+        if let Some(conn) = Self::get_connection() {
+            if let Ok(mut stmt) = conn.prepare("SELECT data FROM custom_themes") {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    let json: String = row.get(0)?;
+                    Ok(json)
+                }) {
+                    for r in rows.flatten() {
+                        if let Ok(theme) = serde_json::from_str(&r) {
+                            list.push(theme);
+                        }
                     }
                 }
             }

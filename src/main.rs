@@ -2,8 +2,8 @@ mod db;
 mod settings;
 mod sftp;
 mod ssh;
-mod theme;
 mod terminal;
+mod theme;
 
 use db::{Database, SavedSessionState};
 use eframe::egui;
@@ -33,6 +33,7 @@ enum SshSubView {
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum SettingsCategory {
+    Appearance,
     Terminal,
     ShellEnv,
     Sftp,
@@ -157,6 +158,71 @@ fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
     l_parts > c_parts
 }
 
+fn handle_window_resize_borders(ctx: &egui::Context, is_maximized: bool) {
+    if is_maximized {
+        return;
+    }
+
+    let screen_rect = ctx.screen_rect();
+    let border_thickness = 7.0_f32;
+
+    let pointer_pos = match ctx.input(|i| i.pointer.hover_pos()) {
+        Some(pos) => pos,
+        None => return,
+    };
+
+    let on_top = pointer_pos.y <= screen_rect.min.y + border_thickness;
+    let on_bottom = pointer_pos.y >= screen_rect.max.y - border_thickness;
+    let on_left = pointer_pos.x <= screen_rect.min.x + border_thickness;
+    let on_right = pointer_pos.x >= screen_rect.max.x - border_thickness;
+
+    if !on_top && !on_bottom && !on_left && !on_right {
+        return;
+    }
+
+    let (dir, cursor) = match (on_top, on_bottom, on_left, on_right) {
+        (true, false, true, false) => (
+            egui::viewport::ResizeDirection::NorthWest,
+            egui::CursorIcon::ResizeNorthWest,
+        ),
+        (true, false, false, true) => (
+            egui::viewport::ResizeDirection::NorthEast,
+            egui::CursorIcon::ResizeNorthEast,
+        ),
+        (false, true, true, false) => (
+            egui::viewport::ResizeDirection::SouthWest,
+            egui::CursorIcon::ResizeSouthWest,
+        ),
+        (false, true, false, true) => (
+            egui::viewport::ResizeDirection::SouthEast,
+            egui::CursorIcon::ResizeSouthEast,
+        ),
+        (true, false, false, false) => (
+            egui::viewport::ResizeDirection::North,
+            egui::CursorIcon::ResizeNorth,
+        ),
+        (false, true, false, false) => (
+            egui::viewport::ResizeDirection::South,
+            egui::CursorIcon::ResizeSouth,
+        ),
+        (false, false, true, false) => (
+            egui::viewport::ResizeDirection::West,
+            egui::CursorIcon::ResizeWest,
+        ),
+        (false, false, false, true) => (
+            egui::viewport::ResizeDirection::East,
+            egui::CursorIcon::ResizeEast,
+        ),
+        _ => return,
+    };
+
+    ctx.set_cursor_icon(cursor);
+
+    if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+    }
+}
+
 struct AppState {
     settings: AppSettings,
     ssh_store: SshStore,
@@ -167,6 +233,10 @@ struct AppState {
     active_view: ActiveView,
     ssh_subview: SshSubView,
     settings_category: SettingsCategory,
+
+    theme: ThemeConfig,
+    custom_themes: Vec<ThemeConfig>,
+    new_theme_name: String,
 
     toast_message: Option<(String, std::time::Instant)>,
 
@@ -197,6 +267,8 @@ impl AppState {
         let settings = AppSettings::load();
         let ssh_store = SshStore::load();
         let install_method = InstallMethod::detect();
+        let custom_themes = Database::load_custom_themes();
+        let theme = Database::load_active_theme().unwrap_or_default();
 
         let mut app = Self {
             settings,
@@ -207,7 +279,12 @@ impl AppState {
             next_tab_id: 1,
             active_view: if cli.open_sftp_only { ActiveView::SftpBrowser } else { ActiveView::Terminal },
             ssh_subview: SshSubView::Profiles,
-            settings_category: SettingsCategory::Terminal,
+            settings_category: SettingsCategory::Appearance,
+
+            theme,
+            custom_themes,
+            new_theme_name: "My Custom Theme".to_string(),
+
             toast_message: None,
 
             available_update: None,
@@ -479,6 +556,12 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Window edge & corner resize detection for custom undecorated frame
+        if !self.settings.use_system_titlebar {
+            let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            handle_window_resize_borders(ctx, is_max);
+        }
+
         let modal_open = self.show_update_modal || self.show_profile_modal || self.show_keygen_modal;
         if self.active_view == ActiveView::Terminal && !modal_open {
             let mut send_tab = false;
@@ -521,101 +604,181 @@ impl eframe::App for AppState {
 
         self.sync_sftp_with_active_session();
 
-        // Top Navigation Bar
+        // LINE 1: Top Navigation and Integrated Window Bar
         egui::TopBottomPanel::top("top_nav")
-            .frame(egui::Frame::none().fill(COLOR_BG_PANEL).inner_margin(egui::Margin::symmetric(14.0, 8.0)))
+            .frame(egui::Frame::none().fill(self.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 7.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("AZTerm")
-                            .color(COLOR_ACCENT)
-                            .strong()
-                            .size(16.0),
+                    // Draggable Brand Logo
+                    let brand_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("AZTerm")
+                                .color(self.theme.accent_color())
+                                .strong()
+                                .size(16.0),
+                        ).sense(egui::Sense::click_and_drag())
                     );
+                    if !self.settings.use_system_titlebar {
+                        if brand_resp.drag_started_by(egui::PointerButton::Primary)
+                            || (brand_resp.hovered() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+                        {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                        if brand_resp.double_clicked() {
+                            let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                        }
+                    }
+
                     ui.add_space(8.0);
 
-                    if nav_tab_button(ui, "Terminal", self.active_view == ActiveView::Terminal) {
+                    if nav_tab_button(ui, "Terminal", self.active_view == ActiveView::Terminal, &self.theme) {
                         self.active_view = ActiveView::Terminal;
                     }
-                    if nav_tab_button(ui, "SSH Profiles", self.active_view == ActiveView::SshBookmarks) {
+                    if nav_tab_button(ui, "SSH Profiles", self.active_view == ActiveView::SshBookmarks, &self.theme) {
                         self.active_view = ActiveView::SshBookmarks;
                     }
-                    if nav_tab_button(ui, "SFTP Explorer", self.active_view == ActiveView::SftpBrowser) {
+                    if nav_tab_button(ui, "SFTP Explorer", self.active_view == ActiveView::SftpBrowser, &self.theme) {
                         self.active_view = ActiveView::SftpBrowser;
                     }
-                    if nav_tab_button(ui, "Settings", self.active_view == ActiveView::Settings) {
+                    if nav_tab_button(ui, "Settings", self.active_view == ActiveView::Settings, &self.theme) {
                         self.active_view = ActiveView::Settings;
                     }
 
                     ui.separator();
 
-                    if nav_action_button(ui, "+ New Shell") {
+                    if nav_action_button(ui, "+ New Shell", &self.theme) {
                         self.spawn_local_terminal(ctx.clone(), None);
                     }
 
-                    ui.separator();
+                    // Draggable Titlebar Region & Window Controls
+                    if !self.settings.use_system_titlebar {
+                        let controls_w = 96.0_f32;
+                        let drag_width = (ui.available_width() - controls_w).max(10.0);
+                        let (drag_rect, drag_resp) = ui.allocate_exact_size(
+                            egui::vec2(drag_width, 26.0),
+                            egui::Sense::click_and_drag(),
+                        );
 
-                    let mut tab_to_close: Option<usize> = None;
-                    let avail_w = (ui.available_width() - 16.0).max(80.0);
-                    let num_tabs = self.sessions.len().max(1) as f32;
-                    let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(70.0, 160.0);
-                    let max_chars = ((computed_tab_width - 28.0) / 7.2).max(3.0) as usize;
-
-                    egui::ScrollArea::horizontal()
-                        .auto_shrink([false, false])
-                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                for (i, session) in self.sessions.iter().enumerate() {
-                                    let is_active = self.active_view == ActiveView::Terminal && self.active_tab_idx == i;
-                                    let label_text = if session.title.len() > max_chars {
-                                        format!("{}...", &session.title[..max_chars.saturating_sub(3)])
-                                    } else {
-                                        session.title.clone()
-                                    };
-
-                                    let (tab_clicked, close_clicked) = session_tab_chip(
-                                        ui,
-                                        session.id,
-                                        &label_text,
-                                        is_active,
-                                        computed_tab_width,
-                                        self.sessions.len() > 1,
-                                    );
-
-                                    if tab_clicked {
-                                        self.active_tab_idx = i;
-                                        self.active_view = ActiveView::Terminal;
-
-                                        if let SessionType::Ssh { profile_id } = &session.session_type {
-                                            if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
-                                                self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
-                                            }
-                                        }
-                                    }
-
-                                    if close_clicked {
-                                        tab_to_close = Some(i);
-                                    }
-
-                                    ui.add_space(3.0);
-                                }
-                            });
-                        });
-
-                    if let Some(i) = tab_to_close {
-                        self.sessions.remove(i);
-                        if self.active_tab_idx >= self.sessions.len() && !self.sessions.is_empty() {
-                            self.active_tab_idx = self.sessions.len() - 1;
+                        if drag_resp.drag_started_by(egui::PointerButton::Primary)
+                            || (drag_resp.hovered() && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+                        {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                         }
-                        self.persist_sessions();
+                        if drag_resp.double_clicked() {
+                            let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let close_resp = ui.add(
+                                egui::Button::new(egui::RichText::new("✕").size(12.0).color(self.theme.text_primary_color()))
+                                    .min_size(egui::vec2(28.0, 22.0))
+                                    .fill(egui::Color32::TRANSPARENT)
+                            );
+                            if close_resp.hovered() {
+                                ui.painter().rect_filled(close_resp.rect, 3.0, self.theme.danger_color());
+                            }
+                            if close_resp.clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+
+                            let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                            let max_icon = if is_max { "🗗" } else { "□" };
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new(max_icon).size(13.0).color(self.theme.text_primary_color()))
+                                    .min_size(egui::vec2(28.0, 22.0))
+                                    .fill(egui::Color32::TRANSPARENT)
+                            ).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
+                            }
+
+                            if ui.add(
+                                egui::Button::new(egui::RichText::new("−").size(14.0).color(self.theme.text_primary_color()))
+                                    .min_size(egui::vec2(28.0, 22.0))
+                                    .fill(egui::Color32::TRANSPARENT)
+                            ).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                            }
+                        });
                     }
                 });
             });
 
+        // LINE 2: Dedicated Tab Bar (Only shown if 2 or more tabs are open)
+        if self.sessions.len() > 1 {
+            egui::TopBottomPanel::top("session_tabs_bar")
+                .frame(
+                    egui::Frame::none()
+                        .fill(self.theme.bg_panel_color().linear_multiply(0.85))
+                        .stroke(egui::Stroke::new(1.0_f32, self.theme.border_color()))
+                        .inner_margin(egui::Margin::symmetric(14.0, 4.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut tab_to_close: Option<usize> = None;
+                        let avail_w = (ui.available_width() - 20.0).max(100.0);
+                        let num_tabs = self.sessions.len() as f32;
+                        let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(90.0, 200.0);
+                        let max_chars = ((computed_tab_width - 32.0) / 7.2).max(4.0) as usize;
+
+                        egui::ScrollArea::horizontal()
+                            .auto_shrink([false, false])
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    for (i, session) in self.sessions.iter().enumerate() {
+                                        let is_active = self.active_view == ActiveView::Terminal && self.active_tab_idx == i;
+                                        let label_text = if session.title.len() > max_chars {
+                                            format!("{}...", &session.title[..max_chars.saturating_sub(3)])
+                                        } else {
+                                            session.title.clone()
+                                        };
+
+                                        let (tab_clicked, close_clicked) = session_tab_chip(
+                                            ui,
+                                            session.id,
+                                            &label_text,
+                                            is_active,
+                                            computed_tab_width,
+                                            true,
+                                            &self.theme,
+                                        );
+
+                                        if tab_clicked {
+                                            self.active_tab_idx = i;
+                                            self.active_view = ActiveView::Terminal;
+
+                                            if let SessionType::Ssh { profile_id } = &session.session_type {
+                                                if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
+                                                    self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
+                                                }
+                                            }
+                                        }
+
+                                        if close_clicked {
+                                            tab_to_close = Some(i);
+                                        }
+
+                                        ui.add_space(4.0);
+                                    }
+                                });
+                            });
+
+                        if let Some(i) = tab_to_close {
+                            self.sessions.remove(i);
+                            if self.active_tab_idx >= self.sessions.len() && !self.sessions.is_empty() {
+                                self.active_tab_idx = self.sessions.len() - 1;
+                            }
+                            self.persist_sessions();
+                        }
+                    });
+                });
+        }
+
         // Bottom Status Bar
         egui::TopBottomPanel::bottom("bottom_status_bar")
-            .frame(egui::Frame::none().fill(COLOR_BG_PANEL).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
+            .frame(egui::Frame::none().fill(self.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(session) = self.sessions.get(self.active_tab_idx) {
@@ -623,7 +786,7 @@ impl eframe::App for AppState {
                             SessionType::Local { working_dir } => format!("Local Shell: {}", working_dir),
                             SessionType::Ssh { profile_id } => format!("SSH Target: {}", profile_id),
                         };
-                        ui.label(egui::RichText::new(info).small().color(COLOR_TEXT_MUTED));
+                        ui.label(egui::RichText::new(info).small().color(self.theme.text_muted_color()));
                     }
 
                     ui.separator();
@@ -633,7 +796,7 @@ impl eframe::App for AppState {
                     } else {
                         "SFTP Drawer: CLOSED"
                     };
-                    if nav_tab_button(ui, sftp_btn_text, self.settings.show_sftp_split_view) {
+                    if nav_tab_button(ui, sftp_btn_text, self.settings.show_sftp_split_view, &self.theme) {
                         self.settings.show_sftp_split_view = !self.settings.show_sftp_split_view;
                         self.settings.save();
                         self.set_toast(if self.settings.show_sftp_split_view {
@@ -646,7 +809,7 @@ impl eframe::App for AppState {
                     if self.settings.check_updates {
                         if let Some(ref update_tag) = self.available_update {
                             ui.separator();
-                            if nav_action_button(ui, &format!("⭐ Update: {}", update_tag)) {
+                            if nav_action_button(ui, &format!("⭐ Update: {}", update_tag), &self.theme) {
                                 self.show_update_modal = true;
                             }
                         }
@@ -654,19 +817,19 @@ impl eframe::App for AppState {
 
                     if let Some(ref status) = self.sftp.transfer_status {
                         ui.separator();
-                        ui.label(egui::RichText::new(status).small().color(COLOR_ACCENT));
+                        ui.label(egui::RichText::new(status).small().color(self.theme.accent_color()));
                     }
 
                     if let Some((msg, time)) = &self.toast_message {
                         if time.elapsed().as_secs_f32() < 3.0 {
                             ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
                                 egui::Frame::none()
-                                    .fill(COLOR_BG_CARD)
-                                    .stroke(egui::Stroke::new(1.0_f32, COLOR_ACCENT))
+                                    .fill(self.theme.bg_card_color())
+                                    .stroke(egui::Stroke::new(1.0_f32, self.theme.accent_color()))
                                     .rounding(4.0)
                                     .inner_margin(egui::Margin::symmetric(12.0, 2.0))
                                     .show(ui, |ui| {
-                                        ui.label(egui::RichText::new(msg).color(COLOR_ACCENT).strong().small());
+                                        ui.label(egui::RichText::new(msg).color(self.theme.accent_color()).strong().small());
                                     });
                             });
                         }
@@ -679,7 +842,7 @@ impl eframe::App for AppState {
                             } else {
                                 format!("{}x{}", session.cols, session.rows)
                             };
-                            let col = if session.scroll_offset > 0 { COLOR_ACCENT } else { COLOR_TEXT_MUTED };
+                            let col = if session.scroll_offset > 0 { self.theme.accent_color() } else { self.theme.text_muted_color() };
                             ui.label(egui::RichText::new(scroll_info).small().color(col));
                         }
                     });
@@ -700,19 +863,19 @@ impl eframe::App for AppState {
                                 egui::RichText::new(format!("A new version ({}) of AZTerm is ready!", new_tag))
                                     .strong()
                                     .size(15.0)
-                                    .color(COLOR_ACCENT),
+                                    .color(self.theme.accent_color()),
                             );
                             ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(format!("Current version: v{}", env!("CARGO_PKG_VERSION")))
                                     .small()
-                                    .color(COLOR_TEXT_MUTED),
+                                    .color(self.theme.text_muted_color()),
                             );
                             ui.add_space(4.0);
                             ui.label(
                                 egui::RichText::new(format!("Detected installation: {}", self.install_method.display_name()))
                                     .small()
-                                    .color(COLOR_TEXT_PRIMARY),
+                                    .color(self.theme.text_primary_color()),
                             );
 
                             ui.add_space(10.0);
@@ -724,7 +887,7 @@ impl eframe::App for AppState {
                                     ui.label("Would you like to run the official updater script in a new terminal session?");
                                     ui.add_space(6.0);
                                     egui::Frame::none()
-                                        .fill(COLOR_BG_PANEL)
+                                        .fill(self.theme.bg_panel_color())
                                         .rounding(4.0)
                                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                                         .show(ui, |ui| {
@@ -941,16 +1104,16 @@ impl eframe::App for AppState {
 
         // Central Workspace Area
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(COLOR_BG_MAIN))
+            .frame(egui::Frame::none().fill(self.theme.bg_main_color()))
             .show(ctx, |ui| match self.active_view {
                 ActiveView::Terminal => {
                     let mut toast = self.toast_message.clone();
                     if self.settings.show_sftp_split_view {
                         ui.columns(2, |columns| {
                             if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
-                                session.render(&mut columns[0], &self.settings, &mut toast);
+                                session.render(&mut columns[0], &self.settings, &self.theme, &mut toast);
                             }
-                            card_frame().show(&mut columns[1], |ui| {
+                            self.theme.card_frame().show(&mut columns[1], |ui| {
                                 ui.horizontal(|ui| {
                                     ui.heading("SFTP Sync Pane");
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -960,11 +1123,11 @@ impl eframe::App for AppState {
                                     });
                                 });
                                 ui.separator();
-                                self.sftp.right_pane.render(ui);
+                                self.sftp.right_pane.render(ui, &self.theme);
                             });
                         });
                     } else if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
-                        session.render(ui, &self.settings, &mut toast);
+                        session.render(ui, &self.settings, &self.theme, &mut toast);
                     } else {
                         ui.centered_and_justified(|ui| {
                             if ui.button("Open Shell Session").clicked() {
@@ -978,7 +1141,7 @@ impl eframe::App for AppState {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(14.0);
                         ui.horizontal(|ui| {
-                            ui.heading(egui::RichText::new("SSH Manager").color(COLOR_TEXT_PRIMARY));
+                            ui.heading(egui::RichText::new("SSH Manager").color(self.theme.text_primary_color()));
                             ui.add_space(16.0);
                             if ui.selectable_label(self.ssh_subview == SshSubView::Profiles, "Connections").clicked() {
                                 self.ssh_subview = SshSubView::Profiles;
@@ -1008,21 +1171,21 @@ impl eframe::App for AppState {
                                 let mut sftp_profile: Option<SshProfile> = None;
 
                                 for (idx, profile) in profiles.iter().enumerate() {
-                                    card_frame().show(ui, |ui| {
+                                    self.theme.card_frame().show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
-                                                    ui.label(egui::RichText::new(&profile.name).strong().size(15.0).color(COLOR_TEXT_PRIMARY));
+                                                    ui.label(egui::RichText::new(&profile.name).strong().size(15.0).color(self.theme.text_primary_color()));
                                                     let auth_badge = match &profile.auth_type {
                                                         SshAuthType::PasswordOrAgent => "[Password/Agent]",
                                                         SshAuthType::KeyFile(_) => "[Key File]",
                                                         SshAuthType::PastedKey { .. } => "[Inline Key]",
                                                     };
-                                                    ui.label(egui::RichText::new(auth_badge).color(COLOR_ACCENT).small());
+                                                    ui.label(egui::RichText::new(auth_badge).color(self.theme.accent_color()).small());
                                                 });
                                                 ui.label(
                                                     egui::RichText::new(format!("{}@{}:{}", profile.username, profile.host, profile.port))
-                                                        .color(COLOR_TEXT_MUTED),
+                                                        .color(self.theme.text_muted_color()),
                                                 );
                                             });
 
@@ -1063,18 +1226,18 @@ impl eframe::App for AppState {
                             SshSubView::KeysManager => {
                                 let saved_keys = SshStore::list_saved_keys();
                                 if saved_keys.is_empty() {
-                                    card_frame().show(ui, |ui| {
-                                        ui.label(egui::RichText::new("No SSH keys stored in ~/.config/azterm/keys yet.").color(COLOR_TEXT_MUTED));
+                                    self.theme.card_frame().show(ui, |ui| {
+                                        ui.label(egui::RichText::new("No SSH keys stored in ~/.config/azterm/keys yet.").color(self.theme.text_muted_color()));
                                     });
                                 } else {
                                     let mut key_to_delete: Option<String> = None;
 
                                     for key in saved_keys {
-                                        card_frame().show(ui, |ui| {
+                                        self.theme.card_frame().show(ui, |ui| {
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
-                                                    ui.label(egui::RichText::new(&key.file_name).strong().color(COLOR_ACCENT));
-                                                    ui.label(egui::RichText::new(format!("Path: {}", key.priv_path.display())).small().color(COLOR_TEXT_MUTED));
+                                                    ui.label(egui::RichText::new(&key.file_name).strong().color(self.theme.accent_color()));
+                                                    ui.label(egui::RichText::new(format!("Path: {}", key.priv_path.display())).small().color(self.theme.text_muted_color()));
                                                 });
 
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1108,9 +1271,9 @@ impl eframe::App for AppState {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add_space(10.0);
 
-                        card_frame().show(ui, |ui| {
+                        self.theme.card_frame().show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Dual-Session SFTP File Transfer").strong().color(COLOR_ACCENT));
+                                ui.label(egui::RichText::new("Dual-Session SFTP File Transfer").strong().color(self.theme.accent_color()));
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if ui.button("Download (Right -> Left)").clicked() {
@@ -1126,7 +1289,7 @@ impl eframe::App for AppState {
                         ui.add_space(10.0);
 
                         ui.columns(2, |cols| {
-                            card_frame().show(&mut cols[0], |ui| {
+                            self.theme.card_frame().show(&mut cols[0], |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Left Pane:").strong());
                                     let is_local = self.sftp.left_pane.target == SftpTarget::Local;
@@ -1145,10 +1308,10 @@ impl eframe::App for AppState {
                                         });
                                 });
                                 ui.separator();
-                                self.sftp.left_pane.render(ui);
+                                self.sftp.left_pane.render(ui, &self.theme);
                             });
 
-                            card_frame().show(&mut cols[1], |ui| {
+                            self.theme.card_frame().show(&mut cols[1], |ui| {
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Right Pane:").strong());
                                     let right_desc = match &self.sftp.right_pane.target {
@@ -1171,7 +1334,7 @@ impl eframe::App for AppState {
                                         });
                                 });
                                 ui.separator();
-                                self.sftp.right_pane.render(ui);
+                                self.sftp.right_pane.render(ui, &self.theme);
                             });
                         });
                     });
@@ -1181,13 +1344,13 @@ impl eframe::App for AppState {
                         columns[0].set_max_width(210.0);
                         columns[0].vertical(|ui| {
                             ui.add_space(10.0);
-                            ui.label(egui::RichText::new("Preferences").strong().size(16.0).color(COLOR_TEXT_PRIMARY));
+                            ui.label(egui::RichText::new("Preferences").strong().size(16.0).color(self.theme.text_primary_color()));
                             ui.add_space(12.0);
 
-                            let nav_item = |ui: &mut egui::Ui, cat: SettingsCategory, label: &str, current: SettingsCategory| -> bool {
+                            let nav_item = |ui: &mut egui::Ui, cat: SettingsCategory, label: &str, current: SettingsCategory, theme: &ThemeConfig| -> bool {
                                 let is_active = current == cat;
-                                let bg = if is_active { COLOR_BG_CARD } else { egui::Color32::TRANSPARENT };
-                                let stroke = if is_active { egui::Stroke::new(1.0_f32, COLOR_ACCENT) } else { egui::Stroke::NONE };
+                                let bg = if is_active { theme.bg_card_color() } else { egui::Color32::TRANSPARENT };
+                                let stroke = if is_active { egui::Stroke::new(1.0_f32, theme.accent_color()) } else { egui::Stroke::NONE };
 
                                 egui::Frame::none()
                                     .fill(bg)
@@ -1196,24 +1359,28 @@ impl eframe::App for AppState {
                                     .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                                     .show(ui, |ui| {
                                         ui.set_width(180.0);
-                                        let text_color = if is_active { COLOR_ACCENT } else { COLOR_TEXT_PRIMARY };
+                                        let text_color = if is_active { theme.accent_color() } else { theme.text_primary_color() };
                                         ui.selectable_label(is_active, egui::RichText::new(label).color(text_color)).clicked()
                                     }).inner
                             };
 
-                            if nav_item(ui, SettingsCategory::Terminal, "Terminal Interaction", self.settings_category) {
+                            if nav_item(ui, SettingsCategory::Appearance, "Themes & Window", self.settings_category, &self.theme) {
+                                self.settings_category = SettingsCategory::Appearance;
+                            }
+                            ui.add_space(4.0);
+                            if nav_item(ui, SettingsCategory::Terminal, "Terminal Interaction", self.settings_category, &self.theme) {
                                 self.settings_category = SettingsCategory::Terminal;
                             }
                             ui.add_space(4.0);
-                            if nav_item(ui, SettingsCategory::ShellEnv, "Shell & Environment", self.settings_category) {
+                            if nav_item(ui, SettingsCategory::ShellEnv, "Shell & Environment", self.settings_category, &self.theme) {
                                 self.settings_category = SettingsCategory::ShellEnv;
                             }
                             ui.add_space(4.0);
-                            if nav_item(ui, SettingsCategory::Sftp, "SFTP & Transfers", self.settings_category) {
+                            if nav_item(ui, SettingsCategory::Sftp, "SFTP & Transfers", self.settings_category, &self.theme) {
                                 self.settings_category = SettingsCategory::Sftp;
                             }
                             ui.add_space(4.0);
-                            if nav_item(ui, SettingsCategory::System, "Application & System", self.settings_category) {
+                            if nav_item(ui, SettingsCategory::System, "Application & System", self.settings_category, &self.theme) {
                                 self.settings_category = SettingsCategory::System;
                             }
 
@@ -1223,6 +1390,8 @@ impl eframe::App for AppState {
                             if ui.button("Restore Defaults").clicked() {
                                 self.settings = AppSettings::default();
                                 self.settings.save();
+                                self.theme = ThemeConfig::default();
+                                Database::save_active_theme(&self.theme);
                                 self.set_toast("Defaults Restored");
                             }
                         });
@@ -1231,22 +1400,197 @@ impl eframe::App for AppState {
                             ui.add_space(10.0);
                             let mut changed = false;
 
-                            card_frame().show(ui, |ui| {
+                            self.theme.card_frame().show(ui, |ui| {
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     match self.settings_category {
-                                        SettingsCategory::Terminal => {
-                                            ui.label(egui::RichText::new("Terminal Interaction").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and scrollback depth.").small().color(COLOR_TEXT_MUTED));
+                                        SettingsCategory::Appearance => {
+                                            ui.label(egui::RichText::new("Themes & Window Appearance").strong().size(16.0).color(self.theme.accent_color()));
+                                            ui.label(egui::RichText::new("Choose from built-in themes, customize colors, transparency, and window decorations.").small().color(self.theme.text_muted_color()));
                                             ui.add_space(12.0);
 
-                                            changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut self.settings.cursor_blink);
-                                            changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut self.settings.copy_on_select);
-                                            changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut self.settings.paste_on_right_click);
+                                            if setting_row_toggle(
+                                                ui,
+                                                "Use OS Native Title Bar",
+                                                "Use system window decorations. Toggle off to use the sleek custom integrated AZTerm titlebar.",
+                                                &mut self.settings.use_system_titlebar,
+                                                &self.theme,
+                                            ) {
+                                                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(self.settings.use_system_titlebar));
+                                                changed = true;
+                                            }
 
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
-                                                    ui.label(egui::RichText::new("Scrollback Buffer Depth").strong().color(COLOR_TEXT_PRIMARY));
-                                                    ui.label(egui::RichText::new("Total lines of output history retained per tab (scroll with mouse wheel).").small().color(COLOR_TEXT_MUTED));
+                                                    ui.label(egui::RichText::new("Window Background Opacity").strong().color(self.theme.text_primary_color()));
+                                                    ui.label(egui::RichText::new("Set terminal transparency (20% to 100%). Live preview as you drag.").small().color(self.theme.text_muted_color()));
+                                                });
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    let pct = (self.theme.opacity * 100.0).round() as u32;
+                                                    ui.label(format!("{}%", pct));
+                                                    if ui.add(egui::Slider::new(&mut self.theme.opacity, 0.20..=1.0).show_value(false)).changed() {
+                                                        Database::save_active_theme(&self.theme);
+                                                    }
+                                                });
+                                            });
+                                            ui.add_space(8.0);
+                                            ui.separator();
+                                            ui.add_space(8.0);
+
+                                            ui.label(egui::RichText::new("Select Theme Preset").strong().color(self.theme.text_primary_color()));
+                                            ui.add_space(4.0);
+
+                                            let builtins = ThemeConfig::builtins();
+                                            let mut selected_theme_to_apply: Option<ThemeConfig> = None;
+
+                                            ui.horizontal_wrapped(|ui| {
+                                                for preset in &builtins {
+                                                    let is_active = self.theme.id == preset.id;
+                                                    let btn = ui.selectable_label(is_active, &preset.name);
+                                                    if btn.clicked() {
+                                                        let mut new_th = preset.clone();
+                                                        new_th.opacity = self.theme.opacity;
+                                                        selected_theme_to_apply = Some(new_th);
+                                                    }
+                                                }
+                                                for custom in &self.custom_themes {
+                                                    let is_active = self.theme.id == custom.id;
+                                                    let label = format!("★ {}", custom.name);
+                                                    let btn = ui.selectable_label(is_active, label);
+                                                    if btn.clicked() {
+                                                        let mut new_th = custom.clone();
+                                                        new_th.opacity = self.theme.opacity;
+                                                        selected_theme_to_apply = Some(new_th);
+                                                    }
+                                                }
+                                            });
+
+                                            if let Some(new_th) = selected_theme_to_apply {
+                                                self.theme = new_th;
+                                                Database::save_active_theme(&self.theme);
+                                                self.set_toast(format!("Theme applied: {}", self.theme.name));
+                                            }
+
+                                            ui.add_space(8.0);
+                                            ui.horizontal(|ui| {
+                                                ui.text_edit_singleline(&mut self.new_theme_name);
+                                                if ui.button("+ Duplicate Current as Custom").clicked() {
+                                                    let mut custom = self.theme.clone();
+                                                    custom.id = format!("custom_{}", chrono::Utc::now().timestamp_millis());
+                                                    custom.name = self.new_theme_name.clone();
+                                                    custom.is_builtin = false;
+                                                    self.custom_themes.push(custom.clone());
+                                                    self.theme = custom;
+                                                    Database::save_custom_themes(&self.custom_themes);
+                                                    Database::save_active_theme(&self.theme);
+                                                    self.set_toast("Custom Theme Created");
+                                                }
+
+                                                if !self.theme.is_builtin {
+                                                    if ui.button("Delete This Custom Theme").clicked() {
+                                                        let delete_id = self.theme.id.clone();
+                                                        self.custom_themes.retain(|t| t.id != delete_id);
+                                                        Database::save_custom_themes(&self.custom_themes);
+                                                        self.theme = ThemeConfig::cyber_cyan();
+                                                        Database::save_active_theme(&self.theme);
+                                                        self.set_toast("Custom Theme Deleted");
+                                                    }
+                                                }
+                                            });
+
+                                            ui.add_space(10.0);
+                                            ui.separator();
+                                            ui.add_space(10.0);
+
+                                            ui.label(egui::RichText::new("Theme Colors (Real-Time Customization)").strong().color(self.theme.accent_color()));
+                                            ui.label(egui::RichText::new("Click any color swatch below to open the color picker. Changes take effect instantly.").small().color(self.theme.text_muted_color()));
+                                            ui.add_space(8.0);
+
+                                            let mut color_modified = false;
+
+                                            egui::Grid::new("colors_grid").num_columns(4).spacing([18.0, 8.0]).show(ui, |ui| {
+                                                ui.label("Terminal Background:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.bg_main).changed();
+
+                                                ui.label("Panel & Nav Background:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.bg_panel).changed();
+                                                ui.end_row();
+
+                                                ui.label("Card Background:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.bg_card).changed();
+
+                                                ui.label("Borders & Dividers:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.border).changed();
+                                                ui.end_row();
+
+                                                ui.label("Primary Accent:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.accent).changed();
+
+                                                ui.label("Accent Hover:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.accent_hover).changed();
+                                                ui.end_row();
+
+                                                ui.label("Primary Text:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.text_primary).changed();
+
+                                                ui.label("Muted Text:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.text_muted).changed();
+                                                ui.end_row();
+
+                                                ui.label("Success Badge:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.success).changed();
+
+                                                ui.label("Danger / Close:");
+                                                color_modified |= ui.color_edit_button_srgb(&mut self.theme.danger).changed();
+                                                ui.end_row();
+                                            });
+
+                                            ui.add_space(10.0);
+                                            ui.label(egui::RichText::new("Terminal 16 ANSI Palette").strong().color(self.theme.text_primary_color()));
+                                            ui.add_space(6.0);
+
+                                            egui::Grid::new("ansi_grid").num_columns(8).spacing([10.0, 6.0]).show(ui, |ui| {
+                                                let labels = ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White"];
+                                                for (i, name) in labels.iter().enumerate() {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(egui::RichText::new(*name).small().color(self.theme.text_muted_color()));
+                                                        color_modified |= ui.color_edit_button_srgb(&mut self.theme.ansi_colors[i]).changed();
+                                                    });
+                                                }
+                                                ui.end_row();
+
+                                                let bright_labels = ["Br-Black", "Br-Red", "Br-Green", "Br-Yellow", "Br-Blue", "Br-Magenta", "Br-Cyan", "Br-White"];
+                                                for (i, name) in bright_labels.iter().enumerate() {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(egui::RichText::new(*name).small().color(self.theme.text_muted_color()));
+                                                        color_modified |= ui.color_edit_button_srgb(&mut self.theme.ansi_colors[i + 8]).changed();
+                                                    });
+                                                }
+                                                ui.end_row();
+                                            });
+
+                                            if color_modified {
+                                                if !self.theme.is_builtin {
+                                                    if let Some(existing) = self.custom_themes.iter_mut().find(|t| t.id == self.theme.id) {
+                                                        *existing = self.theme.clone();
+                                                        Database::save_custom_themes(&self.custom_themes);
+                                                    }
+                                                }
+                                                Database::save_active_theme(&self.theme);
+                                            }
+                                        }
+                                        SettingsCategory::Terminal => {
+                                            ui.label(egui::RichText::new("Terminal Interaction").strong().size(16.0).color(self.theme.accent_color()));
+                                            ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and scrollback depth.").small().color(self.theme.text_muted_color()));
+                                            ui.add_space(12.0);
+
+                                            changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut self.settings.cursor_blink, &self.theme);
+                                            changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut self.settings.copy_on_select, &self.theme);
+                                            changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut self.settings.paste_on_right_click, &self.theme);
+
+                                            ui.horizontal(|ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(egui::RichText::new("Scrollback Buffer Depth").strong().color(self.theme.text_primary_color()));
+                                                    ui.label(egui::RichText::new("Total lines of output history retained per tab (scroll with mouse wheel).").small().color(self.theme.text_muted_color()));
                                                 });
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     egui::ComboBox::from_id_source("scrollback_depth_combo")
@@ -1270,14 +1614,14 @@ impl eframe::App for AppState {
                                             setting_row_disabled(ui, "Auto Reconnect on Disconnect", "Automatically retry remote SSH sessions when connection drops.", self.settings.auto_reconnect_terminal);
                                         }
                                         SettingsCategory::ShellEnv => {
-                                            ui.label(egui::RichText::new("Shell & Environment").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Set your default command interpreter, session log directories, and keycodes.").small().color(COLOR_TEXT_MUTED));
+                                            ui.label(egui::RichText::new("Shell & Environment").strong().size(16.0).color(self.theme.accent_color()));
+                                            ui.label(egui::RichText::new("Set your default command interpreter, session log directories, and keycodes.").small().color(self.theme.text_muted_color()));
                                             ui.add_space(12.0);
 
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
-                                                    ui.label(egui::RichText::new("Default Shell Path").strong().color(COLOR_TEXT_PRIMARY));
-                                                    ui.label(egui::RichText::new("Executable path spawned when opening new local tabs.").small().color(COLOR_TEXT_MUTED));
+                                                    ui.label(egui::RichText::new("Default Shell Path").strong().color(self.theme.text_primary_color()));
+                                                    ui.label(egui::RichText::new("Executable path spawned when opening new local tabs.").small().color(self.theme.text_muted_color()));
                                                 });
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     if ui.add(egui::TextEdit::singleline(&mut self.settings.default_shell).desired_width(180.0)).changed() {
@@ -1287,7 +1631,7 @@ impl eframe::App for AppState {
                                             });
                                             ui.add_space(4.0);
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("Shell Presets:").small().color(COLOR_TEXT_MUTED));
+                                                ui.label(egui::RichText::new("Shell Presets:").small().color(self.theme.text_muted_color()));
                                                 if ui.small_button("bash").clicked() { self.settings.default_shell = "/bin/bash".to_string(); changed = true; }
                                                 if ui.small_button("zsh").clicked() { self.settings.default_shell = "/bin/zsh".to_string(); changed = true; }
                                                 if ui.small_button("fish").clicked() { self.settings.default_shell = "/bin/fish".to_string(); changed = true; }
@@ -1298,8 +1642,8 @@ impl eframe::App for AppState {
 
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
-                                                    ui.label(egui::RichText::new("Backspace Keycode Sequence").strong().color(COLOR_TEXT_PRIMARY));
-                                                    ui.label(egui::RichText::new("Control character code sent to PTY upon pressing Backspace.").small().color(COLOR_TEXT_MUTED));
+                                                    ui.label(egui::RichText::new("Backspace Keycode Sequence").strong().color(self.theme.text_primary_color()));
+                                                    ui.label(egui::RichText::new("Control character code sent to PTY upon pressing Backspace.").small().color(self.theme.text_muted_color()));
                                                 });
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     egui::ComboBox::from_id_source("backspace_seq_select")
@@ -1322,11 +1666,11 @@ impl eframe::App for AppState {
                                             setting_row_disabled(ui, "Timestamp Log Entries", "Prefix each logged output line with local ISO timestamp.", self.settings.add_timestamp_to_log);
                                         }
                                         SettingsCategory::Sftp => {
-                                            ui.label(egui::RichText::new("SFTP & File Transfers").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Manage remote directory traversal, split paneling, and file syncing.").small().color(COLOR_TEXT_MUTED));
+                                            ui.label(egui::RichText::new("SFTP & File Transfers").strong().size(16.0).color(self.theme.accent_color()));
+                                            ui.label(egui::RichText::new("Manage remote directory traversal, split paneling, and file syncing.").small().color(self.theme.text_muted_color()));
                                             ui.add_space(12.0);
 
-                                            changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut self.settings.show_sftp_split_view);
+                                            changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut self.settings.show_sftp_split_view, &self.theme);
 
                                             setting_row_disabled(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", self.settings.sftp_path_sync);
                                             setting_row_disabled(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", self.settings.auto_refresh_sftp);
@@ -1334,13 +1678,13 @@ impl eframe::App for AppState {
                                             setting_row_disabled(ui, "Disable SFTP Transfer History", "Do not write upload/download records to disk.", self.settings.disable_sftp_history);
                                         }
                                         SettingsCategory::System => {
-                                            ui.label(egui::RichText::new("Application & System").strong().size(16.0).color(COLOR_ACCENT));
-                                            ui.label(egui::RichText::new("Window behavior, multi-instance options, and update checks.").small().color(COLOR_TEXT_MUTED));
+                                            ui.label(egui::RichText::new("Application & System").strong().size(16.0).color(self.theme.accent_color()));
+                                            ui.label(egui::RichText::new("Window behavior, multi-instance options, and update checks.").small().color(self.theme.text_muted_color()));
                                             ui.add_space(12.0);
 
-                                            changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab);
+                                            changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut self.settings.open_default_tab, &self.theme);
 
-                                            if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates) {
+                                            if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut self.settings.check_updates, &self.theme) {
                                                 changed = true;
                                                 if !self.settings.check_updates {
                                                     self.available_update = None;
@@ -1350,7 +1694,7 @@ impl eframe::App for AppState {
 
                                             ui.horizontal(|ui| {
                                                 ui.vertical(|ui| {
-                                                    ui.label(egui::RichText::new("Manual Update Check").strong().color(COLOR_TEXT_PRIMARY));
+                                                    ui.label(egui::RichText::new("Manual Update Check").strong().color(self.theme.text_primary_color()));
                                                     let status_text = if self.is_checking_update {
                                                         "Checking GitHub releases...".to_string()
                                                     } else if let Some(ref tag) = self.available_update {
@@ -1358,7 +1702,7 @@ impl eframe::App for AppState {
                                                     } else {
                                                         format!("Current version is v{}", env!("CARGO_PKG_VERSION"))
                                                     };
-                                                    ui.label(egui::RichText::new(status_text).small().color(COLOR_TEXT_MUTED));
+                                                    ui.label(egui::RichText::new(status_text).small().color(self.theme.text_muted_color()));
                                                 });
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     if ui.button("Check for Updates Now").clicked() {
@@ -1374,7 +1718,6 @@ impl eframe::App for AppState {
                                             setting_row_disabled(ui, "Allow Multi-Instance Execution", "Permit launching multiple independent AZTerm window processes.", self.settings.allow_multi_instance);
                                             setting_row_disabled(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", self.settings.confirm_before_exit);
                                             setting_row_disabled(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", self.settings.hide_ip);
-                                            setting_row_disabled(ui, "Use System Title Bar", "Delegate window decorations to your desktop window manager.", self.settings.use_system_titlebar);
                                             setting_row_disabled(ui, "Disable Connection History", "Do not cache recent SSH session targets in SQLite.", self.settings.disable_connection_history);
                                             setting_row_disabled(ui, "Debug Logging Mode", "Emit verbose PTY and layout traces to stderr.", self.settings.debug_mode);
                                         }
@@ -1394,12 +1737,16 @@ impl eframe::App for AppState {
 
 fn main() -> eframe::Result<()> {
     let cli_opts = parse_cli_arguments();
+    let initial_settings = AppSettings::load();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1160.0, 740.0])
             .with_title("AZTerm")
-            .with_app_id("azterm"),
+            .with_app_id("azterm")
+            .with_transparent(true)
+            .with_decorations(initial_settings.use_system_titlebar)
+            .with_resizable(true),
         ..Default::default()
     };
     eframe::run_native(
