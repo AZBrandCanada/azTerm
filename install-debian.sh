@@ -42,7 +42,7 @@ fi
 echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release
 
-echo "[4/5] Installing binary and desktop integration..."
+echo "[4/5] Installing binary to all system and user PATH locations..."
 sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
@@ -50,15 +50,30 @@ if [ -f "/usr/bin/azterm" ] || [ -L "/usr/bin/azterm" ]; then
     sudo install -Dm755 target/release/azterm /usr/bin/azterm
 fi
 
+mkdir -p "$HOME/.local/bin"
+install -Dm755 target/release/azterm "$HOME/.local/bin/azterm"
+
+if [ -f "$HOME/.cargo/bin/azterm" ]; then
+    install -Dm755 target/release/azterm "$HOME/.cargo/bin/azterm"
+fi
+
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
+    mkdir -p "$HOME/.local/share/applications"
+    install -Dm644 assets/azterm.desktop "$HOME/.local/share/applications/azterm.desktop"
 fi
 if [ -f "assets/azterm.svg" ]; then
     sudo install -Dm644 assets/azterm.svg /usr/share/icons/hicolor/scalable/apps/azterm.svg
+    mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
+    install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
 fi
 
 echo "[5/5] Updating desktop & icon caches..."
 sudo update-desktop-database -q /usr/share/applications || true
+update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
 sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 
-echo "AZTerm installation on Debian/Ubuntu complete!"
+echo "=========================================================="
+echo " AZTerm updated successfully on Debian/Ubuntu!"
+echo " Binary path: $(which azterm)"
+echo "=========================================================="
