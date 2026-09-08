@@ -43,19 +43,60 @@ fi
 echo "[3/5] Compiling AZTerm in release mode..."
 cargo build --release
 
-echo "[4/5] Installing binary and desktop integration..."
+echo "[4/5] Self-healing and installing to all detected PATH locations..."
 sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps
 sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
+declare -A SEEN_LOCS
+LOCATIONS=(
+    "/usr/local/bin/azterm"
+    "/usr/bin/azterm"
+    "$HOME/.local/bin/azterm"
+    "$HOME/.cargo/bin/azterm"
+    "$HOME/bin/azterm"
+)
+
+if command -v which &>/dev/null; then
+    while IFS= read -r path; do
+        if [ -n "$path" ]; then
+            LOCATIONS+=("$path")
+        fi
+    done < <(which -a azterm 2>/dev/null || true)
+fi
+
+for loc in "${LOCATIONS[@]}"; do
+    if [ -n "$loc" ] && [ -z "${SEEN_LOCS[$loc]}" ]; then
+        SEEN_LOCS["$loc"]=1
+        if [ -e "$loc" ] || [ -L "$loc" ] || [ "$loc" = "$HOME/.local/bin/azterm" ]; then
+            dir_name=$(dirname "$loc")
+            if [ -w "$dir_name" ]; then
+                install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+            else
+                sudo install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+            fi
+        fi
+    fi
+done
+
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
+    mkdir -p "$HOME/.local/share/applications"
+    install -Dm644 assets/azterm.desktop "$HOME/.local/share/applications/azterm.desktop"
 fi
 if [ -f "assets/azterm.svg" ]; then
     sudo install -Dm644 assets/azterm.svg /usr/share/icons/hicolor/scalable/apps/azterm.svg
+    mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
+    install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
 fi
 
 echo "[5/5] Updating desktop & icon caches..."
 sudo update-desktop-database -q /usr/share/applications || true
+update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
 sudo gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 
-echo "AZTerm installation on Fedora complete!"
+hash -r 2>/dev/null || true
+
+echo "=========================================================="
+echo " AZTerm installation on Fedora complete!"
+echo " Active binary: $(which azterm)"
+echo "=========================================================="
