@@ -77,6 +77,7 @@ for loc in "${LOCATIONS[@]}"; do
     fi
 done
 
+# Desktop Entry & Icon
 if [ -f "assets/azterm.desktop" ]; then
     sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
     mkdir -p "$HOME/.local/share/applications"
@@ -87,6 +88,19 @@ if [ -f "assets/azterm.svg" ]; then
     mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
     install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
 fi
+
+# Ubuntu / GNOME Files (Nautilus) Integration
+mkdir -p "$HOME/.local/share/nautilus/scripts"
+cat << 'EOF' > "$HOME/.local/share/nautilus/scripts/Open in azTerm"
+#!/usr/bin/env bash
+# If a folder was selected, enter it; otherwise use the current directory ($PWD)
+target="${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS%%$'\n'*}"
+if [ -n "$target" ] && [ -d "$target" ]; then
+    cd "$target"
+fi
+exec /usr/local/bin/azterm
+EOF
+chmod +x "$HOME/.local/share/nautilus/scripts/Open in azTerm"
 
 # KDE Dolphin ServiceMenu
 if [ -f "assets/servicemenus/azterm_open.desktop" ]; then
@@ -103,7 +117,13 @@ if [ -f "assets/nemo/azterm.nemo_action" ]; then
     sudo install -Dm644 assets/nemo/azterm.nemo_action /usr/share/nemo/actions/azterm.nemo_action 2>/dev/null || true
 fi
 
-echo "[5/5] Updating desktop, icon, and KDE servicemenu caches..."
+# Register as default Debian/Ubuntu terminal alternative
+if command -v update-alternatives &>/dev/null; then
+    sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/local/bin/azterm 50 2>/dev/null || true
+    sudo update-alternatives --set x-terminal-emulator /usr/local/bin/azterm 2>/dev/null || true
+fi
+
+echo "[5/5] Updating desktop, icon, and file manager caches..."
 sudo update-desktop-database -q /usr/share/applications 2>/dev/null || true
 update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
 sudo gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
@@ -114,9 +134,15 @@ elif command -v kbuildsycoca5 &>/dev/null; then
     kbuildsycoca5 --noincremental 2>/dev/null || true
 fi
 
+# Reload Nautilus if it is currently running
+if command -v nautilus &>/dev/null; then
+    nautilus -q 2>/dev/null || true
+fi
+
 hash -r 2>/dev/null || true
 
 echo "=========================================================="
 echo " AZTerm updated successfully on Debian/Ubuntu!"
 echo " Active binary: $(which azterm)"
+echo " In Nautilus (Files): Right-click -> Scripts -> Open in azTerm"
 echo "=========================================================="
