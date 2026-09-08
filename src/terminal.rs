@@ -135,6 +135,7 @@ pub struct TerminalSession {
     pub scroll_offset: usize,
     pub max_scroll: usize,
 
+    // Absolute buffer line coordinates: (line_age, col) where line_age = scroll_offset + (rows - 1 - r)
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
@@ -208,7 +209,6 @@ impl TerminalSession {
         }
     }
 
-    /// Safely clamps scrollback within vt100's real allocated buffer bounds to avoid subtraction underflow
     pub fn safe_set_scrollback(&mut self, target: usize) {
         if target == 0 {
             self.scroll_offset = 0;
@@ -261,8 +261,6 @@ impl TerminalSession {
         }
     }
 
-    /// Properly sends pasted text: uses Bracketed Paste Mode if enabled by the application,
-    /// or normalizes newlines to \r (Carriage Return) to prevent staircase indentation bugs.
     pub fn send_paste(&mut self, text: &str) {
         if text.is_empty() {
             return;
@@ -271,14 +269,10 @@ impl TerminalSession {
 
         let bracketed = self.parser.screen().bracketed_paste();
         let payload = if bracketed {
-            // Strip raw ESC to avoid escape sequence injection attacks
             let sanitized = text.replace('\x1b', "");
-            // Normalize CRLF or lone CR to standard LF inside bracketed paste
             let normalized = sanitized.replace("\r\n", "\n").replace('\r', "\n");
             format!("\x1b[200~{}\x1b[201~", normalized)
         } else {
-            // When bracketed paste is off, standard terminal convention (Alacritty, Kitty, WezTerm):
-            // Deliver line breaks as carriage returns (\r) to return to column 0 without staircase effect
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
 
@@ -294,7 +288,6 @@ impl TerminalSession {
             let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
             self.max_scroll = (self.max_scroll + newlines).min(10000);
 
-            // Safe cursor guard
             let (cur_r, _) = self.parser.screen().cursor_position();
             if cur_r >= self.rows {
                 let safe_r = self.rows.saturating_sub(1);
@@ -314,28 +307,30 @@ impl TerminalSession {
         }
     }
 
-    fn is_cell_selected(&self, abs_line: i64, c: u16) -> bool {
+    fn is_cell_selected(&self, line_age: i64, c: u16) -> bool {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
             if start == end {
                 return false;
             }
-            let (mut l1, mut c1) = start;
-            let (mut l2, mut c2) = end;
-            if l1 > l2 || (l1 == l2 && c1 > c2) {
-                std::mem::swap(&mut l1, &mut l2);
-                std::mem::swap(&mut c1, &mut c2);
-            }
-            if abs_line < l1 || abs_line > l2 {
+            // Higher line_age means physically higher up / older in buffer
+            let (top_age, top_col, bot_age, bot_col) = if start.0 > end.0 || (start.0 == end.0 && start.1 <= end.1) {
+                (start.0, start.1, end.0, end.1)
+            } else {
+                (end.0, end.1, start.0, start.1)
+            };
+
+            if line_age > top_age || line_age < bot_age {
                 return false;
             }
-            if abs_line == l1 && abs_line == l2 {
+            if line_age == top_age && line_age == bot_age {
+                let (c1, c2) = if top_col <= bot_col { (top_col, bot_col) } else { (bot_col, top_col) };
                 return c >= c1 && c <= c2;
             }
-            if abs_line == l1 {
-                return c >= c1;
+            if line_age == top_age {
+                return c >= top_col;
             }
-            if abs_line == l2 {
-                return c <= c2;
+            if line_age == bot_age {
+                return c <= bot_col;
             }
             true
         } else {
@@ -379,43 +374,46 @@ impl TerminalSession {
 
     fn extract_selected_text(&mut self) -> String {
         let mut result = String::new();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
-                let (mut l1, mut c1) = start;
-                let (mut l2, mut c2) = end;
-                if l1 > l2 || (l1 == l2 && c1 > c2) {
-                    std::mem::swap(&mut l1, &mut l2);
-                    std::mem::swap(&mut c1, &mut c2);
-                }
+        if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+            let (top_age, top_col, bot_age, bot_col) = if start.0 > end.0 || (start.0 == end.0 && start.1 <= end.1) {
+                (start.0, start.1, end.0, end.1)
+            } else {
+                (end.0, end.1, start.0, start.1)
+            };
 
+            let saved_offset = self.scroll_offset;
+
+            for age in (bot_age..=top_age).rev() {
+                // Read from vt100 parser at exact line age
+                self.parser.set_scrollback(age.max(0) as usize);
                 let screen = self.parser.screen();
+                let r = self.rows.saturating_sub(1);
 
-                for l in l1..=l2 {
-                    let screen_r = (l.max(0) as u16).min(self.rows.saturating_sub(1));
-                    let start_c = if l == l1 { c1 } else { 0 };
-                    let end_c = if l == l2 { c2 } else { self.cols.saturating_sub(1) };
-                    let mut line = String::new();
+                let start_c = if age == top_age { top_col } else { 0 };
+                let end_c = if age == bot_age { bot_col } else { self.cols.saturating_sub(1) };
 
-                    for c in start_c..=end_c {
-                        if let Some(cell) = screen.cell(screen_r, c) {
-                            if cell.is_wide_continuation() {
-                                continue;
-                            }
-                            let text = cell.contents();
-                            if text.is_empty() {
-                                line.push(' ');
-                            } else {
-                                line.push_str(&text);
-                            }
+                let mut line = String::new();
+                for c in start_c..=end_c {
+                    if let Some(cell) = screen.cell(r, c) {
+                        if cell.is_wide_continuation() {
+                            continue;
+                        }
+                        let text = cell.contents();
+                        if text.is_empty() {
+                            line.push(' ');
+                        } else {
+                            line.push_str(&text);
                         }
                     }
-                    result.push_str(line.trim_end());
-                    if l != l2 {
-                        result.push('\n');
-                    }
+                }
+                result.push_str(line.trim_end());
+                if age != bot_age {
+                    result.push('\n');
                 }
             }
-        }));
+
+            self.parser.set_scrollback(saved_offset);
+        }
         result
     }
 
@@ -600,7 +598,6 @@ impl TerminalSession {
         let font_size = 14.0;
         let font_id = egui::FontId::monospace(font_size);
 
-        // Dynamically measure the exact monospace font metrics in points at the current zoom factor
         let probe = ui.painter().layout_no_wrap(
             "MMMMMMMMMMMMMMMMMMMM".to_string(),
             font_id.clone(),
@@ -696,6 +693,7 @@ impl TerminalSession {
                     self.handle_keyboard_events(ui.ctx(), settings);
                 }
 
+                // Smooth scroll handling while preserving selection tracking
                 if is_hovered && !is_ctrl {
                     let scroll_y = ui.input(|i| {
                         if i.raw_scroll_delta.y != 0.0 {
@@ -718,18 +716,20 @@ impl TerminalSession {
                             let rel_y = (pointer_pos.y - grid_rect.min.y).clamp(0.0, grid_rect.height() - 1.0);
                             let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
                             let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
-                            self.selection_end = Some((r as i64, c));
+                            let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
+                            self.selection_end = Some((age, c));
                         }
                         ui.ctx().request_repaint();
                     }
                 }
 
-                // Double-click and triple-click selection handling
+                // Triple-click selects full line
                 if response.triple_clicked() && grid_rect.contains(pointer_pos) {
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
-                    self.selection_start = Some((r as i64, 0));
-                    self.selection_end = Some((r as i64, self.cols.saturating_sub(1)));
+                    let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
+                    self.selection_start = Some((age, 0));
+                    self.selection_end = Some((age, self.cols.saturating_sub(1)));
                     self.is_dragging_selection = false;
                     if settings.copy_on_select {
                         let selected = self.extract_selected_text();
@@ -739,14 +739,16 @@ impl TerminalSession {
                         }
                     }
                 } else if response.double_clicked() && grid_rect.contains(pointer_pos) {
+                    // Double-click selects word
                     let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
                     let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
+                    let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
 
                     if let Some((start_c, end_c)) = self.find_word_bounds(r, c) {
-                        self.selection_start = Some((r as i64, start_c));
-                        self.selection_end = Some((r as i64, end_c));
+                        self.selection_start = Some((age, start_c));
+                        self.selection_end = Some((age, end_c));
                         self.is_dragging_selection = false;
                         if settings.copy_on_select {
                             let selected = self.extract_selected_text();
@@ -762,46 +764,49 @@ impl TerminalSession {
                         }
                     }
                 } else if is_primary_pressed && grid_rect.contains(pointer_pos) && !sb_track.contains(pointer_pos) {
-                    // Instant pixel-accurate selection initiation on click down
+                    // Initial mouse click sets start position in absolute buffer line age
                     let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
                     let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
+                    let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
 
-                    self.selection_start = Some((r as i64, c));
-                    self.selection_end = Some((r as i64, c));
+                    self.selection_start = Some((age, c));
+                    self.selection_end = Some((age, c));
                     self.is_dragging_selection = true;
                 }
 
-                // Continuous, smooth selection update while dragging
+                // Active drag updates selection end position and smoothly auto-scrolls at edges
                 if self.is_dragging_selection && is_primary_down {
                     if pointer_pos.y < grid_rect.min.y {
                         let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
                         let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
                         self.safe_set_scrollback(self.scroll_offset + auto_scroll_lines);
-                        self.selection_end = Some((0, 0));
+                        let age = self.scroll_offset as i64 + (self.rows as i64 - 1);
+                        self.selection_end = Some((age, 0));
                         ui.ctx().request_repaint();
                     } else if pointer_pos.y > grid_rect.max.y {
                         let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
                         let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
                         self.safe_set_scrollback(self.scroll_offset.saturating_sub(auto_scroll_lines));
-                        self.selection_end = Some((self.rows.saturating_sub(1) as i64, self.cols.saturating_sub(1)));
+                        let age = self.scroll_offset as i64;
+                        self.selection_end = Some((age, self.cols.saturating_sub(1)));
                         ui.ctx().request_repaint();
                     } else {
                         let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                         let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                         let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
                         let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
-                        self.selection_end = Some((r as i64, c));
+                        let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
+                        self.selection_end = Some((age, c));
                     }
                 }
 
-                // Release selection drag
+                // Release completes selection drag and copies if copy_on_select is active
                 if self.is_dragging_selection && is_primary_released {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
                         if start == end {
-                            // User clicked without dragging: clear selection cleanly
                             self.selection_start = None;
                             self.selection_end = None;
                         } else if settings.copy_on_select {
@@ -897,6 +902,9 @@ impl TerminalSession {
                         let mut job = egui::text::LayoutJob::default();
                         job.wrap.max_width = f32::INFINITY;
 
+                        // Calculate absolute buffer line age for current screen row r
+                        let line_age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
+
                         for c in 0..cols {
                             let default_cell = vt100::Cell::default();
                             let cell = screen.cell(r, c).unwrap_or(&default_cell);
@@ -906,7 +914,7 @@ impl TerminalSession {
                             }
 
                             let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
-                            let is_selected = self.is_cell_selected(r as i64, c);
+                            let is_selected = self.is_cell_selected(line_age, c);
                             let cell_text = cell.contents();
                             let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
 

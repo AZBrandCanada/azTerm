@@ -359,9 +359,10 @@ impl PaneBrowser {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for entry in &self.entries {
-                            let icon = if entry.is_dir { "📁 " } else { "📄 " };
+                            // Clean text prefix instead of broken emoji glyphs
+                            let prefix = if entry.is_dir { "[DIR] " } else { "[FILE] " };
                             let is_selected = self.selected_item.as_deref() == Some(&entry.name);
-                            let full_label = format!("{}{}", icon, entry.name);
+                            let full_label = format!("{}{}", prefix, entry.name);
 
                             ui.horizontal(|ui| {
                                 let right_space = 155.0_f32;
@@ -516,7 +517,6 @@ impl SftpManager {
             ));
 
             let transfers_clone = self.transfers.clone();
-            let selected_name_clone = selected_name.clone();
 
             thread::spawn(move || {
                 let mut cmd = Command::new("scp");
@@ -544,7 +544,6 @@ impl SftpManager {
                 }
 
                 cmd.arg(local_path.to_string_lossy().to_string());
-                // Append trailing slash to ensure remote directory is targeted cleanly
                 let remote_dest = if remote_dir.ends_with('/') {
                     format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_dir)
                 } else {
@@ -576,7 +575,7 @@ impl SftpManager {
                         if success {
                             item.status = TransferStatus::Completed;
                         } else {
-                            item.status = TransferStatus::Failed(error_msg.clone());
+                            item.status = TransferStatus::Failed(error_msg);
                         }
                     }
                 }
