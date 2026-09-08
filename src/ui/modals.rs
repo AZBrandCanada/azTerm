@@ -1,6 +1,7 @@
 use crate::ssh::{SshAuthType, SshProfile, SshStore};
 use crate::{AppState, InstallMethod};
 use eframe::egui;
+use std::io::Write;
 
 pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
     if let Some(ref new_tag) = app.available_update.clone() {
@@ -250,4 +251,129 @@ pub fn render_profile_modal(app: &mut AppState, ctx: &egui::Context) {
                 });
             });
         });
+}
+
+pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
+    let mut should_close = false;
+    let mut refresh_pane_id: Option<String> = None;
+
+    if let Some(ref mut modal) = app.ssh_auth_modal {
+        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", modal.profile.id));
+        if socket_path.exists() {
+            modal.is_connected = true;
+        }
+
+        egui::Window::new(format!("SSH Login: {}", modal.profile.name))
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Target:").strong());
+                        ui.label(
+                            egui::RichText::new(format!("{}@{}:{}", modal.profile.username, modal.profile.host, modal.profile.port))
+                                .color(app.theme.accent_color()),
+                        );
+                    });
+                    ui.add_space(4.0);
+
+                    if modal.is_connected {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("✓ Successfully Authenticated!")
+                                .strong()
+                                .size(16.0)
+                                .color(app.theme.success_color()),
+                        );
+                        ui.label("Remote session multiplexed. SFTP file transfer is now ready.");
+                        ui.add_space(12.0);
+                        if ui.button(egui::RichText::new("Continue to SFTP").strong()).clicked() {
+                            refresh_pane_id = Some(modal.target_pane_id.clone());
+                            should_close = true;
+                        }
+                        return;
+                    }
+
+                    ui.label(egui::RichText::new("Server Output:").small().color(app.theme.text_muted_color()));
+
+                    let out_str = modal.output.lock().map(|s| s.clone()).unwrap_or_default();
+                    egui::Frame::none()
+                        .fill(app.theme.bg_main_color())
+                        .stroke(egui::Stroke::new(1.0_f32, app.theme.border_color()))
+                        .rounding(4.0)
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_source("ssh_modal_out_scroll")
+                                .max_height(160.0)
+                                .stick_to_bottom(true)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&out_str)
+                                                .monospace()
+                                                .size(12.5)
+                                                .color(app.theme.text_primary_color()),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
+                        });
+
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Input:").strong());
+                        let input_w = (ui.available_width() - 170.0).max(120.0);
+
+                        let text_edit = egui::TextEdit::singleline(&mut modal.input_text)
+                            .password(!modal.show_plain)
+                            .hint_text("Password, OTP, or 'yes'...")
+                            .desired_width(input_w);
+
+                        let edit_resp = ui.add(text_edit);
+
+                        if !edit_resp.has_focus() && !ui.input(|i| i.pointer.any_pressed()) {
+                            edit_resp.request_focus();
+                        }
+
+                        let enter_pressed = edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if enter_pressed || ui.button(egui::RichText::new("Send ↵").strong()).clicked() {
+                            let to_send = format!("{}\r", modal.input_text);
+                            if let Ok(mut w) = modal.writer.lock() {
+                                let _ = w.write_all(to_send.as_bytes());
+                                let _ = w.flush();
+                            }
+                            modal.input_text.clear();
+                            edit_resp.request_focus();
+                            ui.ctx().request_repaint();
+                        }
+
+                        ui.checkbox(&mut modal.show_plain, "Show");
+                    });
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            should_close = true;
+                        }
+                    });
+                });
+            });
+    }
+
+    if let Some(pane_id) = refresh_pane_id {
+        if pane_id == "sftp_left" {
+            app.sftp.left_pane.refresh();
+        } else {
+            app.sftp.right_pane.refresh();
+        }
+    }
+
+    if should_close {
+        app.ssh_auth_modal = None;
+    }
 }

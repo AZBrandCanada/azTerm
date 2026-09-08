@@ -234,6 +234,8 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
 }
 
 pub fn render_status_bar(app: &mut AppState, ctx: &egui::Context) {
+    app.sftp.poll_transfers();
+
     egui::TopBottomPanel::bottom("bottom_status_bar")
         .frame(egui::Frame::none().fill(app.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
         .show(ctx, |ui| {
@@ -272,9 +274,17 @@ pub fn render_status_bar(app: &mut AppState, ctx: &egui::Context) {
                     }
                 }
 
-                if let Some(ref status) = app.sftp.transfer_status {
+                // Live Transfer Status Badge
+                if let Some((ref text, is_error, _)) = app.sftp.transfer_status {
                     ui.separator();
-                    ui.label(egui::RichText::new(status).small().color(app.theme.accent_color()));
+                    let col = if is_error { app.theme.danger_color() } else { app.theme.accent_color() };
+                    let resp = ui.add(
+                        egui::Button::new(egui::RichText::new(text).small().color(col))
+                            .fill(egui::Color32::TRANSPARENT)
+                    );
+                    if resp.clicked() {
+                        app.sftp.show_transfer_history = true;
+                    }
                 }
 
                 if let Some((msg, time)) = &app.toast_message {
