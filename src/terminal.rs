@@ -219,7 +219,7 @@ impl TerminalSession {
         // Check if target offset is safe to read
         self.parser.set_scrollback(target);
         let valid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.parser.screen().cell(0, 0);
+            let _ = self.parser.screen().cell(0, 0);
         })).is_ok();
 
         if valid {
@@ -236,7 +236,7 @@ impl TerminalSession {
             let mid = low + (high - low) / 2;
             self.parser.set_scrollback(mid);
             let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.parser.screen().cell(0, 0);
+                let _ = self.parser.screen().cell(0, 0);
             })).is_ok();
 
             if ok {
@@ -536,7 +536,6 @@ impl TerminalSession {
         has_focus: bool,
         toast: &mut Option<(String, std::time::Instant)>,
     ) -> bool {
-        // Enforce safe scrollback on every frame
         self.safe_set_scrollback(self.scroll_offset);
 
         let font_size = 14.0;
@@ -556,7 +555,6 @@ impl TerminalSession {
             self.rows = new_rows;
             self.safe_set_scrollback(0);
 
-            // Safe cursor reset before and after resizing
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.parser.process(b"\x1b[1;1H");
             }));
@@ -772,7 +770,6 @@ impl TerminalSession {
                 };
                 ui.painter().rect_filled(sb_thumb, 4.0, thumb_color);
 
-                // Safe terminal screen drawing
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let screen = self.parser.screen();
                     let (rows, cols) = screen.size();
