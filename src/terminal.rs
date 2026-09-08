@@ -102,49 +102,17 @@ pub fn set_system_clipboard_text(text: &str) {
     }
 }
 
-fn vt_to_egui_color(color: vt100::Color, is_bg: bool) -> egui::Color32 {
+fn vt_to_egui_color(color: vt100::Color, is_bg: bool, theme: &ThemeConfig) -> egui::Color32 {
     match color {
         vt100::Color::Default => {
             if is_bg {
-                COLOR_BG_MAIN
+                theme.bg_main_color()
             } else {
-                COLOR_TEXT_PRIMARY
+                theme.text_primary_color()
             }
         }
-        vt100::Color::Idx(idx) => ansi_idx_to_color(idx),
+        vt100::Color::Idx(idx) => theme.ansi_color(idx),
         vt100::Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
-    }
-}
-
-fn ansi_idx_to_color(idx: u8) -> egui::Color32 {
-    match idx {
-        0 => COLOR_BG_MAIN,
-        1 => egui::Color32::from_rgb(239, 68, 68),
-        2 => egui::Color32::from_rgb(34, 197, 94),
-        3 => egui::Color32::from_rgb(234, 179, 8),
-        4 => egui::Color32::from_rgb(99, 102, 241),
-        5 => egui::Color32::from_rgb(168, 85, 247),
-        6 => egui::Color32::from_rgb(6, 182, 212),
-        7 => egui::Color32::from_rgb(203, 213, 225),
-        8 => egui::Color32::from_rgb(71, 85, 105),
-        9 => egui::Color32::from_rgb(248, 113, 113),
-        10 => egui::Color32::from_rgb(74, 222, 128),
-        11 => egui::Color32::from_rgb(250, 204, 21),
-        12 => egui::Color32::from_rgb(129, 140, 248),
-        13 => egui::Color32::from_rgb(192, 132, 252),
-        14 => egui::Color32::from_rgb(34, 211, 238),
-        15 => egui::Color32::from_rgb(255, 255, 255),
-        16..=231 => {
-            let i = idx - 16;
-            let r = (i / 36) * 51;
-            let g = ((i / 6) % 6) * 51;
-            let b = (i % 6) * 51;
-            egui::Color32::from_rgb(r, g, b)
-        }
-        232..=255 => {
-            let gray = 8 + (idx - 232) * 10;
-            egui::Color32::from_rgb(gray, gray, gray)
-        }
     }
 }
 
@@ -166,7 +134,6 @@ pub struct TerminalSession {
     pub cols: u16,
     pub scroll_offset: usize,
 
-    // Selection Tracking in absolute buffer line coordinates (abs_line, col)
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
@@ -327,7 +294,6 @@ impl TerminalSession {
                 }
             }
 
-            // Restore user's current scroll view
             self.parser.set_scrollback(self.scroll_offset);
             result
         } else {
@@ -409,7 +375,6 @@ impl TerminalSession {
                             continue;
                         }
 
-                        // Shift + Page Navigation for Scrollback History
                         if modifiers.shift {
                             if *key == egui::Key::PageUp {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
@@ -512,9 +477,9 @@ impl TerminalSession {
         &mut self,
         ui: &mut egui::Ui,
         settings: &AppSettings,
+        theme: &ThemeConfig,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        // Query max available scrollback lines from vt100 engine
         self.parser.set_scrollback(usize::MAX);
         let max_scroll = self.parser.screen().scrollback();
         self.scroll_offset = self.scroll_offset.min(max_scroll);
@@ -555,7 +520,7 @@ impl TerminalSession {
         let total_size = egui::vec2(term_grid_size.x + scrollbar_width + 6.0, term_grid_size.y);
 
         egui::Frame::none()
-            .fill(COLOR_BG_MAIN)
+            .fill(theme.bg_main_color())
             .inner_margin(egui::Margin::same(8.0))
             .show(ui, |ui| {
                 let (full_rect, response) = ui.allocate_exact_size(
@@ -577,7 +542,6 @@ impl TerminalSession {
                 let is_hovered = full_rect.contains(pointer_pos);
                 let is_primary_down = ui.input(|i| i.pointer.primary_down());
 
-                // Mouse Wheel Scrolling
                 if is_hovered {
                     let scroll_y = ui.input(|i| {
                         if i.raw_scroll_delta.y != 0.0 {
@@ -596,7 +560,6 @@ impl TerminalSession {
                         }
                         self.parser.set_scrollback(self.scroll_offset);
 
-                        // If user is actively dragging while scrolling with wheel, dynamically extend selection
                         if self.is_dragging_selection && is_primary_down {
                             let visible_top = max_scroll as i64 - self.scroll_offset as i64;
                             let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
@@ -609,12 +572,10 @@ impl TerminalSession {
                     }
                 }
 
-                // Selection & Drag Auto-scrolling
                 let visible_top_line = max_scroll as i64 - self.scroll_offset as i64;
 
                 if self.is_dragging_selection && is_primary_down {
                     if pointer_pos.y < grid_rect.min.y {
-                        // Dragged above the top -> auto-scroll up
                         let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
                         let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
                         self.scroll_offset = (self.scroll_offset + auto_scroll_lines).min(max_scroll);
@@ -624,7 +585,6 @@ impl TerminalSession {
                         self.selection_end = Some((new_top, 0));
                         ui.ctx().request_repaint();
                     } else if pointer_pos.y > grid_rect.max.y {
-                        // Dragged below the bottom -> auto-scroll down
                         let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
                         let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
                         self.scroll_offset = self.scroll_offset.saturating_sub(auto_scroll_lines);
@@ -635,7 +595,6 @@ impl TerminalSession {
                         self.selection_end = Some((bottom_line, self.cols.saturating_sub(1)));
                         ui.ctx().request_repaint();
                     } else {
-                        // Pointer is within vertical bounds
                         let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                         let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                         let c = ((rel_x / char_width) as u16).min(self.cols.saturating_sub(1));
@@ -656,7 +615,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Mouse release after dragging selection
                 if self.is_dragging_selection && !is_primary_down {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
@@ -678,7 +636,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Simple click clears active selection
                 if response.clicked_by(egui::PointerButton::Primary)
                     && !sb_track.contains(pointer_pos)
                     && !self.is_dragging_selection
@@ -703,7 +660,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Interactive Scrollbar
                 ui.painter().rect_filled(sb_track, 4.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6));
 
                 let sb_id = ui.id().with(self.id).with("term_sb");
@@ -732,18 +688,17 @@ impl TerminalSession {
                     }
 
                     let thumb_color = if sb_resp.dragged() {
-                        COLOR_ACCENT
+                        theme.accent_color()
                     } else if sb_resp.hovered() {
-                        COLOR_ACCENT_HOVER
+                        theme.accent_hover_color()
                     } else if self.scroll_offset > 0 {
-                        COLOR_INDIGO
+                        theme.accent_color().linear_multiply(0.8)
                     } else {
                         egui::Color32::from_rgb(55, 65, 81)
                     };
                     ui.painter().rect_filled(sb_thumb, 4.0, thumb_color);
                 }
 
-                // Render Terminal Screen Grid
                 let screen = self.parser.screen();
                 let (rows, cols) = screen.size();
                 let (cursor_r, cursor_c) = screen.cursor_position();
@@ -773,17 +728,17 @@ impl TerminalSession {
                         let cell_text = cell.contents();
                         let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
 
-                        let mut fg = vt_to_egui_color(cell.fgcolor(), false);
-                        let mut bg = vt_to_egui_color(cell.bgcolor(), true);
+                        let mut fg = vt_to_egui_color(cell.fgcolor(), false, theme);
+                        let mut bg = vt_to_egui_color(cell.bgcolor(), true, theme);
 
                         if is_selected {
-                            fg = egui::Color32::from_rgb(11, 15, 25);
-                            bg = COLOR_ACCENT;
+                            fg = theme.bg_main_color();
+                            bg = theme.accent_color();
                         } else if cell.inverse() || is_cursor {
                             std::mem::swap(&mut fg, &mut bg);
                             if is_cursor && bg == fg {
-                                fg = COLOR_BG_MAIN;
-                                bg = COLOR_TEXT_PRIMARY;
+                                fg = theme.bg_main_color();
+                                bg = theme.text_primary_color();
                             }
                         }
 
@@ -793,7 +748,7 @@ impl TerminalSession {
                             egui::TextFormat {
                                 font_id: egui::FontId::monospace(font_size),
                                 color: fg,
-                                background: if bg != COLOR_BG_MAIN {
+                                background: if bg != theme.bg_main_color() {
                                     bg
                                 } else {
                                     egui::Color32::TRANSPARENT
@@ -807,7 +762,6 @@ impl TerminalSession {
                     ui.painter().galley(egui::pos2(grid_rect.min.x, row_y), galley, egui::Color32::WHITE);
                 }
 
-                // Floating Jump to Bottom Chip
                 if self.scroll_offset > 0 {
                     let chip_w = 175.0;
                     let chip_h = 24.0;
@@ -821,15 +775,15 @@ impl TerminalSession {
                     ui.painter().rect(
                         chip_rect,
                         4.0,
-                        if is_chip_hov { COLOR_BG_CARD } else { COLOR_BG_PANEL },
-                        egui::Stroke::new(1.0_f32, COLOR_ACCENT),
+                        if is_chip_hov { theme.bg_card_color() } else { theme.bg_panel_color() },
+                        egui::Stroke::new(1.0_f32, theme.accent_color()),
                     );
                     ui.painter().text(
                         chip_rect.center(),
                         egui::Align2::CENTER_CENTER,
                         format!("↓ Scrolled (-{}) • Live View", self.scroll_offset),
                         egui::FontId::proportional(12.0),
-                        if is_chip_hov { COLOR_ACCENT_HOVER } else { COLOR_ACCENT },
+                        if is_chip_hov { theme.accent_hover_color() } else { theme.accent_color() },
                     );
 
                     if chip_resp.clicked() {
