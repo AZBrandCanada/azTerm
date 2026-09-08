@@ -1,26 +1,6 @@
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
-pub const COLOR_BG_MAIN: egui::Color32 = egui::Color32::from_rgb(11, 15, 25);
-pub const COLOR_BG_PANEL: egui::Color32 = egui::Color32::from_rgb(17, 24, 39);
-pub const COLOR_BG_CARD: egui::Color32 = egui::Color32::from_rgb(26, 34, 52);
-pub const COLOR_BORDER: egui::Color32 = egui::Color32::from_rgb(39, 49, 73);
-pub const COLOR_ACCENT: egui::Color32 = egui::Color32::from_rgb(6, 182, 212);
-pub const COLOR_ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(34, 211, 238);
-pub const COLOR_INDIGO: egui::Color32 = egui::Color32::from_rgb(99, 102, 241);
-pub const COLOR_TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(243, 244, 246);
-pub const COLOR_TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(156, 163, 175);
-pub const COLOR_SUCCESS: egui::Color32 = egui::Color32::from_rgb(34, 197, 94);
-pub const COLOR_DANGER: egui::Color32 = egui::Color32::from_rgb(239, 68, 68);
-
-pub fn card_frame() -> egui::Frame {
-    egui::Frame::none()
-        .fill(COLOR_BG_CARD)
-        .stroke(egui::Stroke::new(1.0_f32, COLOR_BORDER))
-        .rounding(8.0)
-        .inner_margin(egui::Margin::same(14.0))
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThemeConfig {
     pub id: String,

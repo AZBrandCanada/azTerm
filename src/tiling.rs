@@ -249,6 +249,7 @@ pub fn dock_zone_preview_rect(pane_rect: egui::Rect, zone: DockZone) -> egui::Re
     }
 }
 
+#[allow(dead_code)]
 pub enum PaneAction {
     Split(usize, SplitDirection),
     ToggleMaximize(usize),
