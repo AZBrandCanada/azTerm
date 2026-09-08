@@ -1,6 +1,6 @@
 [package]
 name = "azterm"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Fast, modern native cross-platform terminal, SSH profile manager, and SFTP client"
 license = "MIT OR Apache-2.0"
@@ -29,4 +29,5 @@ assets = [
     ["target/release/azterm", "usr/bin/azterm", "755"],
     ["assets/azterm.desktop", "usr/share/applications/azterm.desktop", "644"],
     ["assets/azterm.svg", "usr/share/icons/hicolor/scalable/apps/azterm.svg", "644"],
+    ["assets/servicemenus/azterm_open.desktop", "usr/share/kio/servicemenus/azterm_open.desktop", "755"],
 ]

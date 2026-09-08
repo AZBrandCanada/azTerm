@@ -1,6 +1,7 @@
 use crate::settings::AppSettings;
 use crate::ssh::SshProfile;
 use crate::theme::ThemeConfig;
+use crate::tiling::WorkspaceTab;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -8,9 +9,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSessionState {
-    pub kind: String, // "local" or "ssh"
+    pub kind: String,
     pub title: String,
-    pub target: String, // working directory for local, profile id for ssh
+    pub target: String,
 }
 
 pub struct Database;
@@ -68,6 +69,14 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS active_theme (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS saved_workspaces (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 data TEXT NOT NULL
             )",
@@ -222,5 +231,24 @@ impl Database {
             }
         }
         list
+    }
+
+    pub fn save_workspaces(workspaces: &[WorkspaceTab]) {
+        if let Some(conn) = Self::get_connection() {
+            if let Ok(json) = serde_json::to_string(workspaces) {
+                let _ = conn.execute(
+                    "INSERT INTO saved_workspaces (id, data) VALUES (1, ?1)
+                     ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+                    params![json],
+                );
+            }
+        }
+    }
+
+    pub fn load_workspaces() -> Option<Vec<WorkspaceTab>> {
+        let conn = Self::get_connection()?;
+        let mut stmt = conn.prepare("SELECT data FROM saved_workspaces WHERE id = 1").ok()?;
+        let json: String = stmt.query_row([], |row| row.get(0)).ok()?;
+        serde_json::from_str(&json).ok()
     }
 }

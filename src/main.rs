@@ -4,6 +4,7 @@ mod sftp;
 mod ssh;
 mod terminal;
 mod theme;
+mod tiling;
 
 use db::{Database, SavedSessionState};
 use eframe::egui;
@@ -16,6 +17,7 @@ use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 use terminal::{SessionType, TerminalSession};
 use theme::*;
+use tiling::*;
 
 #[derive(PartialEq, Eq)]
 enum ActiveView {
@@ -223,12 +225,233 @@ fn handle_window_resize_borders(ctx: &egui::Context, is_maximized: bool) {
     }
 }
 
+pub enum PaneAction {
+    Split(usize, SplitDirection),
+    ToggleMaximize(usize),
+    PopToTab(usize),
+    Close(usize),
+    Focus(usize),
+    StartDrag(usize),
+}
+
+fn render_tile_tree(
+    ui: &mut egui::Ui,
+    node: &mut TileNode,
+    total_rect: egui::Rect,
+    theme: &ThemeConfig,
+    settings: &AppSettings,
+    sessions: &mut [TerminalSession],
+    active_session_id: &mut usize,
+    maximized_session: Option<usize>,
+    toast: &mut Option<(String, std::time::Instant)>,
+    actions: &mut Vec<PaneAction>,
+    pane_rects: &mut Vec<(usize, egui::Rect)>,
+    is_multi_pane: bool,
+) {
+    if let Some(max_id) = maximized_session {
+        if node.contains(max_id) {
+            pane_rects.push((max_id, total_rect));
+            if let Some(session) = sessions.iter_mut().find(|s| s.id == max_id) {
+                render_single_pane(
+                    ui,
+                    session,
+                    total_rect,
+                    theme,
+                    settings,
+                    active_session_id,
+                    true,
+                    true,
+                    toast,
+                    actions,
+                );
+            }
+            return;
+        }
+    }
+
+    match node {
+        TileNode::Leaf(session_id) => {
+            pane_rects.push((*session_id, total_rect));
+            if let Some(session) = sessions.iter_mut().find(|s| s.id == *session_id) {
+                render_single_pane(
+                    ui,
+                    session,
+                    total_rect,
+                    theme,
+                    settings,
+                    active_session_id,
+                    is_multi_pane,
+                    false,
+                    toast,
+                    actions,
+                );
+            }
+        }
+        TileNode::Split { id, dir, ratio, first, second } => {
+            let divider_thick = 5.0_f32;
+            match dir {
+                SplitDirection::Horizontal => {
+                    let avail_w = (total_rect.width() - divider_thick).max(10.0);
+                    let w1 = (avail_w * *ratio).clamp(60.0, avail_w - 60.0);
+                    let w2 = avail_w - w1;
+
+                    let r1 = egui::Rect::from_min_size(total_rect.min, egui::vec2(w1, total_rect.height()));
+                    let div_rect = egui::Rect::from_min_size(egui::pos2(total_rect.min.x + w1, total_rect.min.y), egui::vec2(divider_thick, total_rect.height()));
+                    let r2 = egui::Rect::from_min_size(egui::pos2(total_rect.min.x + w1 + divider_thick, total_rect.min.y), egui::vec2(w2, total_rect.height()));
+
+                    let div_id = ui.id().with("split_div_h").with(*id);
+                    let div_resp = ui.interact(div_rect, div_id, egui::Sense::click_and_drag());
+                    if div_resp.hovered() || div_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if div_resp.dragged() {
+                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                            let new_r = ((pos.x - total_rect.min.x) / avail_w).clamp(0.08, 0.92);
+                            *ratio = new_r;
+                        }
+                    }
+                    let div_color = if div_resp.dragged() {
+                        theme.accent_color()
+                    } else if div_resp.hovered() {
+                        theme.accent_hover_color()
+                    } else {
+                        theme.border_color()
+                    };
+                    ui.painter().rect_filled(div_rect, 0.0, div_color);
+
+                    render_tile_tree(ui, first, r1, theme, settings, sessions, active_session_id, maximized_session, toast, actions, pane_rects, true);
+                    render_tile_tree(ui, second, r2, theme, settings, sessions, active_session_id, maximized_session, toast, actions, pane_rects, true);
+                }
+                SplitDirection::Vertical => {
+                    let avail_h = (total_rect.height() - divider_thick).max(10.0);
+                    let h1 = (avail_h * *ratio).clamp(40.0, avail_h - 40.0);
+                    let h2 = avail_h - h1;
+
+                    let r1 = egui::Rect::from_min_size(total_rect.min, egui::vec2(total_rect.width(), h1));
+                    let div_rect = egui::Rect::from_min_size(egui::pos2(total_rect.min.x, total_rect.min.y + h1), egui::vec2(total_rect.width(), divider_thick));
+                    let r2 = egui::Rect::from_min_size(egui::pos2(total_rect.min.x, total_rect.min.y + h1 + divider_thick), egui::vec2(total_rect.width(), h2));
+
+                    let div_id = ui.id().with("split_div_v").with(*id);
+                    let div_resp = ui.interact(div_rect, div_id, egui::Sense::click_and_drag());
+                    if div_resp.hovered() || div_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+                    if div_resp.dragged() {
+                        if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
+                            let new_r = ((pos.y - total_rect.min.y) / avail_h).clamp(0.08, 0.92);
+                            *ratio = new_r;
+                        }
+                    }
+                    let div_color = if div_resp.dragged() {
+                        theme.accent_color()
+                    } else if div_resp.hovered() {
+                        theme.accent_hover_color()
+                    } else {
+                        theme.border_color()
+                    };
+                    ui.painter().rect_filled(div_rect, 0.0, div_color);
+
+                    render_tile_tree(ui, first, r1, theme, settings, sessions, active_session_id, maximized_session, toast, actions, pane_rects, true);
+                    render_tile_tree(ui, second, r2, theme, settings, sessions, active_session_id, maximized_session, toast, actions, pane_rects, true);
+                }
+            }
+        }
+    }
+}
+
+fn render_single_pane(
+    ui: &mut egui::Ui,
+    session: &mut TerminalSession,
+    rect: egui::Rect,
+    theme: &ThemeConfig,
+    settings: &AppSettings,
+    active_session_id: &mut usize,
+    show_header: bool,
+    is_maximized: bool,
+    toast: &mut Option<(String, std::time::Instant)>,
+    actions: &mut Vec<PaneAction>,
+) {
+    let is_focused = *active_session_id == session.id;
+    let border_color = if is_focused { theme.accent_color() } else { theme.border_color() };
+
+    let header_height = if show_header { 24.0_f32 } else { 0.0_f32 };
+    let body_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.min.x, rect.min.y + header_height),
+        rect.max,
+    );
+
+    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0, border_color));
+
+    if show_header {
+        let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
+        let header_bg = if is_focused { theme.bg_card_color() } else { theme.bg_panel_color() };
+        ui.painter().rect_filled(header_rect, egui::Rounding { nw: 4.0, ne: 4.0, sw: 0.0, se: 0.0 }, header_bg);
+
+        let drag_area_w = (header_rect.width() - 240.0).max(40.0);
+        let drag_area_rect = egui::Rect::from_min_size(header_rect.min, egui::vec2(drag_area_w, header_height));
+        let drag_resp = ui.interact(drag_area_rect, ui.id().with("pane_hdr_drag").with(session.id), egui::Sense::click_and_drag());
+
+        if drag_resp.clicked() {
+            *active_session_id = session.id;
+        }
+        if drag_resp.drag_started_by(egui::PointerButton::Primary) {
+            actions.push(PaneAction::StartDrag(session.id));
+        }
+
+        ui.allocate_ui_at_rect(header_rect, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("::").weak().color(theme.text_muted_color()));
+                let title_color = if is_focused { theme.accent_color() } else { theme.text_muted_color() };
+                ui.label(egui::RichText::new(&session.title).strong().small().color(title_color));
+
+                if is_focused {
+                    ui.label(egui::RichText::new("●").small().color(theme.accent_color()));
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(egui::RichText::new("X").strong().color(theme.danger_color())).on_hover_text("Close Pane (Ctrl+Shift+W)").clicked() {
+                        actions.push(PaneAction::Close(session.id));
+                    }
+                    if ui.small_button("Pop").on_hover_text("Pop out to a separate tab").clicked() {
+                        actions.push(PaneAction::PopToTab(session.id));
+                    }
+                    let max_text = if is_maximized { "Restore" } else { "Max" };
+                    if ui.small_button(max_text).on_hover_text("Maximize / Restore Pane (Ctrl+Shift+M)").clicked() {
+                        actions.push(PaneAction::ToggleMaximize(session.id));
+                    }
+                    if ui.small_button("Split -").on_hover_text("Split Down (Ctrl+Shift+E)").clicked() {
+                        actions.push(PaneAction::Split(session.id, SplitDirection::Vertical));
+                    }
+                    if ui.small_button("Split |").on_hover_text("Split Right (Ctrl+Shift+D)").clicked() {
+                        actions.push(PaneAction::Split(session.id, SplitDirection::Horizontal));
+                    }
+                });
+            });
+        });
+    }
+
+    ui.allocate_ui_at_rect(body_rect, |ui| {
+        let child_resp = ui.interact(body_rect, ui.id().with("pane_body_focus").with(session.id), egui::Sense::click());
+        if child_resp.clicked() {
+            *active_session_id = session.id;
+        }
+        session.render(ui, settings, theme, is_focused, toast);
+    });
+}
+
 struct AppState {
     settings: AppSettings,
     ssh_store: SshStore,
     sessions: Vec<TerminalSession>,
+    workspaces: Vec<WorkspaceTab>,
+    active_workspace_idx: usize,
+    active_session_id: usize,
+    dragging_tab_idx: Option<usize>,
+    dragging_pane_id: Option<usize>,
+    next_split_id: usize,
+
     sftp: SftpManager,
-    active_tab_idx: usize,
     next_tab_id: usize,
     active_view: ActiveView,
     ssh_subview: SshSubView,
@@ -274,8 +497,14 @@ impl AppState {
             settings,
             ssh_store,
             sessions: Vec::new(),
+            workspaces: Vec::new(),
+            active_workspace_idx: 0,
+            active_session_id: 1,
+            dragging_tab_idx: None,
+            dragging_pane_id: None,
+            next_split_id: 1,
+
             sftp: SftpManager::new(),
-            active_tab_idx: 0,
             next_tab_id: 1,
             active_view: if cli.open_sftp_only { ActiveView::SftpBrowser } else { ActiveView::Terminal },
             ssh_subview: SshSubView::Profiles,
@@ -373,7 +602,7 @@ impl AppState {
         let update_cmd = "curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash\n";
         self.spawn_local_terminal(ctx, None);
 
-        if let Some(active_session) = self.sessions.get_mut(self.active_tab_idx) {
+        if let Some(active_session) = self.sessions.iter_mut().find(|s| s.id == self.active_session_id) {
             active_session.title = "AZTerm Updater".to_string();
             active_session.send_input(update_cmd);
         }
@@ -423,6 +652,7 @@ impl AppState {
             })
             .collect();
         Database::save_sessions(&saved);
+        Database::save_workspaces(&self.workspaces);
     }
 
     fn restore_saved_sessions(&mut self, ctx: egui::Context) {
@@ -445,10 +675,16 @@ impl AppState {
                     self.spawn_local_terminal(ctx.clone(), dir);
                 }
             }
+
+            if let Some(saved_ws) = Database::load_workspaces() {
+                if !saved_ws.is_empty() {
+                    self.workspaces = saved_ws;
+                }
+            }
         }
     }
 
-    fn spawn_local_terminal(&mut self, ctx: egui::Context, custom_dir: Option<String>) {
+    fn create_local_session(&mut self, ctx: egui::Context, custom_dir: Option<String>) -> usize {
         let shell = if !self.settings.default_shell.trim().is_empty() {
             self.settings.default_shell.clone()
         } else if cfg!(windows) {
@@ -475,7 +711,15 @@ impl AppState {
             self.settings.scrollback_lines,
         );
         self.sessions.push(session);
-        self.active_tab_idx = self.sessions.len() - 1;
+        id
+    }
+
+    fn spawn_local_terminal(&mut self, ctx: egui::Context, custom_dir: Option<String>) {
+        let id = self.create_local_session(ctx, custom_dir);
+        let ws = WorkspaceTab::new(id, id, format!("Local #{}", id));
+        self.workspaces.push(ws);
+        self.active_workspace_idx = self.workspaces.len() - 1;
+        self.active_session_id = id;
         self.active_view = ActiveView::Terminal;
         self.persist_sessions();
     }
@@ -493,15 +737,129 @@ impl AppState {
             self.settings.scrollback_lines,
         );
         self.sessions.push(session);
-        self.active_tab_idx = self.sessions.len() - 1;
+
+        let ws = WorkspaceTab::new(id, id, format!("SSH: {}", profile.name));
+        self.workspaces.push(ws);
+        self.active_workspace_idx = self.workspaces.len() - 1;
+        self.active_session_id = id;
         self.active_view = ActiveView::Terminal;
 
         self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(profile.clone()));
         self.persist_sessions();
     }
 
+    fn split_active_pane(&mut self, dir: SplitDirection, ctx: egui::Context) {
+        let new_id = self.create_local_session(ctx, None);
+        let split_id = self.next_split_id;
+        self.next_split_id += 1;
+
+        if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+            ws.maximized_session = None;
+            ws.root.split_leaf(self.active_session_id, new_id, dir, true, split_id);
+            self.active_session_id = new_id;
+            self.persist_sessions();
+        }
+    }
+
+    fn close_session(&mut self, session_id: usize) {
+        self.sessions.retain(|s| s.id != session_id);
+
+        let mut ws_to_remove: Option<usize> = None;
+
+        for (w_idx, ws) in self.workspaces.iter_mut().enumerate() {
+            if ws.contains(session_id) {
+                if ws.is_single_pane() {
+                    ws_to_remove = Some(w_idx);
+                } else {
+                    ws.root.remove_leaf(session_id);
+                    if ws.maximized_session == Some(session_id) {
+                        ws.maximized_session = None;
+                    }
+                    self.active_session_id = ws.root.first_leaf();
+                }
+                break;
+            }
+        }
+
+        if let Some(idx) = ws_to_remove {
+            self.workspaces.remove(idx);
+            if self.active_workspace_idx >= self.workspaces.len() && !self.workspaces.is_empty() {
+                self.active_workspace_idx = self.workspaces.len() - 1;
+            }
+            if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
+                self.active_session_id = ws.root.first_leaf();
+            }
+        }
+
+        self.persist_sessions();
+    }
+
+    fn tile_quad_grid(&mut self) {
+        if self.workspaces.len() < 2 {
+            return;
+        }
+
+        let curr_ws = &mut self.workspaces[self.active_workspace_idx];
+        let base_id = curr_ws.root.first_leaf();
+
+        let mut other_leaves = Vec::new();
+        for (i, ws) in self.workspaces.iter().enumerate() {
+            if i != self.active_workspace_idx {
+                other_leaves.extend(ws.leaves());
+            }
+        }
+
+        if other_leaves.is_empty() {
+            return;
+        }
+
+        let s2 = other_leaves[0];
+        let s3 = other_leaves.get(1).copied();
+        let s4 = other_leaves.get(2).copied();
+
+        let top_split = TileNode::Split {
+            id: 101,
+            dir: SplitDirection::Horizontal,
+            ratio: 0.5,
+            first: Box::new(TileNode::Leaf(base_id)),
+            second: Box::new(TileNode::Leaf(s2)),
+        };
+
+        let bottom_split = match (s3, s4) {
+            (Some(id3), Some(id4)) => Some(TileNode::Split {
+                id: 102,
+                dir: SplitDirection::Horizontal,
+                ratio: 0.5,
+                first: Box::new(TileNode::Leaf(id3)),
+                second: Box::new(TileNode::Leaf(id4)),
+            }),
+            (Some(id3), None) => Some(TileNode::Leaf(id3)),
+            _ => None,
+        };
+
+        let quad_root = if let Some(b) = bottom_split {
+            TileNode::Split {
+                id: 100,
+                dir: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(top_split),
+                second: Box::new(b),
+            }
+        } else {
+            top_split
+        };
+
+        let active_w_id = self.workspaces[self.active_workspace_idx].id;
+        self.workspaces.retain(|w| w.id == active_w_id);
+        self.active_workspace_idx = 0;
+        self.workspaces[0].root = quad_root;
+        self.workspaces[0].maximized_session = None;
+        self.set_toast("Arranged into tiled grid");
+        self.persist_sessions();
+    }
+
     fn sync_sftp_with_active_session(&mut self) {
-        if let Some(session) = self.sessions.get(self.active_tab_idx) {
+        if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
             if let SessionType::Ssh { profile_id } = &session.session_type {
                 if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
                     let target = SftpTarget::RemoteSsh(prof.clone());
@@ -556,7 +914,6 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Window edge & corner resize detection for custom undecorated frame
         if !self.settings.use_system_titlebar {
             let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             handle_window_resize_borders(ctx, is_max);
@@ -583,8 +940,44 @@ impl eframe::App for AppState {
             });
 
             if send_tab {
-                if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
+                if let Some(session) = self.sessions.iter_mut().find(|s| s.id == self.active_session_id) {
                     session.send_input("\t");
+                }
+            }
+
+            let (ctrl_shift, alt_pressed) = ctx.input(|i| {
+                (
+                    i.modifiers.ctrl && i.modifiers.shift && !i.modifiers.alt,
+                    i.modifiers.alt && !i.modifiers.ctrl && !i.modifiers.shift,
+                )
+            });
+
+            if ctrl_shift {
+                if ctx.input(|i| i.key_pressed(egui::Key::D)) {
+                    self.split_active_pane(SplitDirection::Horizontal, ctx.clone());
+                } else if ctx.input(|i| i.key_pressed(egui::Key::E)) {
+                    self.split_active_pane(SplitDirection::Vertical, ctx.clone());
+                } else if ctx.input(|i| i.key_pressed(egui::Key::M)) {
+                    if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                        ws.maximized_session = if ws.maximized_session.is_some() { None } else { Some(self.active_session_id) };
+                    }
+                } else if ctx.input(|i| i.key_pressed(egui::Key::W)) {
+                    self.close_session(self.active_session_id);
+                }
+            }
+
+            if alt_pressed {
+                if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
+                    let leaves = ws.leaves();
+                    if let Some(curr_idx) = leaves.iter().position(|id| *id == self.active_session_id) {
+                        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowDown)) {
+                            let next_idx = (curr_idx + 1) % leaves.len();
+                            self.active_session_id = leaves[next_idx];
+                        } else if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowUp)) {
+                            let prev_idx = if curr_idx == 0 { leaves.len() - 1 } else { curr_idx - 1 };
+                            self.active_session_id = leaves[prev_idx];
+                        }
+                    }
                 }
             }
         }
@@ -609,7 +1002,6 @@ impl eframe::App for AppState {
             .frame(egui::Frame::none().fill(self.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 7.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // Draggable Brand Logo
                     let brand_resp = ui.add(
                         egui::Label::new(
                             egui::RichText::new("AZTerm")
@@ -651,7 +1043,30 @@ impl eframe::App for AppState {
                         self.spawn_local_terminal(ctx.clone(), None);
                     }
 
-                    // Draggable Titlebar Region & Window Controls
+                    if self.active_view == ActiveView::Terminal {
+                        if ui.button("Split Right").on_hover_text("Split active pane side-by-side (Ctrl+Shift+D)").clicked() {
+                            self.split_active_pane(SplitDirection::Horizontal, ctx.clone());
+                        }
+                        if ui.button("Split Down").on_hover_text("Split active pane top-and-bottom (Ctrl+Shift+E)").clicked() {
+                            self.split_active_pane(SplitDirection::Vertical, ctx.clone());
+                        }
+                        if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
+                            if !ws.is_single_pane() {
+                                let max_label = if ws.maximized_session.is_some() { "Restore Splits" } else { "Maximize Pane" };
+                                if ui.button(max_label).on_hover_text("Toggle maximize active pane (Ctrl+Shift+M)").clicked() {
+                                    if let Some(ws_mut) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                        ws_mut.maximized_session = if ws_mut.maximized_session.is_some() { None } else { Some(self.active_session_id) };
+                                    }
+                                }
+                            }
+                        }
+                        if self.workspaces.len() > 1 {
+                            if ui.button("Tile All Tabs (Grid)").on_hover_text("Tile all open tabs into a 2x2 grid").clicked() {
+                                self.tile_quad_grid();
+                            }
+                        }
+                    }
+
                     if !self.settings.use_system_titlebar {
                         let controls_w = 96.0_f32;
                         let drag_width = (ui.available_width() - controls_w).max(10.0);
@@ -672,7 +1087,7 @@ impl eframe::App for AppState {
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let close_resp = ui.add(
-                                egui::Button::new(egui::RichText::new("✕").size(12.0).color(self.theme.text_primary_color()))
+                                egui::Button::new(egui::RichText::new("X").size(12.0).color(self.theme.text_primary_color()))
                                     .min_size(egui::vec2(28.0, 22.0))
                                     .fill(egui::Color32::TRANSPARENT)
                             );
@@ -684,17 +1099,17 @@ impl eframe::App for AppState {
                             }
 
                             let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                            let max_icon = if is_max { "🗗" } else { "□" };
+                            let max_icon = if is_max { "Restore" } else { "Max" };
                             if ui.add(
-                                egui::Button::new(egui::RichText::new(max_icon).size(13.0).color(self.theme.text_primary_color()))
-                                    .min_size(egui::vec2(28.0, 22.0))
+                                egui::Button::new(egui::RichText::new(max_icon).size(11.0).color(self.theme.text_primary_color()))
+                                    .min_size(egui::vec2(44.0, 22.0))
                                     .fill(egui::Color32::TRANSPARENT)
                             ).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                             }
 
                             if ui.add(
-                                egui::Button::new(egui::RichText::new("−").size(14.0).color(self.theme.text_primary_color()))
+                                egui::Button::new(egui::RichText::new("-").size(14.0).color(self.theme.text_primary_color()))
                                     .min_size(egui::vec2(28.0, 22.0))
                                     .fill(egui::Color32::TRANSPARENT)
                             ).clicked() {
@@ -706,7 +1121,7 @@ impl eframe::App for AppState {
             });
 
         // LINE 2: Dedicated Tab Bar (Only shown if 2 or more tabs are open)
-        if self.sessions.len() > 1 {
+        if self.workspaces.len() > 1 {
             egui::TopBottomPanel::top("session_tabs_bar")
                 .frame(
                     egui::Frame::none()
@@ -718,7 +1133,7 @@ impl eframe::App for AppState {
                     ui.horizontal(|ui| {
                         let mut tab_to_close: Option<usize> = None;
                         let avail_w = (ui.available_width() - 20.0).max(100.0);
-                        let num_tabs = self.sessions.len() as f32;
+                        let num_tabs = self.workspaces.len() as f32;
                         let computed_tab_width = ((avail_w / num_tabs) - 6.0).clamp(90.0, 200.0);
                         let max_chars = ((computed_tab_width - 32.0) / 7.2).max(4.0) as usize;
 
@@ -727,17 +1142,23 @@ impl eframe::App for AppState {
                             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    for (i, session) in self.sessions.iter().enumerate() {
-                                        let is_active = self.active_view == ActiveView::Terminal && self.active_tab_idx == i;
-                                        let label_text = if session.title.len() > max_chars {
-                                            format!("{}...", &session.title[..max_chars.saturating_sub(3)])
+                                    for (i, ws) in self.workspaces.iter().enumerate() {
+                                        let is_active = self.active_view == ActiveView::Terminal && self.active_workspace_idx == i;
+                                        let tab_title = if ws.is_single_pane() {
+                                            ws.title.clone()
                                         } else {
-                                            session.title.clone()
+                                            format!("{} ({} Panes)", ws.title, ws.leaves().len())
+                                        };
+
+                                        let label_text = if tab_title.len() > max_chars {
+                                            format!("{}...", &tab_title[..max_chars.saturating_sub(3)])
+                                        } else {
+                                            tab_title
                                         };
 
                                         let (tab_clicked, close_clicked) = session_tab_chip(
                                             ui,
-                                            session.id,
+                                            ws.id,
                                             &label_text,
                                             is_active,
                                             computed_tab_width,
@@ -745,15 +1166,16 @@ impl eframe::App for AppState {
                                             &self.theme,
                                         );
 
-                                        if tab_clicked {
-                                            self.active_tab_idx = i;
-                                            self.active_view = ActiveView::Terminal;
+                                        let chip_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(computed_tab_width, 26.0));
+                                        let chip_resp = ui.interact(chip_rect, ui.id().with("chip_drag").with(ws.id), egui::Sense::drag());
+                                        if chip_resp.drag_started_by(egui::PointerButton::Primary) {
+                                            self.dragging_tab_idx = Some(i);
+                                        }
 
-                                            if let SessionType::Ssh { profile_id } = &session.session_type {
-                                                if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
-                                                    self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(prof.clone()));
-                                                }
-                                            }
+                                        if tab_clicked {
+                                            self.active_workspace_idx = i;
+                                            self.active_session_id = ws.root.first_leaf();
+                                            self.active_view = ActiveView::Terminal;
                                         }
 
                                         if close_clicked {
@@ -766,9 +1188,16 @@ impl eframe::App for AppState {
                             });
 
                         if let Some(i) = tab_to_close {
-                            self.sessions.remove(i);
-                            if self.active_tab_idx >= self.sessions.len() && !self.sessions.is_empty() {
-                                self.active_tab_idx = self.sessions.len() - 1;
+                            let leaves = self.workspaces[i].leaves();
+                            for leaf_id in leaves {
+                                self.sessions.retain(|s| s.id != leaf_id);
+                            }
+                            self.workspaces.remove(i);
+                            if self.active_workspace_idx >= self.workspaces.len() && !self.workspaces.is_empty() {
+                                self.active_workspace_idx = self.workspaces.len() - 1;
+                            }
+                            if let Some(ws) = self.workspaces.get(self.active_workspace_idx) {
+                                self.active_session_id = ws.root.first_leaf();
                             }
                             self.persist_sessions();
                         }
@@ -781,10 +1210,10 @@ impl eframe::App for AppState {
             .frame(egui::Frame::none().fill(self.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(session) = self.sessions.get(self.active_tab_idx) {
+                    if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
                         let info = match &session.session_type {
-                            SessionType::Local { working_dir } => format!("Local Shell: {}", working_dir),
-                            SessionType::Ssh { profile_id } => format!("SSH Target: {}", profile_id),
+                            SessionType::Local { working_dir } => format!("Active Shell [{}]: {}", session.id, working_dir),
+                            SessionType::Ssh { profile_id } => format!("Active Target [{}]: {}", session.id, profile_id),
                         };
                         ui.label(egui::RichText::new(info).small().color(self.theme.text_muted_color()));
                     }
@@ -809,7 +1238,7 @@ impl eframe::App for AppState {
                     if self.settings.check_updates {
                         if let Some(ref update_tag) = self.available_update {
                             ui.separator();
-                            if nav_action_button(ui, &format!("⭐ Update: {}", update_tag), &self.theme) {
+                            if nav_action_button(ui, &format!("Update: {}", update_tag), &self.theme) {
                                 self.show_update_modal = true;
                             }
                         }
@@ -836,7 +1265,7 @@ impl eframe::App for AppState {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(session) = self.sessions.get(self.active_tab_idx) {
+                        if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
                             let scroll_info = if session.scroll_offset > 0 {
                                 format!("-{} lines | {}x{}", session.scroll_offset, session.cols, session.rows)
                             } else {
@@ -849,271 +1278,200 @@ impl eframe::App for AppState {
                 });
             });
 
-        // Update Confirmation Modal
-        if self.show_update_modal {
-            if let Some(ref new_tag) = self.available_update.clone() {
-                egui::Window::new("AZTerm Update Available")
-                    .collapsible(false)
-                    .resizable(false)
-                    .default_width(460.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                    .show(ctx, |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("A new version ({}) of AZTerm is ready!", new_tag))
-                                    .strong()
-                                    .size(15.0)
-                                    .color(self.theme.accent_color()),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!("Current version: v{}", env!("CARGO_PKG_VERSION")))
-                                    .small()
-                                    .color(self.theme.text_muted_color()),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!("Detected installation: {}", self.install_method.display_name()))
-                                    .small()
-                                    .color(self.theme.text_primary_color()),
-                            );
-
-                            ui.add_space(10.0);
-                            ui.separator();
-                            ui.add_space(10.0);
-
-                            match &self.install_method {
-                                InstallMethod::ScriptInstalled | InstallMethod::PackageManager(_) => {
-                                    ui.label("Would you like to run the official updater script in a new terminal session?");
-                                    ui.add_space(6.0);
-                                    egui::Frame::none()
-                                        .fill(self.theme.bg_panel_color())
-                                        .rounding(4.0)
-                                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-                                        .show(ui, |ui| {
-                                            ui.monospace("curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash");
-                                        });
-                                }
-                                InstallMethod::AppImage => {
-                                    ui.label("Download the latest standalone AppImage binary from GitHub:");
-                                }
-                                InstallMethod::Windows => {
-                                    ui.label("Download the latest Windows ZIP archive from GitHub:");
-                                }
-                                InstallMethod::MacOS => {
-                                    ui.label("Download the latest macOS universal package from GitHub:");
-                                }
-                                InstallMethod::ManualBuild => {
-                                    ui.label("You can recompile with cargo or run the installer script:");
-                                }
-                            }
-
-                            ui.add_space(14.0);
-                            ui.horizontal(|ui| {
-                                match &self.install_method {
-                                    InstallMethod::ScriptInstalled | InstallMethod::ManualBuild => {
-                                        if ui.button(egui::RichText::new("Update Now (Run in Shell)").strong()).clicked() {
-                                            self.run_script_update_in_terminal(ctx.clone());
-                                        }
-                                    }
-                                    _ => {}
-                                }
-
-                                let release_url = format!("https://github.com/AZBrandCanada/azTerm/releases/tag/{}", new_tag);
-                                if ui.button("Open GitHub Release").clicked() {
-                                    ctx.open_url(egui::OpenUrl::new_tab(release_url));
-                                    self.show_update_modal = false;
-                                }
-
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Later").clicked() {
-                                        self.show_update_modal = false;
-                                    }
-                                });
-                            });
-                        });
-                    });
-            }
-        }
-
-        // Keygen Modal Window
-        if self.show_keygen_modal {
-            egui::Window::new("Generate Ed25519 SSH Keypair")
-                .collapsible(false)
-                .resizable(true)
-                .default_width(520.0)
-                .max_height(480.0)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(360.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.label("Key identifier name:");
-                                ui.text_edit_singleline(&mut self.keygen_name);
-                                ui.add_space(8.0);
-
-                                if ui.button("Generate Keypair").clicked() {
-                                    match SshStore::generate_ed25519_keypair(&self.keygen_name) {
-                                        Ok((priv_path, pub_key)) => {
-                                            self.generated_pub_key = pub_key;
-                                            self.keygen_status = format!("Key generated and saved to: {}", priv_path);
-                                        }
-                                        Err(e) => {
-                                            self.keygen_status = format!("Error: {}", e);
-                                        }
-                                    }
-                                }
-
-                                if !self.generated_pub_key.is_empty() {
-                                    ui.add_space(8.0);
-                                    ui.label(egui::RichText::new("Public Key (Paste into remote ~/.ssh/authorized_keys):").strong());
-                                    ui.add(
-                                        egui::TextEdit::multiline(&mut self.generated_pub_key)
-                                            .desired_rows(5)
-                                            .desired_width(f32::INFINITY),
-                                    );
-                                    if ui.button("Copy Public Key to Clipboard").clicked() {
-                                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                                            let _ = cb.set_text(self.generated_pub_key.clone());
-                                            self.set_toast("Public key copied to clipboard");
-                                        }
-                                    }
-                                }
-
-                                if !self.keygen_status.is_empty() {
-                                    ui.add_space(6.0);
-                                    ui.label(&self.keygen_status);
-                                }
-                            });
-
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            if ui.button("Close").clicked() {
-                                self.show_keygen_modal = false;
-                            }
-                        });
-                    });
-                });
-        }
-
-        // Profile Modal Window
-        if self.show_profile_modal {
-            let modal_title = if self.editing_profile_id.is_some() {
-                "Edit SSH Profile"
-            } else {
-                "Create New SSH Profile"
-            };
-
-            egui::Window::new(modal_title)
-                .collapsible(false)
-                .resizable(true)
-                .default_width(540.0)
-                .max_height(540.0)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.vertical(|ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(420.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                egui::Grid::new("profile_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
-                                    ui.label("Profile Name:");
-                                    ui.text_edit_singleline(&mut self.new_ssh_name);
-                                    ui.end_row();
-
-                                    ui.label("Host / IP:");
-                                    ui.text_edit_singleline(&mut self.new_ssh_host);
-                                    ui.end_row();
-
-                                    ui.label("Port:");
-                                    ui.text_edit_singleline(&mut self.new_ssh_port);
-                                    ui.end_row();
-
-                                    ui.label("Username:");
-                                    ui.text_edit_singleline(&mut self.new_ssh_user);
-                                    ui.end_row();
-
-                                    ui.label("Authentication:");
-                                    ui.horizontal(|ui| {
-                                        ui.radio_value(&mut self.new_ssh_auth_choice, 0, "Password / Agent");
-                                        ui.radio_value(&mut self.new_ssh_auth_choice, 1, "Key File");
-                                        ui.radio_value(&mut self.new_ssh_auth_choice, 2, "Paste Key");
-                                    });
-                                    ui.end_row();
-
-                                    if self.new_ssh_auth_choice == 1 {
-                                        ui.label("Key File Path:");
-                                        ui.text_edit_singleline(&mut self.new_ssh_key_path);
-                                        ui.end_row();
-                                    } else if self.new_ssh_auth_choice == 2 {
-                                        ui.label("Paste Private Key:");
-                                        ui.add(
-                                            egui::TextEdit::multiline(&mut self.new_ssh_pasted_key)
-                                                .desired_rows(6)
-                                                .desired_width(f32::INFINITY)
-                                                .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----\n..."),
-                                        );
-                                        ui.end_row();
-                                    }
-                                });
-                            });
-
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            if ui.button("Save Profile").clicked() {
-                                let port = self.new_ssh_port.parse().unwrap_or(22);
-                                let auth_type = if self.new_ssh_auth_choice == 1 && !self.new_ssh_key_path.trim().is_empty() {
-                                    SshStore::ensure_secure_permissions(&self.new_ssh_key_path);
-                                    SshAuthType::KeyFile(self.new_ssh_key_path.clone())
-                                } else if self.new_ssh_auth_choice == 2 && !self.new_ssh_pasted_key.trim().is_empty() {
-                                    let key_id = format!("{}_{}", self.new_ssh_host, port);
-                                    let _ = SshStore::save_pasted_key(&key_id, &self.new_ssh_pasted_key);
-                                    SshAuthType::PastedKey { key_id }
-                                } else {
-                                    SshAuthType::PasswordOrAgent
-                                };
-
-                                if let Some(ref edit_id) = self.editing_profile_id {
-                                    if let Some(existing) = self.ssh_store.profiles.iter_mut().find(|p| p.id == *edit_id) {
-                                        existing.name = self.new_ssh_name.clone();
-                                        existing.host = self.new_ssh_host.clone();
-                                        existing.port = port;
-                                        existing.username = self.new_ssh_user.clone();
-                                        existing.auth_type = auth_type;
-                                    }
-                                    self.set_toast("SSH Profile Updated");
-                                } else {
-                                    let mut profile = SshProfile::new(&self.new_ssh_name, &self.new_ssh_host, port, &self.new_ssh_user);
-                                    profile.auth_type = auth_type;
-                                    self.ssh_store.profiles.push(profile);
-                                    self.set_toast("SSH Profile Created");
-                                }
-
-                                self.ssh_store.save();
-                                self.show_profile_modal = false;
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.show_profile_modal = false;
-                            }
-                        });
-                    });
-                });
-        }
-
         // Central Workspace Area
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.theme.bg_main_color()))
             .show(ctx, |ui| match self.active_view {
                 ActiveView::Terminal => {
                     let mut toast = self.toast_message.clone();
-                    if self.settings.show_sftp_split_view {
-                        ui.columns(2, |columns| {
-                            if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
-                                session.render(&mut columns[0], &self.settings, &self.theme, &mut toast);
+
+                    if self.workspaces.is_empty() {
+                        ui.centered_and_justified(|ui| {
+                            if ui.button("Open Shell Session").clicked() {
+                                self.spawn_local_terminal(ctx.clone(), None);
                             }
-                            self.theme.card_frame().show(&mut columns[1], |ui| {
+                        });
+                        return;
+                    }
+
+                    let available_rect = ui.available_rect_before_wrap();
+                    let (term_area_rect, sftp_pane_rect) = if self.settings.show_sftp_split_view {
+                        let w = available_rect.width() * 0.65;
+                        (
+                            egui::Rect::from_min_size(available_rect.min, egui::vec2(w, available_rect.height())),
+                            Some(egui::Rect::from_min_size(egui::pos2(available_rect.min.x + w, available_rect.min.y), egui::vec2(available_rect.width() - w, available_rect.height()))),
+                        )
+                    } else {
+                        (available_rect, None)
+                    };
+
+                    let mut actions = Vec::new();
+                    let mut pane_rects = Vec::new();
+
+                    if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                        let is_multi_pane = !ws.is_single_pane();
+                        let max_session = ws.maximized_session;
+                        render_tile_tree(
+                            ui,
+                            &mut ws.root,
+                            term_area_rect,
+                            &self.theme,
+                            &self.settings,
+                            &mut self.sessions,
+                            &mut self.active_session_id,
+                            max_session,
+                            &mut toast,
+                            &mut actions,
+                            &mut pane_rects,
+                            is_multi_pane,
+                        );
+                    }
+
+                    // Drag-and-Drop Docking & Moving
+                    let is_primary_down = ui.input(|i| i.pointer.primary_down());
+                    let pointer_pos = ui.input(|i| i.pointer.hover_pos());
+
+                    let active_drag_session: Option<usize> = self.dragging_pane_id.or_else(|| {
+                        self.dragging_tab_idx.and_then(|idx| {
+                            self.workspaces.get(idx).map(|w| w.root.first_leaf())
+                        })
+                    });
+
+                    if let (Some(dragged_sess_id), Some(ptr)) = (active_drag_session, pointer_pos) {
+                        if is_primary_down {
+                            let mut hovered_zone: Option<(usize, DockZone, egui::Rect)> = None;
+                            for &(pane_id, p_rect) in &pane_rects {
+                                if pane_id != dragged_sess_id {
+                                    if let Some(zone) = detect_dock_zone(p_rect, ptr) {
+                                        let snap_rect = dock_zone_preview_rect(p_rect, zone);
+                                        hovered_zone = Some((pane_id, zone, snap_rect));
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if let Some((_, _, snap_rect)) = hovered_zone {
+                                ui.painter().rect_filled(
+                                    snap_rect,
+                                    6.0,
+                                    egui::Color32::from_rgba_unmultiplied(self.theme.accent[0], self.theme.accent[1], self.theme.accent[2], 75),
+                                );
+                                ui.painter().rect_stroke(
+                                    snap_rect,
+                                    6.0,
+                                    egui::Stroke::new(2.0, self.theme.accent_color()),
+                                );
+                                ui.painter().text(
+                                    snap_rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "Drop to Tile Here",
+                                    egui::FontId::proportional(14.0),
+                                    egui::Color32::WHITE,
+                                );
+                            } else if ptr.y < term_area_rect.min.y {
+                                let badge_rect = egui::Rect::from_center_size(ptr, egui::vec2(160.0, 26.0));
+                                ui.painter().rect_filled(badge_rect, 4.0, self.theme.bg_card_color());
+                                ui.painter().rect_stroke(badge_rect, 4.0, egui::Stroke::new(1.0, self.theme.accent_color()));
+                                ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER, "Drop to Pop Out as Tab", egui::FontId::proportional(12.0), self.theme.accent_color());
+                            }
+                        } else {
+                            if let Some(ptr) = pointer_pos {
+                                let mut docked = false;
+                                for &(pane_id, p_rect) in &pane_rects {
+                                    if pane_id != dragged_sess_id {
+                                        if let Some(zone) = detect_dock_zone(p_rect, ptr) {
+                                            let dir = match zone {
+                                                DockZone::Left | DockZone::Right => SplitDirection::Horizontal,
+                                                DockZone::Top | DockZone::Bottom => SplitDirection::Vertical,
+                                            };
+                                            let insert_after = matches!(zone, DockZone::Right | DockZone::Bottom);
+
+                                            if let Some(drag_ws_idx) = self.dragging_tab_idx {
+                                                if drag_ws_idx < self.workspaces.len() && drag_ws_idx != self.active_workspace_idx {
+                                                    self.workspaces.remove(drag_ws_idx);
+                                                    if drag_ws_idx < self.active_workspace_idx {
+                                                        self.active_workspace_idx -= 1;
+                                                    }
+                                                }
+                                            } else if self.dragging_pane_id.is_some() {
+                                                if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                                    ws.root.remove_leaf(dragged_sess_id);
+                                                }
+                                            }
+
+                                            let split_id = self.next_split_id;
+                                            self.next_split_id += 1;
+
+                                            if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                                ws.root.split_leaf(pane_id, dragged_sess_id, dir, insert_after, split_id);
+                                                self.active_session_id = dragged_sess_id;
+                                                self.set_toast("Moved tile");
+                                                self.persist_sessions();
+                                            }
+                                            docked = true;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if !docked && ptr.y < term_area_rect.min.y && self.dragging_pane_id.is_some() {
+                                    if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                        ws.root.remove_leaf(dragged_sess_id);
+                                        let new_ws = WorkspaceTab::new(dragged_sess_id, dragged_sess_id, format!("Local #{}", dragged_sess_id));
+                                        self.workspaces.push(new_ws);
+                                        self.active_workspace_idx = self.workspaces.len() - 1;
+                                        self.active_session_id = dragged_sess_id;
+                                        self.set_toast("Popped out to its own tab");
+                                        self.persist_sessions();
+                                    }
+                                }
+                            }
+                            self.dragging_tab_idx = None;
+                            self.dragging_pane_id = None;
+                        }
+                    }
+
+                    for action in actions {
+                        match action {
+                            PaneAction::Split(id, dir) => {
+                                self.active_session_id = id;
+                                self.split_active_pane(dir, ctx.clone());
+                            }
+                            PaneAction::ToggleMaximize(id) => {
+                                if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                    ws.maximized_session = if ws.maximized_session == Some(id) { None } else { Some(id) };
+                                }
+                            }
+                            PaneAction::PopToTab(id) => {
+                                if let Some(ws) = self.workspaces.get_mut(self.active_workspace_idx) {
+                                    ws.root.remove_leaf(id);
+                                    if ws.maximized_session == Some(id) {
+                                        ws.maximized_session = None;
+                                    }
+                                    let new_ws = WorkspaceTab::new(id, id, format!("Local #{}", id));
+                                    self.workspaces.push(new_ws);
+                                    self.active_workspace_idx = self.workspaces.len() - 1;
+                                    self.active_session_id = id;
+                                    self.set_toast("Popped out to its own tab");
+                                    self.persist_sessions();
+                                }
+                            }
+                            PaneAction::Close(id) => {
+                                self.close_session(id);
+                            }
+                            PaneAction::Focus(id) => {
+                                self.active_session_id = id;
+                            }
+                            PaneAction::StartDrag(id) => {
+                                self.dragging_pane_id = Some(id);
+                                self.active_session_id = id;
+                            }
+                        }
+                    }
+
+                    if let Some(sftp_rect) = sftp_pane_rect {
+                        self.theme.card_frame().show(ui, |ui| {
+                            ui.allocate_ui_at_rect(sftp_rect, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.heading("SFTP Sync Pane");
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1126,15 +1484,8 @@ impl eframe::App for AppState {
                                 self.sftp.right_pane.render(ui, &self.theme);
                             });
                         });
-                    } else if let Some(session) = self.sessions.get_mut(self.active_tab_idx) {
-                        session.render(ui, &self.settings, &self.theme, &mut toast);
-                    } else {
-                        ui.centered_and_justified(|ui| {
-                            if ui.button("Open Shell Session").clicked() {
-                                self.spawn_local_terminal(ctx.clone(), None);
-                            }
-                        });
                     }
+
                     self.toast_message = toast;
                 }
                 ActiveView::SshBookmarks => {
@@ -1454,7 +1805,7 @@ impl eframe::App for AppState {
                                                 }
                                                 for custom in &self.custom_themes {
                                                     let is_active = self.theme.id == custom.id;
-                                                    let label = format!("★ {}", custom.name);
+                                                    let label = format!("* {}", custom.name);
                                                     let btn = ui.selectable_label(is_active, label);
                                                     if btn.clicked() {
                                                         let mut new_th = custom.clone();
