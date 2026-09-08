@@ -49,10 +49,17 @@ impl TileNode {
         matches!(self, TileNode::Leaf(_))
     }
 
-    pub fn split_leaf(
+    pub fn first_leaf(&self) -> usize {
+        match self {
+            TileNode::Leaf(id) => *id,
+            TileNode::Split { first, .. } => first.first_leaf(),
+        }
+    }
+
+    pub fn split_leaf_with_node(
         &mut self,
         target_id: usize,
-        new_id: usize,
+        incoming: TileNode,
         dir: SplitDirection,
         insert_after: bool,
         split_id: usize,
@@ -60,9 +67,9 @@ impl TileNode {
         match self {
             TileNode::Leaf(id) if *id == target_id => {
                 let (first, second) = if insert_after {
-                    (TileNode::Leaf(target_id), TileNode::Leaf(new_id))
+                    (TileNode::Leaf(target_id), incoming)
                 } else {
-                    (TileNode::Leaf(new_id), TileNode::Leaf(target_id))
+                    (incoming, TileNode::Leaf(target_id))
                 };
                 *self = TileNode::Split {
                     id: split_id,
@@ -74,19 +81,30 @@ impl TileNode {
                 true
             }
             TileNode::Split { first, second, .. } => {
-                if first.split_leaf(target_id, new_id, dir, insert_after, split_id) {
+                if first.split_leaf_with_node(target_id, incoming.clone(), dir, insert_after, split_id) {
                     true
                 } else {
-                    second.split_leaf(target_id, new_id, dir, insert_after, split_id)
+                    second.split_leaf_with_node(target_id, incoming, dir, insert_after, split_id)
                 }
             }
             _ => false,
         }
     }
 
+    pub fn split_leaf(
+        &mut self,
+        target_id: usize,
+        new_session_id: usize,
+        dir: SplitDirection,
+        insert_after: bool,
+        split_id: usize,
+    ) -> bool {
+        self.split_leaf_with_node(target_id, TileNode::Leaf(new_session_id), dir, insert_after, split_id)
+    }
+
     pub fn remove_leaf(&mut self, target_id: usize) -> bool {
         match self {
-            TileNode::Leaf(id) if *id == target_id => false,
+            TileNode::Leaf(_) => false,
             TileNode::Split { first, second, .. } => {
                 if let TileNode::Leaf(id) = **first {
                     if id == target_id {
@@ -106,14 +124,6 @@ impl TileNode {
                     second.remove_leaf(target_id)
                 }
             }
-            _ => false,
-        }
-    }
-
-    pub fn first_leaf(&self) -> usize {
-        match self {
-            TileNode::Leaf(id) => *id,
-            TileNode::Split { first, .. } => first.first_leaf(),
         }
     }
 }

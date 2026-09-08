@@ -11,6 +11,10 @@ fn default_scrollback_lines() -> usize {
     10000
 }
 
+fn default_zoom_factor() -> f32 {
+    1.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub default_shell: String,
@@ -45,6 +49,9 @@ pub struct AppSettings {
 
     #[serde(default = "default_scrollback_lines")]
     pub scrollback_lines: usize,
+
+    #[serde(default = "default_zoom_factor")]
+    pub zoom_factor: f32,
 }
 
 impl Default for AppSettings {
@@ -87,6 +94,7 @@ impl Default for AppSettings {
             auto_reconnect_terminal: false,
             backspace_sequence: BackspaceSequence::Delete127,
             scrollback_lines: 10000,
+            zoom_factor: 1.0,
         }
     }
 }
