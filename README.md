@@ -4,6 +4,10 @@ AZTerm is a fast, lightweight, and cross-platform native terminal emulator, SSH 
 
 Built with hardware-accelerated immediate-mode GPU graphics, AZTerm provides a fluid, responsive interface with zero Electron or Chromium web overhead, maintaining an ultra-low memory footprint (~20 MB to 45 MB RAM) and sub-30ms startup times.
 
+<p align="center">
+  <img src="assets/screenshot2.webp" alt="AZTerm Tiling Workspace Screenshot" width="100%">
+</p>
+
 ---
 
 ## One-Line Install (Pipe to Bash)
@@ -52,7 +56,7 @@ To view all versions and changelogs, visit the [AZTerm Releases Page](https://gi
 * **Draggable Dividers:** Freely resize width and height ratios between tiled panes by dragging the divider with the mouse.
 * **Slim In-Pane Control Bar:** Each tiled pane features an in-pane strip showing its title, active focus indicator, split shortcuts, full-pane maximize (`Max`), pop-out to separate tab (`Pop`), and close (`X`).
 * **Auto-Hiding Tab Line:** When working in a single-pane tab, the second-row tab bar auto-hides to maximize vertical screen space, reappearing as soon as multiple tabs or splits exist.
-* **Quad Grid Layout:** Arrange multiple tabs into an even 2x2 grid with a single click.
+* **Chunked Grid Tiling:** Tile all open sessions into balanced grids in batches of up to 16 panes per tab.
 
 ### 3. Comprehensive Theme Engine & Transparency
 * **8 Built-in Theme Presets:** Cyber Cyan (Default), Dracula, Nord, Tokyo Night, One Dark, Monokai Pro, Matrix Green, and Solarized Dark.
