@@ -25,6 +25,17 @@ pub fn get_system_clipboard_text() -> Option<String> {
                     }
                 }
             }
+            if let Ok(output) = std::process::Command::new("wl-paste")
+                .args(["--primary", "--no-newline"])
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
         }
     }
 
@@ -46,21 +57,19 @@ pub fn get_system_clipboard_text() -> Option<String> {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-o"])
-            .output()
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout).to_string();
-                if !text.is_empty() {
-                    return Some(text);
+        for sel in ["clipboard", "primary"] {
+            if let Ok(output) = std::process::Command::new("xclip")
+                .args(["-selection", sel, "-o"])
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
                 }
             }
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
         if let Ok(output) = std::process::Command::new("xsel")
             .args(["-b", "-o"])
             .output()
@@ -77,7 +86,15 @@ pub fn get_system_clipboard_text() -> Option<String> {
     None
 }
 
-pub fn set_system_clipboard_text(text: &str) {
+pub fn set_system_clipboard_text(ctx: Option<&egui::Context>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(c) = ctx {
+        c.copy_text(text.to_string());
+    }
+
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text);
         #[cfg(target_os = "linux")]
@@ -89,14 +106,30 @@ pub fn set_system_clipboard_text(text: &str) {
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Ok(mut child) = std::process::Command::new("wl-copy")
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-            {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
+            for primary_flag in [false, true] {
+                let mut cmd = std::process::Command::new("wl-copy");
+                if primary_flag {
+                    cmd.arg("--primary");
                 }
-                let _ = child.wait();
+                if let Ok(mut child) = cmd.stdin(std::process::Stdio::piped()).spawn() {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    let _ = child.wait();
+                }
+            }
+        } else {
+            for sel in ["clipboard", "primary"] {
+                if let Ok(mut child) = std::process::Command::new("xclip")
+                    .args(["-selection", sel])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    let _ = child.wait();
+                }
             }
         }
     }
@@ -312,7 +345,6 @@ impl TerminalSession {
             if start == end {
                 return false;
             }
-            // Higher line_age means physically higher up / older in buffer
             let (top_age, top_col, bot_age, bot_col) = if start.0 > end.0 || (start.0 == end.0 && start.1 <= end.1) {
                 (start.0, start.1, end.0, end.1)
             } else {
@@ -384,17 +416,29 @@ impl TerminalSession {
             let saved_offset = self.scroll_offset;
 
             for age in (bot_age..=top_age).rev() {
-                // Read from vt100 parser at exact line age
-                self.parser.set_scrollback(age.max(0) as usize);
+                // Formula: line_age = scroll_offset + (rows - 1 - r) => r = (rows - 1) + scroll_offset - line_age
+                let target_r = (self.rows as i64 - 1) + self.scroll_offset as i64 - age;
+
+                let (screen_r, temp_offset): (u16, usize) = if target_r >= 0 && target_r < self.rows as i64 {
+                    (target_r as u16, self.scroll_offset)
+                } else if target_r < 0 {
+                    let needed_offset = (self.scroll_offset as i64 - target_r).max(0) as usize;
+                    (0u16, needed_offset)
+                } else {
+                    let diff = target_r - (self.rows as i64 - 1);
+                    let needed_offset = (self.scroll_offset as i64 - diff).max(0) as usize;
+                    (self.rows.saturating_sub(1), needed_offset)
+                };
+
+                self.parser.set_scrollback(temp_offset);
                 let screen = self.parser.screen();
-                let r = self.rows.saturating_sub(1);
 
                 let start_c = if age == top_age { top_col } else { 0 };
                 let end_c = if age == bot_age { bot_col } else { self.cols.saturating_sub(1) };
 
                 let mut line = String::new();
                 for c in start_c..=end_c {
-                    if let Some(cell) = screen.cell(r, c) {
+                    if let Some(cell) = screen.cell(screen_r, c) {
                         if cell.is_wide_continuation() {
                             continue;
                         }
@@ -465,7 +509,10 @@ impl TerminalSession {
             for event in &i.events {
                 match event {
                     egui::Event::Copy => {
-                        if self.selection_start.is_none() {
+                        let selected = self.extract_selected_text();
+                        if !selected.is_empty() {
+                            set_system_clipboard_text(Some(ctx), &selected);
+                        } else {
                             self.send_input("\x03");
                         }
                     }
@@ -510,6 +557,14 @@ impl TerminalSession {
                                 self.safe_set_scrollback(0);
                                 continue;
                             }
+                        }
+
+                        if modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
+                            let selected = self.extract_selected_text();
+                            if !selected.is_empty() {
+                                set_system_clipboard_text(Some(ctx), &selected);
+                            }
+                            continue;
                         }
 
                         if (modifiers.shift && *key == egui::Key::Insert)
@@ -693,7 +748,6 @@ impl TerminalSession {
                     self.handle_keyboard_events(ui.ctx(), settings);
                 }
 
-                // Smooth scroll handling while preserving selection tracking
                 if is_hovered && !is_ctrl {
                     let scroll_y = ui.input(|i| {
                         if i.raw_scroll_delta.y != 0.0 {
@@ -734,7 +788,7 @@ impl TerminalSession {
                     if settings.copy_on_select {
                         let selected = self.extract_selected_text();
                         if !selected.trim().is_empty() {
-                            set_system_clipboard_text(&selected);
+                            set_system_clipboard_text(Some(ui.ctx()), &selected);
                             *toast = Some(("Copied line".to_string(), std::time::Instant::now()));
                         }
                     }
@@ -753,7 +807,7 @@ impl TerminalSession {
                         if settings.copy_on_select {
                             let selected = self.extract_selected_text();
                             if !selected.trim().is_empty() {
-                                set_system_clipboard_text(&selected);
+                                set_system_clipboard_text(Some(ui.ctx()), &selected);
                                 let preview = if selected.len() > 24 {
                                     format!("{}...", &selected[..21].replace('\n', " "))
                                 } else {
@@ -764,7 +818,6 @@ impl TerminalSession {
                         }
                     }
                 } else if is_primary_pressed && grid_rect.contains(pointer_pos) && !sb_track.contains(pointer_pos) {
-                    // Initial mouse click sets start position in absolute buffer line age
                     let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
@@ -776,7 +829,7 @@ impl TerminalSession {
                     self.is_dragging_selection = true;
                 }
 
-                // Active drag updates selection end position and smoothly auto-scrolls at edges
+                // Active drag updates selection end position
                 if self.is_dragging_selection && is_primary_down {
                     if pointer_pos.y < grid_rect.min.y {
                         let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
@@ -812,7 +865,7 @@ impl TerminalSession {
                         } else if settings.copy_on_select {
                             let selected = self.extract_selected_text();
                             if !selected.trim().is_empty() {
-                                set_system_clipboard_text(&selected);
+                                set_system_clipboard_text(Some(ui.ctx()), &selected);
                                 let preview = if selected.len() > 24 {
                                     format!("{}...", &selected[..21].replace('\n', " "))
                                 } else {
@@ -902,7 +955,6 @@ impl TerminalSession {
                         let mut job = egui::text::LayoutJob::default();
                         job.wrap.max_width = f32::INFINITY;
 
-                        // Calculate absolute buffer line age for current screen row r
                         let line_age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
 
                         for c in 0..cols {
