@@ -12,6 +12,34 @@ pub enum SshAuthType {
     PastedKey { key_id: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SshKeyAlgorithm {
+    Ed25519,
+    Rsa4096,
+    Ecdsa384,
+    Ecdsa256,
+}
+
+impl SshKeyAlgorithm {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Ed25519 => "Ed25519 (Recommended, Fast & Secure)",
+            Self::Rsa4096 => "RSA 4096-bit (Universal Compatibility)",
+            Self::Ecdsa384 => "ECDSA 384-bit (NIST P-384)",
+            Self::Ecdsa256 => "ECDSA 256-bit (NIST P-256)",
+        }
+    }
+
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            Self::Ed25519 => "id_ed25519",
+            Self::Rsa4096 => "id_rsa",
+            Self::Ecdsa384 => "id_ecdsa384",
+            Self::Ecdsa256 => "id_ecdsa256",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SshProfile {
     pub id: String,
@@ -155,7 +183,7 @@ impl SshStore {
                 let path = entry.path();
                 if path.is_file() {
                     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    if ext != "pub" {
+                    if ext != "pub" && ext != "sock" {
                         let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                         let pub_path = dir.join(format!("{}.pub", file_name));
                         let pub_content = fs::read_to_string(&pub_path).ok();
@@ -188,27 +216,46 @@ impl SshStore {
         Ok(key_file)
     }
 
-    pub fn generate_ed25519_keypair(name: &str) -> Result<(String, String), String> {
+    pub fn generate_keypair(name: &str, algo: SshKeyAlgorithm) -> Result<(String, String), String> {
+        let clean_name = name.trim().replace(' ', "_");
+        if clean_name.is_empty() {
+            return Err("Key identifier name cannot be empty".to_string());
+        }
+
         let dir = Self::keys_dir();
-        let key_path = dir.join(format!("id_ed25519_{}", name));
-        let pub_path = dir.join(format!("id_ed25519_{}.pub", name));
+        let key_file_name = format!("{}_{}", algo.prefix(), clean_name);
+        let key_path = dir.join(&key_file_name);
+        let pub_path = dir.join(format!("{}.pub", key_file_name));
 
         if key_path.exists() {
             let _ = fs::remove_file(&key_path);
             let _ = fs::remove_file(&pub_path);
         }
 
-        let output = Command::new("ssh-keygen")
-            .arg("-t")
-            .arg("ed25519")
-            .arg("-f")
+        let mut cmd = Command::new("ssh-keygen");
+        match algo {
+            SshKeyAlgorithm::Ed25519 => {
+                cmd.arg("-t").arg("ed25519");
+            }
+            SshKeyAlgorithm::Rsa4096 => {
+                cmd.arg("-t").arg("rsa").arg("-b").arg("4096");
+            }
+            SshKeyAlgorithm::Ecdsa384 => {
+                cmd.arg("-t").arg("ecdsa").arg("-b").arg("384");
+            }
+            SshKeyAlgorithm::Ecdsa256 => {
+                cmd.arg("-t").arg("ecdsa").arg("-b").arg("256");
+            }
+        }
+
+        cmd.arg("-f")
             .arg(&key_path)
             .arg("-N")
             .arg("")
             .arg("-C")
-            .arg(format!("azterm-{}", name))
-            .output()
-            .map_err(|e| format!("Failed to execute ssh-keygen: {}", e))?;
+            .arg(format!("azterm-{}", clean_name));
+
+        let output = cmd.output().map_err(|e| format!("Failed to execute ssh-keygen: {}", e))?;
 
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).to_string());
@@ -220,5 +267,9 @@ impl SshStore {
         let priv_key_path = key_path.to_string_lossy().to_string();
 
         Ok((priv_key_path, pub_key))
+    }
+
+    pub fn generate_ed25519_keypair(name: &str) -> Result<(String, String), String> {
+        Self::generate_keypair(name, SshKeyAlgorithm::Ed25519)
     }
 }
