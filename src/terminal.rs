@@ -249,41 +249,13 @@ impl TerminalSession {
             return;
         }
 
-        self.parser.set_scrollback(target);
-        let valid = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = self.parser.screen().cell(0, 0);
-        })).is_ok();
+        // Query the true maximum history lines currently available in vt100
+        self.parser.set_scrollback(usize::MAX);
+        self.max_scroll = self.parser.screen().scrollback();
 
-        if valid {
-            self.scroll_offset = target;
-            return;
-        }
-
-        let mut low = 0;
-        let mut high = target;
-        let mut best = 0;
-
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            self.parser.set_scrollback(mid);
-            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = self.parser.screen().cell(0, 0);
-            })).is_ok();
-
-            if ok {
-                best = mid;
-                low = mid + 1;
-            } else {
-                if mid == 0 {
-                    break;
-                }
-                high = mid - 1;
-            }
-        }
-
-        self.scroll_offset = best;
-        self.max_scroll = best;
-        self.parser.set_scrollback(best);
+        let clamped = target.min(self.max_scroll);
+        self.parser.set_scrollback(clamped);
+        self.scroll_offset = self.parser.screen().scrollback();
     }
 
     pub fn send_input(&mut self, text: &str) {
@@ -318,9 +290,6 @@ impl TerminalSession {
     pub fn poll_updates(&mut self) {
         let mut received = false;
         while let Ok(bytes) = self.rx.try_recv() {
-            let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
-            self.max_scroll = (self.max_scroll + newlines).min(10000);
-
             let (cur_r, _) = self.parser.screen().cursor_position();
             if cur_r >= self.rows {
                 let safe_r = self.rows.saturating_sub(1);
@@ -335,8 +304,20 @@ impl TerminalSession {
             }));
             received = true;
         }
-        if received && self.scroll_offset == 0 {
-            self.parser.set_scrollback(0);
+
+        if received {
+            let current = self.scroll_offset;
+            self.parser.set_scrollback(usize::MAX);
+            self.max_scroll = self.parser.screen().scrollback();
+
+            if current == 0 {
+                self.parser.set_scrollback(0);
+                self.scroll_offset = 0;
+            } else {
+                let clamped = current.min(self.max_scroll);
+                self.parser.set_scrollback(clamped);
+                self.scroll_offset = self.parser.screen().scrollback();
+            }
         }
     }
 
