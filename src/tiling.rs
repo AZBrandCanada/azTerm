@@ -491,8 +491,10 @@ pub fn render_single_pane(
 
     if body_rect.width() >= 10.0 && body_rect.height() >= 10.0 {
         let mut pane_clicked = false;
-        ui.allocate_ui_at_rect(body_rect, |ui| {
-            pane_clicked = session.render(ui, settings, theme, is_focused, toast);
+        ui.push_id(session.id, |ui| {
+            ui.allocate_ui_at_rect(body_rect, |ui| {
+                pane_clicked = session.render(ui, settings, theme, is_focused, toast);
+            });
         });
 
         if pane_clicked {
