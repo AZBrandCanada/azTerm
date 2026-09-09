@@ -1,6 +1,6 @@
 # Maintainer: AZBrandCanada Developers
 pkgname=azterm
-pkgver=0.1.6
+pkgver=0.1.9
 pkgrel=1
 pkgdesc="Fast, modern native terminal, SSH bookmark manager, and SFTP client"
 arch=('x86_64')
