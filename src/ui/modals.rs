@@ -1,4 +1,4 @@
-use crate::ssh::{SshAuthType, SshProfile, SshStore};
+use crate::ssh::{SshAuthType, SshKeyAlgorithm, SshProfile, SshStore};
 use crate::{AppState, InstallMethod};
 use eframe::egui;
 use std::io::Write;
@@ -90,24 +90,50 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
 }
 
 pub fn render_keygen_modal(app: &mut AppState, ctx: &egui::Context) {
-    egui::Window::new("Generate Ed25519 SSH Keypair")
+    egui::Window::new("Generate SSH Keypair")
         .collapsible(false)
         .resizable(true)
-        .default_width(520.0)
-        .max_height(480.0)
+        .default_width(540.0)
+        .max_height(520.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 egui::ScrollArea::vertical()
-                    .max_height(360.0)
+                    .max_height(400.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.label("Key identifier name:");
                         ui.text_edit_singleline(&mut app.keygen_name);
                         ui.add_space(8.0);
 
-                        if ui.button("Generate Keypair").clicked() {
-                            match SshStore::generate_ed25519_keypair(&app.keygen_name) {
+                        ui.label("Key Type / Algorithm:");
+                        let algo_label = match app.keygen_algo {
+                            1 => SshKeyAlgorithm::Rsa4096.display_name(),
+                            2 => SshKeyAlgorithm::Ecdsa384.display_name(),
+                            3 => SshKeyAlgorithm::Ecdsa256.display_name(),
+                            _ => SshKeyAlgorithm::Ed25519.display_name(),
+                        };
+
+                        egui::ComboBox::from_id_source("keygen_algo_combo")
+                            .width(360.0)
+                            .selected_text(algo_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut app.keygen_algo, 0, SshKeyAlgorithm::Ed25519.display_name());
+                                ui.selectable_value(&mut app.keygen_algo, 1, SshKeyAlgorithm::Rsa4096.display_name());
+                                ui.selectable_value(&mut app.keygen_algo, 2, SshKeyAlgorithm::Ecdsa384.display_name());
+                                ui.selectable_value(&mut app.keygen_algo, 3, SshKeyAlgorithm::Ecdsa256.display_name());
+                            });
+
+                        ui.add_space(10.0);
+
+                        if ui.button(egui::RichText::new("⚡ Generate Keypair").strong()).clicked() {
+                            let algo = match app.keygen_algo {
+                                1 => SshKeyAlgorithm::Rsa4096,
+                                2 => SshKeyAlgorithm::Ecdsa384,
+                                3 => SshKeyAlgorithm::Ecdsa256,
+                                _ => SshKeyAlgorithm::Ed25519,
+                            };
+                            match SshStore::generate_keypair(&app.keygen_name, algo) {
                                 Ok((priv_path, pub_key)) => {
                                     app.generated_pub_key = pub_key;
                                     app.keygen_status = format!("Key generated and saved to: {}", priv_path);
@@ -160,13 +186,13 @@ pub fn render_profile_modal(app: &mut AppState, ctx: &egui::Context) {
     egui::Window::new(modal_title)
         .collapsible(false)
         .resizable(true)
-        .default_width(540.0)
-        .max_height(540.0)
+        .default_width(560.0)
+        .max_height(580.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
             ui.vertical(|ui| {
                 egui::ScrollArea::vertical()
-                    .max_height(420.0)
+                    .max_height(460.0)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         egui::Grid::new("profile_grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
@@ -189,14 +215,49 @@ pub fn render_profile_modal(app: &mut AppState, ctx: &egui::Context) {
                             ui.label("Authentication:");
                             ui.horizontal(|ui| {
                                 ui.radio_value(&mut app.new_ssh_auth_choice, 0, "Password / Agent");
-                                ui.radio_value(&mut app.new_ssh_auth_choice, 1, "Key File");
+                                ui.radio_value(&mut app.new_ssh_auth_choice, 1, "Key File / Saved Key");
                                 ui.radio_value(&mut app.new_ssh_auth_choice, 2, "Paste Key");
                             });
                             ui.end_row();
 
                             if app.new_ssh_auth_choice == 1 {
+                                let saved_keys = SshStore::list_saved_keys();
+                                if !saved_keys.is_empty() {
+                                    ui.label("Saved Keypair:");
+                                    ui.horizontal(|ui| {
+                                        let current_label = saved_keys.iter()
+                                            .find(|k| k.priv_path.to_string_lossy() == app.new_ssh_key_path)
+                                            .map(|k| k.file_name.as_str())
+                                            .unwrap_or("-- Select from saved keys --");
+
+                                        egui::ComboBox::from_id_source("profile_saved_keys_combo")
+                                            .width(230.0)
+                                            .selected_text(current_label)
+                                            .show_ui(ui, |ui| {
+                                                for key in &saved_keys {
+                                                    let is_selected = key.priv_path.to_string_lossy() == app.new_ssh_key_path;
+                                                    if ui.selectable_label(is_selected, &key.file_name).clicked() {
+                                                        app.new_ssh_key_path = key.priv_path.to_string_lossy().to_string();
+                                                    }
+                                                }
+                                            });
+
+                                        if ui.small_button("+ Gen New").on_hover_text("Open SSH Key Generator modal").clicked() {
+                                            app.show_keygen_modal = true;
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+
                                 ui.label("Key File Path:");
-                                ui.text_edit_singleline(&mut app.new_ssh_key_path);
+                                ui.horizontal(|ui| {
+                                    ui.text_edit_singleline(&mut app.new_ssh_key_path);
+                                    if saved_keys.is_empty() {
+                                        if ui.small_button("+ Generate Key").clicked() {
+                                            app.show_keygen_modal = true;
+                                        }
+                                    }
+                                });
                                 ui.end_row();
                             } else if app.new_ssh_auth_choice == 2 {
                                 ui.label("Paste Private Key:");

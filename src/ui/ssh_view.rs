@@ -43,11 +43,17 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new(&profile.name).strong().size(15.0).color(app.theme.text_primary_color()));
                                     let auth_badge = match &profile.auth_type {
-                                        SshAuthType::PasswordOrAgent => "[Password/Agent]",
-                                        SshAuthType::KeyFile(_) => "[Key File]",
-                                        SshAuthType::PastedKey { .. } => "[Inline Key]",
+                                        SshAuthType::PasswordOrAgent => "[Password/Agent]".to_string(),
+                                        SshAuthType::KeyFile(path) => {
+                                            let key_name = std::path::Path::new(path)
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_else(|| "Key File".to_string());
+                                            format!("[Key: {}]", key_name)
+                                        }
+                                        SshAuthType::PastedKey { .. } => "[Inline Key]".to_string(),
                                     };
-                                    ui.label(egui::RichText::new(auth_badge).color(app.theme.accent_color()).small());
+                                    ui.label(egui::RichText::new(&auth_badge).color(app.theme.accent_color()).small());
                                 });
                                 ui.label(
                                     egui::RichText::new(format!("{}@{}:{}", profile.username, profile.host, profile.port))
@@ -97,6 +103,8 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                     });
                 } else {
                     let mut key_to_delete: Option<String> = None;
+                    let mut key_to_create_profile: Option<std::path::PathBuf> = None;
+                    let mut key_name_for_profile: Option<String> = None;
 
                     for key in saved_keys {
                         app.theme.card_frame().show(ui, |ui| {
@@ -118,10 +126,27 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                                             }
                                         }
                                     }
+                                    if ui.button("+ New Profile with Key").on_hover_text("Create a new SSH connection using this key").clicked() {
+                                        key_to_create_profile = Some(key.priv_path.clone());
+                                        key_name_for_profile = Some(key.file_name.clone());
+                                    }
                                 });
                             });
                         });
                         ui.add_space(8.0);
+                    }
+
+                    if let (Some(path), Some(name)) = (key_to_create_profile, key_name_for_profile) {
+                        app.open_create_profile_modal();
+                        app.new_ssh_auth_choice = 1;
+                        app.new_ssh_key_path = path.to_string_lossy().to_string();
+                        let clean_title = name.trim_start_matches("id_ed25519_")
+                            .trim_start_matches("id_rsa_")
+                            .trim_start_matches("id_ecdsa384_")
+                            .trim_start_matches("id_ecdsa256_");
+                        if !clean_title.is_empty() {
+                            app.new_ssh_name = format!("Server ({})", clean_title);
+                        }
                     }
 
                     if let Some(name) = key_to_delete {

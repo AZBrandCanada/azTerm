@@ -119,30 +119,44 @@ fn parse_cli_arguments() -> CliLaunchOptions {
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "-d" | "--working-directory" | "--dir" => {
-                if let Some(dir) = iter.next() {
-                    opts.working_directory = Some(dir);
+        if arg.starts_with("--working-directory=") {
+            opts.working_directory = Some(arg.trim_start_matches("--working-directory=").to_string());
+        } else if arg.starts_with("--dir=") {
+            opts.working_directory = Some(arg.trim_start_matches("--dir=").to_string());
+        } else {
+            match arg.as_str() {
+                "-d" | "--working-directory" | "--dir" | "-w" => {
+                    if let Some(dir) = iter.next() {
+                        opts.working_directory = Some(dir);
+                    }
                 }
-            }
-            "--sftp" => {
-                opts.open_sftp_only = true;
-            }
-            "-e" | "--execute" => {
-                let rest: Vec<String> = iter.collect();
-                if !rest.is_empty() {
-                    opts.execute_command = Some(rest);
-                }
-                break;
-            }
-            other => {
-                if other.starts_with("ssh://") || other.starts_with("ssh:") {
-                    opts.ssh_url = Some(other.to_string());
-                } else if other.starts_with("sftp://") || other.starts_with("sftp:") {
-                    opts.ssh_url = Some(other.replace("sftp://", "ssh://"));
+                "--sftp" => {
                     opts.open_sftp_only = true;
-                } else if Path::new(other).exists() && Path::new(other).is_dir() {
-                    opts.working_directory = Some(other.to_string());
+                }
+                "-e" | "--execute" => {
+                    let rest: Vec<String> = iter.collect();
+                    if !rest.is_empty() {
+                        opts.execute_command = Some(rest);
+                    }
+                    break;
+                }
+                other => {
+                    if other.starts_with("ssh://") || other.starts_with("ssh:") {
+                        opts.ssh_url = Some(other.to_string());
+                    } else if other.starts_with("sftp://") || other.starts_with("sftp:") {
+                        opts.ssh_url = Some(other.replace("sftp://", "ssh://"));
+                        opts.open_sftp_only = true;
+                    } else {
+                        let path_candidate = if other.starts_with("file://") {
+                            other.trim_start_matches("file://").to_string()
+                        } else {
+                            other.to_string()
+                        };
+                        let decoded = path_candidate.replace("%20", " ");
+                        if Path::new(&decoded).exists() && Path::new(&decoded).is_dir() {
+                            opts.working_directory = Some(decoded);
+                        }
+                    }
                 }
             }
         }
@@ -279,6 +293,7 @@ pub struct AppState {
 
     pub show_keygen_modal: bool,
     pub keygen_name: String,
+    pub keygen_algo: usize,
     pub generated_pub_key: String,
     pub keygen_status: String,
 
@@ -295,7 +310,6 @@ impl AppState {
 
         cc.egui_ctx.set_zoom_factor(settings.zoom_factor);
 
-        // Load system Nerd Fonts into egui so terminal glyphs and starship icons render properly
         let mut fonts = egui::FontDefinitions::default();
         let nerd_font_paths = [
             "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
@@ -365,6 +379,7 @@ impl AppState {
 
             show_keygen_modal: false,
             keygen_name: "prod_server".to_string(),
+            keygen_algo: 0,
             generated_pub_key: String::new(),
             keygen_status: String::new(),
 
