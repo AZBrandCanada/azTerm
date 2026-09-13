@@ -275,7 +275,6 @@ pub fn render_status_bar(app: &mut AppState, ctx: &egui::Context) {
                     }
                 }
 
-                // Live Transfer Status Badge
                 if let Some((ref text, is_error, _)) = app.sftp.transfer_status {
                     ui.separator();
                     let col = if is_error { app.theme.danger_color() } else { app.theme.accent_color() };

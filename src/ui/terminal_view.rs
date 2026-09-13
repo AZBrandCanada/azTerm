@@ -17,7 +17,6 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
 
     let total_area = ui.available_rect_before_wrap();
 
-    // Side-by-side partitioning: Terminal takes 65% and SFTP drawer takes 35%
     let (term_area_rect, sftp_pane_rect) = if app.settings.show_sftp_split_view {
         let split_w = (total_area.width() * 0.65).max(120.0);
         let sftp_w = (total_area.width() - split_w - 6.0).max(120.0);
@@ -35,7 +34,6 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
     let mut actions = Vec::new();
     let mut pane_rects = Vec::new();
 
-    // Render terminal workspace directly into term_area_rect without double-allocating UI wrappers
     if let Some(ws) = app.workspaces.get_mut(app.active_workspace_idx) {
         let is_multi_pane = !ws.is_single_pane();
         let max_session = ws.maximized_session;
@@ -90,18 +88,18 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
             if let Some((_, _, snap_rect)) = hovered_zone {
                 ui.painter().rect_filled(
                     snap_rect,
-                    6.0,
+                    4.0,
                     egui::Color32::from_rgba_unmultiplied(app.theme.accent[0], app.theme.accent[1], app.theme.accent[2], 75),
                 );
                 ui.painter().rect_stroke(
                     snap_rect,
-                    6.0,
+                    4.0,
                     egui::Stroke::new(2.0_f32, app.theme.accent_color()),
                 );
                 ui.painter().text(
                     snap_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Drop to Tile Here",
+                    "Tile Here",
                     egui::FontId::proportional(14.0),
                     egui::Color32::WHITE,
                 );
@@ -109,7 +107,7 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                 let badge_rect = egui::Rect::from_center_size(ptr, egui::vec2(160.0, 26.0));
                 ui.painter().rect_filled(badge_rect, 4.0, app.theme.bg_card_color());
                 ui.painter().rect_stroke(badge_rect, 4.0, egui::Stroke::new(1.0_f32, app.theme.accent_color()));
-                ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER, "Drop to Pop Out as Tab", egui::FontId::proportional(12.0), app.theme.accent_color());
+                ui.painter().text(badge_rect.center(), egui::Align2::CENTER_CENTER, "Pop Out as Tab", egui::FontId::proportional(12.0), app.theme.accent_color());
             }
         } else {
             if let Some(ptr) = pointer_pos {
@@ -128,7 +126,7 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                                     if let Some(target_ws) = app.workspaces.get(app.active_workspace_idx) {
                                         let incoming_leaves = app.workspaces[drag_ws_idx].leaves().len();
                                         if target_ws.leaves().len() + incoming_leaves > 16 {
-                                            app.set_toast("Cannot dock: workspace limit of 16 panes reached");
+                                            app.set_toast("Cannot dock: limit of 16 panes reached");
                                             docked = true;
                                             break;
                                         }
@@ -233,7 +231,6 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
         }
     }
 
-    // Render SFTP drawer cleanly on the right
     if let Some(sftp_rect) = sftp_pane_rect {
         ui.allocate_ui_at_rect(sftp_rect, |ui| {
             app.theme.card_frame().show(ui, |ui| {
@@ -242,9 +239,9 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let transfer_count = app.sftp.transfers.lock().map(|t| t.len()).unwrap_or(0);
                         let badge_text = if transfer_count > 0 {
-                            format!("⇅ Transfers ({})", transfer_count)
+                            format!("<> Transfers ({})", transfer_count)
                         } else {
-                            "⇅ Transfers".to_string()
+                            "<> Transfers".to_string()
                         };
                         if ui.button(badge_text).clicked() {
                             app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
