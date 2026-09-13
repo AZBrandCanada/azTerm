@@ -4,7 +4,7 @@ use crate::theme::*;
 use eframe::egui;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtyPair, PtySize};
 use std::io::{Read, Write};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -12,34 +12,7 @@ use std::thread;
 use arboard::{GetExtLinux, SetExtLinux};
 
 pub fn get_system_clipboard_text() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Ok(output) = std::process::Command::new("wl-paste")
-                .arg("--no-newline")
-                .output()
-            {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
-                }
-            }
-            if let Ok(output) = std::process::Command::new("wl-paste")
-                .args(["--primary", "--no-newline"])
-                .output()
-            {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
-                }
-            }
-        }
-    }
-
+    // Fast path: in-process clipboard via arboard (handles Wayland data-control & X11)
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
@@ -56,11 +29,12 @@ pub fn get_system_clipboard_text() -> Option<String> {
         }
     }
 
+    // Fallback if system clipboard manager is not responding to arboard
     #[cfg(target_os = "linux")]
     {
-        for sel in ["clipboard", "primary"] {
-            if let Ok(output) = std::process::Command::new("xclip")
-                .args(["-selection", sel, "-o"])
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Ok(output) = std::process::Command::new("wl-paste")
+                .arg("--no-newline")
                 .output()
             {
                 if output.status.success() {
@@ -70,15 +44,16 @@ pub fn get_system_clipboard_text() -> Option<String> {
                     }
                 }
             }
-        }
-        if let Ok(output) = std::process::Command::new("xsel")
-            .args(["-b", "-o"])
-            .output()
-        {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout).to_string();
-                if !text.is_empty() {
-                    return Some(text);
+        } else {
+            if let Ok(output) = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-o"])
+                .output()
+            {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout).to_string();
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
                 }
             }
         }
@@ -101,37 +76,6 @@ pub fn set_system_clipboard_text(ctx: Option<&egui::Context>, text: &str) {
         #[cfg(target_os = "linux")]
         {
             let _ = cb.set().clipboard(arboard::LinuxClipboardKind::Primary).text(text.to_string());
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            for primary_flag in [false, true] {
-                let mut cmd = std::process::Command::new("wl-copy");
-                if primary_flag {
-                    cmd.arg("--primary");
-                }
-                if let Ok(mut child) = cmd.stdin(std::process::Stdio::piped()).spawn() {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(text.as_bytes());
-                    }
-                    let _ = child.wait();
-                }
-            }
-        } else {
-            for sel in ["clipboard", "primary"] {
-                if let Ok(mut child) = std::process::Command::new("xclip")
-                    .args(["-selection", sel])
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(text.as_bytes());
-                    }
-                    let _ = child.wait();
-                }
-            }
         }
     }
 }
@@ -169,10 +113,10 @@ pub struct TerminalSession {
     pub scroll_offset: usize,
     pub max_scroll: usize,
 
-    // Absolute buffer line coordinates: (line_age, col) where line_age = scroll_offset + (rows - 1 - r)
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
+    pub has_new_data: bool,
 }
 
 impl TerminalSession {
@@ -210,10 +154,10 @@ impl TerminalSession {
         ));
         let master_pty = Arc::new(Mutex::new(pair.master));
 
-        let (tx, rx) = channel::<Vec<u8>>();
+        let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(512);
 
         thread::spawn(move || {
-            let mut buf = [0u8; 8192];
+            let mut buf = [0u8; 16384];
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
@@ -240,27 +184,21 @@ impl TerminalSession {
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
+            has_new_data: false,
         }
     }
 
-    pub fn safe_set_scrollback(&mut self, target: usize) {
-        if target == 0 {
-            self.scroll_offset = 0;
-            self.parser.set_scrollback(0);
-            return;
-        }
-
-        // Query the true maximum history lines currently available in vt100
-        self.parser.set_scrollback(usize::MAX);
-        self.max_scroll = self.parser.screen().scrollback();
-
-        let clamped = target.min(self.max_scroll);
+    pub fn set_view_scroll(&mut self, target: usize) {
+        let total_avail = self.max_scroll;
+        let clamped = target.min(total_avail);
+        self.scroll_offset = clamped;
         self.parser.set_scrollback(clamped);
-        self.scroll_offset = self.parser.screen().scrollback();
     }
 
     pub fn send_input(&mut self, text: &str) {
-        self.safe_set_scrollback(0);
+        if self.scroll_offset > 0 {
+            self.set_view_scroll(0);
+        }
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(text.as_bytes());
             let _ = w.flush();
@@ -271,7 +209,9 @@ impl TerminalSession {
         if text.is_empty() {
             return;
         }
-        self.safe_set_scrollback(0);
+        if self.scroll_offset > 0 {
+            self.set_view_scroll(0);
+        }
 
         let bracketed = self.parser.screen().bracketed_paste();
         let payload = if bracketed {
@@ -279,7 +219,7 @@ impl TerminalSession {
             let normalized = sanitized.replace("\r\n", "\n").replace('\r', "\n");
             format!("\x1b[200~{}\x1b[201~", normalized)
         } else {
-            text.replace("\r\n", "\r").replace('\n', "\r")
+            text.replace("\r\n", "\n").replace('\r', "\n")
         };
 
         if let Ok(mut w) = self.writer.lock() {
@@ -289,35 +229,31 @@ impl TerminalSession {
     }
 
     pub fn poll_updates(&mut self) {
-        let mut received = false;
-        while let Ok(bytes) = self.rx.try_recv() {
-            let (cur_r, _) = self.parser.screen().cursor_position();
-            if cur_r >= self.rows {
-                let safe_r = self.rows.saturating_sub(1);
-                let cup = format!("\x1b[{};1H", safe_r + 1);
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.parser.process(cup.as_bytes());
-                }));
-            }
+        let mut processed_any = false;
+        let mut total_bytes = 0;
 
+        while let Ok(bytes) = self.rx.try_recv() {
+            total_bytes += bytes.len();
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.parser.process(&bytes);
             }));
-            received = true;
+            processed_any = true;
+            if total_bytes > 262_144 {
+                break;
+            }
         }
 
-        if received {
-            let current = self.scroll_offset;
-            self.parser.set_scrollback(usize::MAX);
-            self.max_scroll = self.parser.screen().scrollback();
+        if processed_any {
+            self.has_new_data = true;
+            let screen_scroll = self.parser.screen().scrollback();
 
-            if current == 0 {
+            if self.scroll_offset == 0 {
+                self.max_scroll = screen_scroll;
                 self.parser.set_scrollback(0);
-                self.scroll_offset = 0;
             } else {
-                let clamped = current.min(self.max_scroll);
+                self.max_scroll = screen_scroll.max(self.max_scroll);
+                let clamped = self.scroll_offset.min(self.max_scroll);
                 self.parser.set_scrollback(clamped);
-                self.scroll_offset = self.parser.screen().scrollback();
             }
         }
     }
@@ -398,7 +334,6 @@ impl TerminalSession {
             let saved_offset = self.scroll_offset;
 
             for age in (bot_age..=top_age).rev() {
-                // Formula: line_age = scroll_offset + (rows - 1 - r) => r = (rows - 1) + scroll_offset - line_age
                 let target_r = (self.rows as i64 - 1) + self.scroll_offset as i64 - age;
 
                 let (screen_r, temp_offset): (u16, usize) = if target_r >= 0 && target_r < self.rows as i64 {
@@ -463,6 +398,8 @@ impl TerminalSession {
                     return;
                 }
                 if i.key_pressed(egui::Key::L) {
+                    self.scroll_offset = 0;
+                    self.parser.set_scrollback(0);
                     self.send_input("\x0c");
                     return;
                 }
@@ -523,20 +460,20 @@ impl TerminalSession {
                         if modifiers.shift {
                             if *key == egui::Key::PageUp {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
-                                self.safe_set_scrollback(self.scroll_offset + jump);
+                                self.set_view_scroll(self.scroll_offset + jump);
                                 continue;
                             }
                             if *key == egui::Key::PageDown {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
-                                self.safe_set_scrollback(self.scroll_offset.saturating_sub(jump));
+                                self.set_view_scroll(self.scroll_offset.saturating_sub(jump));
                                 continue;
                             }
                             if *key == egui::Key::Home {
-                                self.safe_set_scrollback(usize::MAX);
+                                self.set_view_scroll(usize::MAX);
                                 continue;
                             }
                             if *key == egui::Key::End {
-                                self.safe_set_scrollback(0);
+                                self.set_view_scroll(0);
                                 continue;
                             }
                         }
@@ -630,42 +567,29 @@ impl TerminalSession {
         has_focus: bool,
         toast: &mut Option<(String, std::time::Instant)>,
     ) -> bool {
-        self.safe_set_scrollback(self.scroll_offset);
-
-        let font_size = 14.0;
+        let font_size = 13.5;
         let font_id = egui::FontId::monospace(font_size);
 
         let probe = ui.painter().layout_no_wrap(
-            "MMMMMMMMMMMMMMMMMMMM".to_string(),
+            "WWWWWWWWWW".to_string(),
             font_id.clone(),
             egui::Color32::WHITE,
         );
-        let char_width = (probe.size().x / 20.0).max(1.0);
-        let row_height = probe.size().y.max(1.0);
+        let char_width = (probe.size().x / 10.0).max(1.0);
+        let row_height = (probe.size().y * 1.08).max(1.0);
 
-        let scrollbar_width = 14.0;
-        let inner_padding = 16.0;
-
+        let scrollbar_width = 12.0;
         let avail = ui.available_size();
-        let usable_w = (avail.x - inner_padding - scrollbar_width).max(80.0);
-        let usable_h = (avail.y - inner_padding).max(40.0);
-        let new_cols = ((usable_w / char_width).floor() as u16).max(15);
+        let usable_w = (avail.x - scrollbar_width - 8.0).max(80.0);
+        let usable_h = (avail.y - 8.0).max(40.0);
+        let new_cols = ((usable_w / char_width).floor() as u16).max(20);
         let new_rows = ((usable_h / row_height).floor() as u16).max(4);
 
         if new_cols != self.cols || new_rows != self.rows {
             self.cols = new_cols;
             self.rows = new_rows;
-            self.safe_set_scrollback(0);
-
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.parser.process(b"\x1b[1;1H");
-            }));
 
             self.parser.set_size(new_rows, new_cols);
-
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.parser.process(b"\x1b[1;1H");
-            }));
 
             if let Ok(master) = self.master_pty.lock() {
                 let _ = master.resize(PtySize {
@@ -681,13 +605,13 @@ impl TerminalSession {
             self.cols as f32 * char_width,
             self.rows as f32 * row_height,
         );
-        let total_size = egui::vec2(term_grid_size.x + scrollbar_width + 6.0, term_grid_size.y);
+        let total_size = egui::vec2(term_grid_size.x + scrollbar_width + 4.0, term_grid_size.y);
 
         let mut user_clicked_pane = false;
 
         egui::Frame::none()
             .fill(theme.bg_main_color())
-            .inner_margin(egui::Margin::same(6.0))
+            .inner_margin(egui::Margin::symmetric(4.0, 4.0))
             .show(ui, |ui| {
                 let (full_rect, response) = ui.allocate_exact_size(
                     total_size,
@@ -696,7 +620,7 @@ impl TerminalSession {
 
                 let grid_rect = egui::Rect::from_min_size(full_rect.min, term_grid_size);
                 let sb_track = egui::Rect::from_min_max(
-                    egui::pos2(grid_rect.max.x + 4.0, grid_rect.min.y),
+                    egui::pos2(grid_rect.max.x + 2.0, grid_rect.min.y),
                     egui::pos2(full_rect.max.x, grid_rect.max.y),
                 );
 
@@ -730,7 +654,9 @@ impl TerminalSession {
                     self.handle_keyboard_events(ui.ctx(), settings);
                 }
 
-                if is_hovered && !is_ctrl {
+                let in_alternate = self.parser.screen().alternate_screen();
+
+                if is_hovered && !is_ctrl && !in_alternate {
                     let scroll_y = ui.input(|i| {
                         if i.raw_scroll_delta.y != 0.0 {
                             i.raw_scroll_delta.y
@@ -742,9 +668,9 @@ impl TerminalSession {
                     if scroll_y != 0.0 {
                         let lines = ((scroll_y.abs() / 18.0).round() as usize).max(1) * 3;
                         if scroll_y > 0.0 {
-                            self.safe_set_scrollback(self.scroll_offset + lines);
+                            self.set_view_scroll(self.scroll_offset + lines);
                         } else {
-                            self.safe_set_scrollback(self.scroll_offset.saturating_sub(lines));
+                            self.set_view_scroll(self.scroll_offset.saturating_sub(lines));
                         }
 
                         if self.is_dragging_selection && is_primary_down {
@@ -759,7 +685,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Triple-click selects full line
                 if response.triple_clicked() && grid_rect.contains(pointer_pos) {
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
@@ -771,11 +696,10 @@ impl TerminalSession {
                         let selected = self.extract_selected_text();
                         if !selected.trim().is_empty() {
                             set_system_clipboard_text(Some(ui.ctx()), &selected);
-                            *toast = Some(("Copied line".to_string(), std::time::Instant::now()));
+                            *toast = Some(("Copied selected line".to_string(), std::time::Instant::now()));
                         }
                     }
                 } else if response.double_clicked() && grid_rect.contains(pointer_pos) {
-                    // Double-click selects word
                     let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
@@ -795,7 +719,7 @@ impl TerminalSession {
                                 } else {
                                     selected.replace('\n', " ")
                                 };
-                                *toast = Some((format!("Copied: \"{}\"", preview), std::time::Instant::now()));
+                                *toast = Some((format!("Copied: {}", preview), std::time::Instant::now()));
                             }
                         }
                     }
@@ -811,19 +735,18 @@ impl TerminalSession {
                     self.is_dragging_selection = true;
                 }
 
-                // Active drag updates selection end position
                 if self.is_dragging_selection && is_primary_down {
-                    if pointer_pos.y < grid_rect.min.y {
+                    if pointer_pos.y < grid_rect.min.y && !in_alternate {
                         let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
                         let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
-                        self.safe_set_scrollback(self.scroll_offset + auto_scroll_lines);
+                        self.set_view_scroll(self.scroll_offset + auto_scroll_lines);
                         let age = self.scroll_offset as i64 + (self.rows as i64 - 1);
                         self.selection_end = Some((age, 0));
                         ui.ctx().request_repaint();
-                    } else if pointer_pos.y > grid_rect.max.y {
+                    } else if pointer_pos.y > grid_rect.max.y && !in_alternate {
                         let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
                         let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
-                        self.safe_set_scrollback(self.scroll_offset.saturating_sub(auto_scroll_lines));
+                        self.set_view_scroll(self.scroll_offset.saturating_sub(auto_scroll_lines));
                         let age = self.scroll_offset as i64;
                         self.selection_end = Some((age, self.cols.saturating_sub(1)));
                         ui.ctx().request_repaint();
@@ -837,7 +760,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Release completes selection drag and copies if copy_on_select is active
                 if self.is_dragging_selection && is_primary_released {
                     self.is_dragging_selection = false;
                     if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
@@ -854,7 +776,7 @@ impl TerminalSession {
                                     selected.replace('\n', " ")
                                 };
                                 *toast = Some((
-                                    format!("Copied: \"{}\"", preview),
+                                    format!("Copied: {}", preview),
                                     std::time::Instant::now(),
                                 ));
                             }
@@ -862,11 +784,8 @@ impl TerminalSession {
                     }
                 }
 
-                let right_clicked = response.clicked_by(egui::PointerButton::Secondary)
-                    || response.secondary_clicked()
-                    || (is_hovered && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary) || i.pointer.button_released(egui::PointerButton::Secondary)));
-
-                if settings.paste_on_right_click && right_clicked {
+                // Strict single-trigger right-click paste
+                if settings.paste_on_right_click && response.secondary_clicked() {
                     if let Some(clip) = get_system_clipboard_text() {
                         if !clip.is_empty() {
                             self.send_paste(&clip);
@@ -878,47 +797,49 @@ impl TerminalSession {
                     }
                 }
 
-                ui.painter().rect_filled(sb_track, 4.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6));
+                if !in_alternate {
+                    ui.painter().rect_filled(sb_track, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6));
 
-                let sb_id = ui.id().with(self.id).with("term_sb");
-                let sb_resp = ui.interact(sb_track, sb_id, egui::Sense::click_and_drag());
+                    let sb_id = ui.id().with(self.id).with("term_sb");
+                    let sb_resp = ui.interact(sb_track, sb_id, egui::Sense::click_and_drag());
 
-                let total_lines = (self.max_scroll + self.rows as usize).max(1) as f32;
-                let visible_ratio = (self.rows as f32 / total_lines).clamp(0.04, 1.0);
-                let max_thumb = sb_track.height().max(1.0);
-                let min_thumb = 20.0_f32.min(max_thumb);
-                let thumb_height = (sb_track.height() * visible_ratio).clamp(min_thumb, max_thumb);
-                let scroll_ratio = if self.max_scroll > 0 {
-                    (self.scroll_offset as f32 / self.max_scroll as f32).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let thumb_y = sb_track.bottom() - thumb_height - scroll_ratio * (sb_track.height() - thumb_height);
+                    let total_lines = (self.max_scroll + self.rows as usize).max(1) as f32;
+                    let visible_ratio = (self.rows as f32 / total_lines).clamp(0.04, 1.0);
+                    let max_thumb = sb_track.height().max(1.0);
+                    let min_thumb = 18.0_f32.min(max_thumb);
+                    let thumb_height = (sb_track.height() * visible_ratio).clamp(min_thumb, max_thumb);
+                    let scroll_ratio = if self.max_scroll > 0 {
+                        (self.scroll_offset as f32 / self.max_scroll as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let thumb_y = sb_track.bottom() - thumb_height - scroll_ratio * (sb_track.height() - thumb_height);
 
-                let sb_thumb = egui::Rect::from_min_size(
-                    egui::pos2(sb_track.left() + 1.0, thumb_y),
-                    egui::vec2(sb_track.width() - 2.0, thumb_height),
-                );
+                    let sb_thumb = egui::Rect::from_min_size(
+                        egui::pos2(sb_track.left() + 1.0, thumb_y),
+                        egui::vec2(sb_track.width() - 2.0, thumb_height),
+                    );
 
-                if sb_resp.clicked() || sb_resp.dragged() {
-                    if let Some(ptr) = sb_resp.interact_pointer_pos() {
-                        let rel_y = (sb_track.bottom() - ptr.y) / sb_track.height();
-                        let target_offset = (rel_y.clamp(0.0, 1.0) * self.max_scroll as f32).round() as usize;
-                        self.safe_set_scrollback(target_offset);
-                        ui.ctx().request_repaint();
+                    if sb_resp.clicked() || sb_resp.dragged() {
+                        if let Some(ptr) = sb_resp.interact_pointer_pos() {
+                            let rel_y = (sb_track.bottom() - ptr.y) / sb_track.height();
+                            let target_offset = (rel_y.clamp(0.0, 1.0) * self.max_scroll as f32).round() as usize;
+                            self.set_view_scroll(target_offset);
+                            ui.ctx().request_repaint();
+                        }
                     }
-                }
 
-                let thumb_color = if sb_resp.dragged() {
-                    theme.accent_color()
-                } else if sb_resp.hovered() {
-                    theme.accent_hover_color()
-                } else if self.scroll_offset > 0 {
-                    theme.accent_color().linear_multiply(0.8)
-                } else {
-                    egui::Color32::from_rgb(55, 65, 81)
-                };
-                ui.painter().rect_filled(sb_thumb, 4.0, thumb_color);
+                    let thumb_color = if sb_resp.dragged() {
+                        theme.accent_color()
+                    } else if sb_resp.hovered() {
+                        theme.accent_hover_color()
+                    } else if self.scroll_offset > 0 {
+                        theme.accent_color().linear_multiply(0.7)
+                    } else {
+                        egui::Color32::from_rgb(55, 65, 81)
+                    };
+                    ui.painter().rect_filled(sb_thumb, 3.0, thumb_color);
+                }
 
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let screen = self.parser.screen();
@@ -934,9 +855,6 @@ impl TerminalSession {
 
                     for r in 0..rows {
                         let row_y = grid_rect.min.y + r as f32 * row_height;
-                        let mut job = egui::text::LayoutJob::default();
-                        job.wrap.max_width = f32::INFINITY;
-
                         let line_age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
 
                         for c in 0..cols {
@@ -950,7 +868,13 @@ impl TerminalSession {
                             let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
                             let is_selected = self.is_cell_selected(line_age, c);
                             let cell_text = cell.contents();
-                            let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
+
+                            let cell_x = grid_rect.min.x + c as f32 * char_width;
+                            let cell_width = if cell.is_wide() { char_width * 2.0 } else { char_width };
+                            let cell_rect = egui::Rect::from_min_size(
+                                egui::pos2(cell_x, row_y),
+                                egui::vec2(cell_width, row_height),
+                            );
 
                             let mut fg = vt_to_egui_color(cell.fgcolor(), false, theme);
                             let mut bg = vt_to_egui_color(cell.bgcolor(), true, theme);
@@ -958,40 +882,51 @@ impl TerminalSession {
                             if is_selected {
                                 fg = theme.bg_main_color();
                                 bg = theme.accent_color();
-                            } else if cell.inverse() || is_cursor {
+                            } else if cell.inverse() {
                                 std::mem::swap(&mut fg, &mut bg);
-                                if is_cursor && bg == fg {
-                                    fg = theme.bg_main_color();
-                                    bg = theme.text_primary_color();
-                                }
                             }
 
-                            job.append(
-                                display_char,
-                                0.0,
-                                egui::TextFormat {
-                                    font_id: font_id.clone(),
-                                    color: fg,
-                                    background: if bg != theme.bg_main_color() {
-                                        bg
-                                    } else {
-                                        egui::Color32::TRANSPARENT
-                                    },
-                                    ..Default::default()
-                                },
-                            );
-                        }
+                            if bg != theme.bg_main_color() {
+                                ui.painter().rect_filled(cell_rect, 0.0, bg);
+                            }
 
-                        let galley = ui.painter().layout_job(job);
-                        ui.painter().galley(egui::pos2(grid_rect.min.x, row_y), galley, egui::Color32::WHITE);
+                            if is_cursor {
+                                ui.painter().rect_filled(
+                                    cell_rect,
+                                    1.0,
+                                    theme.accent_color().linear_multiply(0.85),
+                                );
+                                fg = theme.bg_main_color();
+                            }
+
+                            if !cell_text.is_empty() && cell_text != " " {
+                                ui.painter().text(
+                                    egui::pos2(cell_x, row_y + 1.0),
+                                    egui::Align2::LEFT_TOP,
+                                    &cell_text,
+                                    font_id.clone(),
+                                    fg,
+                                );
+                            }
+
+                            if cell.underline() {
+                                ui.painter().line_segment(
+                                    [
+                                        egui::pos2(cell_rect.min.x, cell_rect.max.y - 1.0),
+                                        egui::pos2(cell_rect.max.x, cell_rect.max.y - 1.0),
+                                    ],
+                                    egui::Stroke::new(1.0_f32, fg),
+                                );
+                            }
+                        }
                     }
                 }));
 
-                if self.scroll_offset > 0 {
-                    let chip_w = 160.0;
+                if self.scroll_offset > 0 && !in_alternate {
+                    let chip_w = 150.0;
                     let chip_h = 22.0;
                     let chip_rect = egui::Rect::from_min_size(
-                        egui::pos2(grid_rect.max.x - chip_w - 8.0, grid_rect.max.y - chip_h - 6.0),
+                        egui::pos2(grid_rect.max.x - chip_w - 6.0, grid_rect.max.y - chip_h - 6.0),
                         egui::vec2(chip_w, chip_h),
                     );
                     let chip_resp = ui.interact(chip_rect, ui.id().with(self.id).with("jump_chip"), egui::Sense::click());
@@ -999,20 +934,20 @@ impl TerminalSession {
 
                     ui.painter().rect(
                         chip_rect,
-                        4.0,
+                        3.0,
                         if is_chip_hov { theme.bg_card_color() } else { theme.bg_panel_color() },
                         egui::Stroke::new(1.0_f32, theme.accent_color()),
                     );
                     ui.painter().text(
                         chip_rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        format!("↓ Scrolled (-{}) • Live", self.scroll_offset),
+                        format!("[Scrolled -{}] View Live", self.scroll_offset),
                         egui::FontId::proportional(11.0),
                         if is_chip_hov { theme.accent_hover_color() } else { theme.accent_color() },
                     );
 
                     if chip_resp.clicked() {
-                        self.safe_set_scrollback(0);
+                        self.set_view_scroll(0);
                         ui.ctx().request_repaint();
                     }
                 }

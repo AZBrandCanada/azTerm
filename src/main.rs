@@ -97,7 +97,7 @@ impl InstallMethod {
     pub fn display_name(&self) -> String {
         match self {
             InstallMethod::AppImage => "AppImage (Standalone)".to_string(),
-            InstallMethod::ScriptInstalled => "One-Line Shell Script (install.sh)".to_string(),
+            InstallMethod::ScriptInstalled => "Shell Script (install.sh)".to_string(),
             InstallMethod::PackageManager(pkg) => format!("Package Manager: {}", pkg),
             InstallMethod::Windows => "Windows Executable".to_string(),
             InstallMethod::MacOS => "macOS Universal Binary".to_string(),
@@ -358,7 +358,7 @@ impl AppState {
 
             theme,
             custom_themes,
-            new_theme_name: "My Custom Theme".to_string(),
+            new_theme_name: "Custom Theme".to_string(),
 
             toast_message: None,
 
@@ -819,7 +819,7 @@ impl AppState {
         }
 
         if total_tabs_created > 1 {
-            self.set_toast(format!("Tiled {} sessions across {} workspace tabs (max 16/tab)", all_sessions.len(), total_tabs_created));
+            self.set_toast(format!("Tiled {} sessions across {} workspace tabs", all_sessions.len(), total_tabs_created));
         } else {
             self.set_toast(format!("Tiled all {} sessions into 1 tab", all_sessions.len()));
         }

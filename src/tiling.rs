@@ -132,7 +132,6 @@ impl TileNode {
     }
 }
 
-/// Recursively builds a clean, balanced binary tree for any number of leaves
 pub fn build_balanced_tree(leaves: &[usize], next_split_id: &mut usize, dir: SplitDirection) -> TileNode {
     match leaves.len() {
         0 => TileNode::Leaf(1),
@@ -314,12 +313,12 @@ pub fn render_tile_tree(
             }
         }
         TileNode::Split { id, dir, ratio, first, second } => {
-            let divider_thick = 5.0_f32;
+            let divider_thick = 4.0_f32;
             let safe_ratio = if ratio.is_nan() || *ratio <= 0.0 || *ratio >= 1.0 { 0.5 } else { *ratio };
             match dir {
                 SplitDirection::Horizontal => {
                     let avail_w = (total_rect.width() - divider_thick).max(1.0);
-                    let min_pane_w = 30.0_f32;
+                    let min_pane_w = 40.0_f32;
                     let max_pane_w = (avail_w - min_pane_w).max(min_pane_w);
                     let w1 = if avail_w <= min_pane_w * 2.0 {
                         (avail_w * 0.5).max(1.0)
@@ -359,7 +358,7 @@ pub fn render_tile_tree(
                 }
                 SplitDirection::Vertical => {
                     let avail_h = (total_rect.height() - divider_thick).max(1.0);
-                    let min_pane_h = 25.0_f32;
+                    let min_pane_h = 30.0_f32;
                     let max_pane_h = (avail_h - min_pane_h).max(min_pane_h);
                     let h1 = if avail_h <= min_pane_h * 2.0 {
                         (avail_h * 0.5).max(1.0)
@@ -452,18 +451,18 @@ pub fn render_single_pane(
                 let title_color = if is_focused { theme.accent_color() } else { theme.text_muted_color() };
                 let max_title_chars = ((drag_area_w - 20.0) / 7.2).max(1.0) as usize;
                 let title_disp = if session.title.len() > max_title_chars {
-                    format!("{}…", &session.title[..max_title_chars.saturating_sub(1)])
+                    format!("{}...", &session.title[..max_title_chars.saturating_sub(3)])
                 } else {
                     session.title.clone()
                 };
                 ui.label(egui::RichText::new(title_disp).strong().small().color(title_color));
 
                 if is_focused {
-                    ui.label(egui::RichText::new("●").small().color(theme.accent_color()));
+                    ui.label(egui::RichText::new("*").small().color(theme.accent_color()));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(egui::RichText::new("×").strong().color(theme.danger_color())).on_hover_text("Close Pane (Ctrl+Shift+W)").clicked() {
+                    if ui.small_button(egui::RichText::new("x").strong().color(theme.danger_color())).on_hover_text("Close Pane (Ctrl+Shift+W)").clicked() {
                         actions.push(PaneAction::Close(session.id));
                     }
                     if rect.width() >= 130.0 {
@@ -478,10 +477,10 @@ pub fn render_single_pane(
                         }
                     }
                     if rect.width() >= 90.0 {
-                        if ui.small_button("-").on_hover_text("Split Down (Ctrl+Shift+E)").clicked() {
+                        if ui.small_button("Split V").on_hover_text("Split Down (Ctrl+Shift+E)").clicked() {
                             actions.push(PaneAction::Split(session.id, SplitDirection::Vertical));
                         }
-                        if ui.small_button("|").on_hover_text("Split Right (Ctrl+Shift+D)").clicked() {
+                        if ui.small_button("Split H").on_hover_text("Split Right (Ctrl+Shift+D)").clicked() {
                             actions.push(PaneAction::Split(session.id, SplitDirection::Horizontal));
                         }
                     }
