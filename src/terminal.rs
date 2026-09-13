@@ -1,3 +1,4 @@
+// src
 use crate::settings::{AppSettings, BackspaceSequence};
 use crate::theme::*;
 use eframe::egui;

@@ -1,3 +1,4 @@
+// src/ui
 use crate::terminal::SessionType;
 use crate::theme::{nav_action_button, nav_tab_button, session_tab_chip};
 use crate::tiling::SplitDirection;

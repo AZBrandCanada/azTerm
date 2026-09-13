@@ -1,3 +1,4 @@
+// src/ui
 use crate::tiling::{detect_dock_zone, dock_zone_preview_rect, render_tile_tree, DockZone, PaneAction, SplitDirection, WorkspaceTab};
 use crate::AppState;
 use eframe::egui;

@@ -1,3 +1,4 @@
+// src/ui
 pub mod modals;
 pub mod navbar;
 pub mod settings_view;

@@ -1,3 +1,4 @@
+// src
 use crate::settings::AppSettings;
 use crate::terminal::TerminalSession;
 use crate::theme::ThemeConfig;

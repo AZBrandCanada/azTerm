@@ -1,3 +1,4 @@
+// src/ui
 use crate::sftp::SftpTarget;
 use crate::ssh::{SshAuthType, SshProfile, SshStore};
 use crate::{ActiveView, AppState, SshSubView};

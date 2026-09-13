@@ -1,3 +1,4 @@
+// src/ui
 use crate::ssh::{SshAuthType, SshKeyAlgorithm, SshProfile, SshStore};
 use crate::{AppState, InstallMethod};
 use eframe::egui;
