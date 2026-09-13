@@ -194,6 +194,14 @@ impl TerminalSession {
         self.selection_end = None;
     }
 
+    pub fn query_max_scrollback(&mut self) -> usize {
+        let current = self.parser.screen().scrollback();
+        self.parser.set_scrollback(usize::MAX);
+        let max = self.parser.screen().scrollback();
+        self.parser.set_scrollback(current);
+        max
+    }
+
     pub fn set_view_scroll(&mut self, target: usize) {
         if self.parser.screen().alternate_screen() {
             self.scroll_offset = 0;
@@ -201,9 +209,7 @@ impl TerminalSession {
             return;
         }
 
-        self.parser.set_scrollback(usize::MAX);
-        self.max_scroll = self.parser.screen().scrollback();
-
+        self.max_scroll = self.query_max_scrollback();
         let clamped = target.min(self.max_scroll);
         self.scroll_offset = clamped;
         self.parser.set_scrollback(clamped);
@@ -286,11 +292,17 @@ impl TerminalSession {
 
     pub fn poll_updates(&mut self) {
         let mut total_bytes = 0;
+        let in_alt = self.parser.screen().alternate_screen();
+
+        // Query maximum history lines before processing this batch to anchor scrolled view
+        let old_max = if !in_alt && self.scroll_offset > 0 {
+            self.query_max_scrollback()
+        } else {
+            0
+        };
 
         while let Ok(bytes) = self.rx.try_recv() {
             total_bytes += bytes.len();
-
-            let in_alt = self.parser.screen().alternate_screen();
 
             if !in_alt && bytes.windows(4).any(|w| w == b"\x1b[3J") {
                 self.clear_screen_and_scrollback();
@@ -305,9 +317,18 @@ impl TerminalSession {
             }
         }
 
-        if self.parser.screen().alternate_screen() {
+        if in_alt {
             self.scroll_offset = 0;
             self.parser.set_scrollback(0);
+        } else if self.scroll_offset > 0 {
+            let new_max = self.query_max_scrollback();
+            if new_max > old_max {
+                let added = new_max - old_max;
+                // Anchor the view: advance scroll_offset by the number of new lines appended to buffer
+                self.scroll_offset = (self.scroll_offset + added).min(new_max);
+                self.parser.set_scrollback(self.scroll_offset);
+            }
+            self.max_scroll = new_max;
         }
     }
 
@@ -635,7 +656,8 @@ impl TerminalSession {
         let row_height = (probe.size().y * 1.05).max(1.0);
 
         let in_alternate = self.parser.screen().alternate_screen();
-        let scrollbar_width = if in_alternate { 0.0 } else { 12.0 };
+        let app_wants_mouse = in_alternate && (self.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None);
+        let scrollbar_width = if in_alternate || app_wants_mouse { 0.0 } else { 12.0 };
 
         let avail = ui.available_size();
         let usable_w = (avail.x - scrollbar_width).max(80.0);
@@ -648,13 +670,6 @@ impl TerminalSession {
             self.rows = new_rows;
 
             self.parser.set_size(new_rows, new_cols);
-
-            // If an app is running in the alternate screen, clean the buffer on resize so frames never stack
-            if in_alternate {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.parser.process(b"\x1b[H\x1b[2J");
-                }));
-            }
 
             if let Ok(master) = self.master_pty.lock() {
                 let _ = master.resize(PtySize {
@@ -697,8 +712,6 @@ impl TerminalSession {
         let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
         let cell_c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
         let cell_r = ((rel_y / row_height).floor() as u16).min(self.rows.saturating_sub(1));
-
-        let app_wants_mouse = in_alternate && (self.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None);
 
         if grid_rect.contains(pointer_pos) {
             if app_wants_mouse && !is_shift {
@@ -874,7 +887,7 @@ impl TerminalSession {
             }
         }
 
-        if !in_alternate {
+        if !in_alternate && !app_wants_mouse {
             ui.painter().rect_filled(sb_track, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6));
 
             let sb_id = ui.id().with(self.id).with("term_sb");
@@ -918,7 +931,6 @@ impl TerminalSession {
             ui.painter().rect_filled(sb_thumb, 3.0, thumb_color);
         }
 
-        // Fast, high-performance LayoutJob line renderer (avoids 13,000 painter calls per frame)
         ui.painter().rect_filled(grid_rect, 0.0, theme.bg_main_color());
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
