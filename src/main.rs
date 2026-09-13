@@ -312,26 +312,31 @@ impl AppState {
         cc.egui_ctx.set_zoom_factor(settings.zoom_factor);
 
         let mut fonts = egui::FontDefinitions::default();
-        let nerd_font_paths = [
-            "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
-            "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
+        let font_candidates = [
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
             "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
             "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
             "/usr/share/fonts/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
             "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/TTF/LiberationMono-Regular.ttf",
         ];
 
-        for path in nerd_font_paths {
+        for path in font_candidates {
             if let Ok(data) = std::fs::read(path) {
                 fonts.font_data.insert(
-                    "nerd_symbols".to_string(),
+                    "terminal_mono_font".to_string(),
                     egui::FontData::from_owned(data),
                 );
                 if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    mono.push("nerd_symbols".to_string());
-                }
-                if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    prop.push("nerd_symbols".to_string());
+                    mono.insert(0, "terminal_mono_font".to_string());
                 }
                 break;
             }
@@ -623,7 +628,10 @@ impl AppState {
         c.env("TERM", "xterm-256color");
         c.env("COLORTERM", "truecolor");
 
-        // Forward existing LANG or default to en_US.UTF-8 for proper Unicode & Braille glyph rendering
+        // Strip inherited terminal row/col limits so btop and TUIs calculate size from actual PTY winsize
+        c.env_remove("LINES");
+        c.env_remove("COLUMNS");
+
         let lang = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".to_string());
         c.env("LANG", lang);
 
@@ -659,6 +667,9 @@ impl AppState {
     pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
         let mut cmd = profile.to_command();
         cmd.env("COLORTERM", "truecolor");
+        cmd.env_remove("LINES");
+        cmd.env_remove("COLUMNS");
+
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let session = TerminalSession::new(
