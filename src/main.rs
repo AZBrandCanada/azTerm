@@ -621,6 +621,12 @@ impl AppState {
 
         let mut c = CommandBuilder::new(shell);
         c.env("TERM", "xterm-256color");
+        c.env("COLORTERM", "truecolor");
+
+        // Forward existing LANG or default to en_US.UTF-8 for proper Unicode & Braille glyph rendering
+        let lang = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".to_string());
+        c.env("LANG", lang);
+
         let work_dir = custom_dir.unwrap_or_else(|| {
             std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
         });
@@ -651,7 +657,8 @@ impl AppState {
     }
 
     pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
-        let cmd = profile.to_command();
+        let mut cmd = profile.to_command();
+        cmd.env("COLORTERM", "truecolor");
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         let session = TerminalSession::new(
