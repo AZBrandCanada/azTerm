@@ -12,7 +12,6 @@ use std::thread;
 use arboard::{GetExtLinux, SetExtLinux};
 
 pub fn get_system_clipboard_text() -> Option<String> {
-    // Fast path: in-process clipboard via arboard (handles Wayland data-control & X11)
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
@@ -29,7 +28,6 @@ pub fn get_system_clipboard_text() -> Option<String> {
         }
     }
 
-    // Fallback if system clipboard manager is not responding to arboard
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -112,11 +110,11 @@ pub struct TerminalSession {
     pub cols: u16,
     pub scroll_offset: usize,
     pub max_scroll: usize,
+    pub scrollback_limit: usize,
 
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
-    pub has_new_data: bool,
 }
 
 impl TerminalSession {
@@ -128,8 +126,8 @@ impl TerminalSession {
         ctx: egui::Context,
         scrollback_len: usize,
     ) -> Self {
-        let rows = 28;
-        let cols = 90;
+        let rows = 40;
+        let cols = 120;
 
         let pty_system = native_pty_system();
         let pair: PtyPair = pty_system
@@ -181,16 +179,33 @@ impl TerminalSession {
             cols,
             scroll_offset: 0,
             max_scroll: 0,
+            scrollback_limit: scrollback_len.max(1000),
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
-            has_new_data: false,
         }
     }
 
+    pub fn clear_screen_and_scrollback(&mut self) {
+        self.parser = vt100::Parser::new(self.rows, self.cols, self.scrollback_limit);
+        self.scroll_offset = 0;
+        self.max_scroll = 0;
+        self.selection_start = None;
+        self.selection_end = None;
+    }
+
     pub fn set_view_scroll(&mut self, target: usize) {
-        let total_avail = self.max_scroll;
-        let clamped = target.min(total_avail);
+        if self.parser.screen().alternate_screen() {
+            self.scroll_offset = 0;
+            self.parser.set_scrollback(0);
+            return;
+        }
+
+        // Measure true current scrollback rows by querying vt100's clamped offset
+        self.parser.set_scrollback(usize::MAX);
+        self.max_scroll = self.parser.screen().scrollback();
+
+        let clamped = target.min(self.max_scroll);
         self.scroll_offset = clamped;
         self.parser.set_scrollback(clamped);
     }
@@ -229,32 +244,28 @@ impl TerminalSession {
     }
 
     pub fn poll_updates(&mut self) {
-        let mut processed_any = false;
         let mut total_bytes = 0;
 
         while let Ok(bytes) = self.rx.try_recv() {
             total_bytes += bytes.len();
+
+            // Intercept CSI 3 J ("Erase in Display 3": Clear scrollback buffer)
+            if bytes.windows(4).any(|w| w == b"\x1b[3J") {
+                self.clear_screen_and_scrollback();
+            }
+
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.parser.process(&bytes);
             }));
-            processed_any = true;
+
             if total_bytes > 262_144 {
                 break;
             }
         }
 
-        if processed_any {
-            self.has_new_data = true;
-            let screen_scroll = self.parser.screen().scrollback();
-
-            if self.scroll_offset == 0 {
-                self.max_scroll = screen_scroll;
-                self.parser.set_scrollback(0);
-            } else {
-                self.max_scroll = screen_scroll.max(self.max_scroll);
-                let clamped = self.scroll_offset.min(self.max_scroll);
-                self.parser.set_scrollback(clamped);
-            }
+        if self.parser.screen().alternate_screen() {
+            self.scroll_offset = 0;
+            self.parser.set_scrollback(0);
         }
     }
 
@@ -398,8 +409,8 @@ impl TerminalSession {
                     return;
                 }
                 if i.key_pressed(egui::Key::L) {
-                    self.scroll_offset = 0;
-                    self.parser.set_scrollback(0);
+                    // Clear the terminal screen and scrollback buffer completely
+                    self.clear_screen_and_scrollback();
                     self.send_input("\x0c");
                     return;
                 }
@@ -576,9 +587,11 @@ impl TerminalSession {
             egui::Color32::WHITE,
         );
         let char_width = (probe.size().x / 10.0).max(1.0);
-        let row_height = (probe.size().y * 1.08).max(1.0);
+        let row_height = (probe.size().y * 1.05).max(1.0);
 
-        let scrollbar_width = 12.0;
+        let in_alternate = self.parser.screen().alternate_screen();
+        let scrollbar_width = if in_alternate { 0.0 } else { 12.0 };
+
         let avail = ui.available_size();
         let usable_w = (avail.x - scrollbar_width - 8.0).max(80.0);
         let usable_h = (avail.y - 8.0).max(40.0);
@@ -595,8 +608,8 @@ impl TerminalSession {
                 let _ = master.resize(PtySize {
                     rows: new_rows,
                     cols: new_cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
+                    pixel_width: (new_cols as f32 * char_width).round() as u16,
+                    pixel_height: (new_rows as f32 * row_height).round() as u16,
                 });
             }
         }
@@ -653,8 +666,6 @@ impl TerminalSession {
                 if active_focus {
                     self.handle_keyboard_events(ui.ctx(), settings);
                 }
-
-                let in_alternate = self.parser.screen().alternate_screen();
 
                 if is_hovered && !is_ctrl && !in_alternate {
                     let scroll_y = ui.input(|i| {
@@ -723,7 +734,7 @@ impl TerminalSession {
                             }
                         }
                     }
-                } else if is_primary_pressed && grid_rect.contains(pointer_pos) && !sb_track.contains(pointer_pos) {
+                } else if is_primary_pressed && grid_rect.contains(pointer_pos) && (!sb_track.contains(pointer_pos) || in_alternate) {
                     let rel_x = (pointer_pos.x - grid_rect.min.x).max(0.0);
                     let rel_y = (pointer_pos.y - grid_rect.min.y).max(0.0);
                     let c = ((rel_x / char_width).floor() as u16).min(self.cols.saturating_sub(1));
@@ -784,7 +795,6 @@ impl TerminalSession {
                     }
                 }
 
-                // Strict single-trigger right-click paste
                 if settings.paste_on_right_click && response.secondary_clicked() {
                     if let Some(clip) = get_system_clipboard_text() {
                         if !clip.is_empty() {
@@ -886,9 +896,8 @@ impl TerminalSession {
                                 std::mem::swap(&mut fg, &mut bg);
                             }
 
-                            if bg != theme.bg_main_color() {
-                                ui.painter().rect_filled(cell_rect, 0.0, bg);
-                            }
+                            // Always fill background to cleanly overwrite previous frame data
+                            ui.painter().rect_filled(cell_rect, 0.0, bg);
 
                             if is_cursor {
                                 ui.painter().rect_filled(
