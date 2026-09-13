@@ -1,4 +1,4 @@
-// src
+// src/db.rs
 use crate::settings::AppSettings;
 use crate::ssh::SshProfile;
 use crate::theme::ThemeConfig;

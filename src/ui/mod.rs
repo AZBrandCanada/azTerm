@@ -1,4 +1,4 @@
-// src/ui
+// src/ui/mod.rs
 pub mod modals;
 pub mod navbar;
 pub mod settings_view;

@@ -1,4 +1,4 @@
-// src/ui
+// src/ui/modals.rs
 use crate::ssh::{SshAuthType, SshKeyAlgorithm, SshProfile, SshStore};
 use crate::{AppState, InstallMethod};
 use eframe::egui;

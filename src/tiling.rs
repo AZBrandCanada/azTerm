@@ -1,4 +1,4 @@
-// src
+// src/tiling.rs
 use crate::settings::AppSettings;
 use crate::terminal::TerminalSession;
 use crate::theme::ThemeConfig;

@@ -1,4 +1,4 @@
-// src/ui
+// src/ui/settings_view.rs
 use crate::db::Database;
 use crate::settings::BackspaceSequence;
 use crate::theme::{setting_row_disabled, setting_row_toggle, ThemeConfig};

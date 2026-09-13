@@ -1,4 +1,4 @@
-// src
+// src/settings.rs
 use crate::db::Database;
 use serde::{Deserialize, Serialize};
 
