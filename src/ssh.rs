@@ -1,4 +1,4 @@
-// src
+// src/ssh.rs
 use crate::db::Database;
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};

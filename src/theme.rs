@@ -1,4 +1,4 @@
-// src
+// src/theme.rs
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 

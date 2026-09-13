@@ -1,4 +1,4 @@
-// src
+// src/main.rs
 mod db;
 mod settings;
 mod sftp;

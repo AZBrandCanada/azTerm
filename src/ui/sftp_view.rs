@@ -1,4 +1,4 @@
-// src/ui
+// src/ui/sftp_view.rs
 use crate::sftp::SftpTarget;
 use crate::ssh::SshStore;
 use crate::AppState;
