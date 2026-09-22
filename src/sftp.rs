@@ -191,8 +191,40 @@ pub fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), 
 
 pub fn verify_remote_sudo_password(profile: &SshProfile, password: &str) -> bool {
     let b64 = to_base64(password.as_bytes());
-    let cmd_str = format!("echo '{}' | base64 -d | sudo -S -v -p ''", b64);
+    let cmd_str = format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p ''\"", b64);
     run_remote_ssh_cmd(profile, &cmd_str).is_ok()
+}
+
+pub fn wrap_read_with_remote_sudo(file_path: &str, password: &str) -> String {
+    let b64 = to_base64(password.as_bytes());
+    format!(
+        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n cat '{}'\"",
+        b64, file_path
+    )
+}
+
+pub fn wrap_write_with_remote_sudo(dest_dir: &str, dest_file: &str, password: &str) -> String {
+    let b64 = to_base64(password.as_bytes());
+    format!(
+        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n sh -c 'cat > \\\"$1\\\"' -- '{}'\"",
+        b64, dest_dir, dest_file
+    )
+}
+
+pub fn wrap_tar_create_with_remote_sudo(parent_dir: &str, folder_name: &str, password: &str) -> String {
+    let b64 = to_base64(password.as_bytes());
+    format!(
+        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n tar -czf - -C '{}' '{}'\"",
+        b64, parent_dir, folder_name
+    )
+}
+
+pub fn wrap_tar_extract_with_remote_sudo(dest_dir: &str, password: &str) -> String {
+    let b64 = to_base64(password.as_bytes());
+    format!(
+        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n tar -xzf - -C '{}'\"",
+        b64, dest_dir, dest_dir
+    )
 }
 
 pub fn calculate_local_dir_stats(path: &Path) -> (u64, usize) {
@@ -1398,11 +1430,14 @@ impl SftpManager {
         }
     }
 
+    pub fn has_open_sudo_prompt(&self) -> bool {
+        self.sudo_prompt.lock().map(|p| p.is_some()).unwrap_or(false)
+    }
+
     pub fn has_open_modal(&self) -> bool {
         self.left_pane.has_open_modal()
             || self.right_pane.has_open_modal()
-            || self.sudo_prompt.lock().map(|p| p.is_some()).unwrap_or(false)
-            || self.show_transfer_history
+            || self.has_open_sudo_prompt()
     }
 
     pub fn upload_selected(&mut self) {
@@ -1571,15 +1606,13 @@ impl SftpManager {
 
                             if !is_dir {
                                 if let Some(ref pw) = sudo_pw_src {
-                                    let b64 = to_base64(pw.as_bytes());
-                                    src_cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n cat '{}'\"", b64, safe_src));
+                                    src_cmd.arg(wrap_read_with_remote_sudo(&safe_src, pw));
                                 } else {
                                     src_cmd.arg(format!("cat '{}'", safe_src));
                                 }
 
                                 if let Some(ref pw) = sudo_pw_dest {
-                                    let b64 = to_base64(pw.as_bytes());
-                                    dest_cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n sh -c 'cat > \\\"$1\\\"' -- '{}'\"", b64, safe_dest_dir, safe_dest));
+                                    dest_cmd.arg(wrap_write_with_remote_sudo(&safe_dest_dir, &safe_dest, pw));
                                 } else {
                                     dest_cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_dest));
                                 }
@@ -1588,15 +1621,13 @@ impl SftpManager {
                                 let safe_folder_name = file_name.replace('\'', "'\\''");
 
                                 if let Some(ref pw) = sudo_pw_src {
-                                    let b64 = to_base64(pw.as_bytes());
-                                    src_cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n tar -czf - -C '{}' '{}'\"", b64, safe_parent_src, safe_folder_name));
+                                    src_cmd.arg(wrap_tar_create_with_remote_sudo(&safe_parent_src, &safe_folder_name, pw));
                                 } else {
                                     src_cmd.arg(format!("tar -czf - -C '{}' '{}'", safe_parent_src, safe_folder_name));
                                 }
 
                                 if let Some(ref pw) = sudo_pw_dest {
-                                    let b64 = to_base64(pw.as_bytes());
-                                    dest_cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n tar -xzf - -C '{}'\"", b64, safe_dest_dir, safe_dest_dir));
+                                    dest_cmd.arg(wrap_tar_extract_with_remote_sudo(&safe_dest_dir, pw));
                                 } else {
                                     dest_cmd.arg(format!("mkdir -p '{}' && tar -xzf - -C '{}'", safe_dest_dir, safe_dest_dir));
                                 }
@@ -1739,8 +1770,7 @@ impl SftpManager {
                                 if let Ok(mut file) = fs::File::open(&local_path) {
                                     let mut cmd = build_ssh_base_command(profile);
                                     if let Some(ref pw) = sudo_pw_dest {
-                                        let b64 = to_base64(pw.as_bytes());
-                                        cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n sh -c 'cat > \\\"$1\\\"' -- '{}'\"", b64, safe_dest_dir, safe_remote));
+                                        cmd.arg(wrap_write_with_remote_sudo(&safe_dest_dir, &safe_remote, pw));
                                     } else {
                                         cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_remote));
                                     }
@@ -1809,8 +1839,7 @@ impl SftpManager {
                                     let safe_dest = remote_dest_folder.replace('\'', "'\\''");
 
                                     if let Some(ref pw) = sudo_pw_dest {
-                                        let b64 = to_base64(pw.as_bytes());
-                                        cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n tar -xzf - -C '{}'\"", b64, safe_dest, safe_dest));
+                                        cmd.arg(wrap_tar_extract_with_remote_sudo(&safe_dest, pw));
                                     } else {
                                         cmd.arg(format!("mkdir -p '{}' && tar -xzf - -C '{}'", safe_dest, safe_dest));
                                     }
@@ -1886,8 +1915,7 @@ impl SftpManager {
                                 let safe_remote = remote_file.replace('\'', "'\\''");
 
                                 if let Some(ref pw) = sudo_pw_src {
-                                    let b64 = to_base64(pw.as_bytes());
-                                    cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n cat '{}'\"", b64, safe_remote));
+                                    cmd.arg(wrap_read_with_remote_sudo(&safe_remote, pw));
                                 } else {
                                     cmd.arg(format!("cat '{}'", safe_remote));
                                 }
@@ -1926,8 +1954,7 @@ impl SftpManager {
                                 let safe_folder = file_name.replace('\'', "'\\''");
 
                                 if let Some(ref pw) = sudo_pw_src {
-                                    let b64 = to_base64(pw.as_bytes());
-                                    cmd.arg(format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n tar -czf - -C '{}' '{}'\"", b64, safe_parent, safe_folder));
+                                    cmd.arg(wrap_tar_create_with_remote_sudo(&safe_parent, &safe_folder, pw));
                                 } else {
                                     cmd.arg(format!("tar -czf - -C '{}' '{}'", safe_parent, safe_folder));
                                 }
@@ -2156,7 +2183,7 @@ impl SftpManager {
                                     .desired_width(240.0)
                             );
 
-                            if prompt.needs_focus {
+                            if prompt.needs_focus || !resp.has_focus() {
                                 resp.request_focus();
                                 prompt.needs_focus = false;
                             }

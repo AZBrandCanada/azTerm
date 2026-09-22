@@ -675,7 +675,7 @@ impl TerminalSession {
                             }
                             if *key == egui::Key::PageDown {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
-                                self.set_view_scroll(self.scroll_offset.saturating_sub(jump));
+                                self.set_view_scroll(self.scroll_offset + jump);
                                 continue;
                             }
                             if *key == egui::Key::Home {
@@ -853,33 +853,22 @@ impl TerminalSession {
             }
         }
 
-        // Check if an external text edit widget or modal has focus
-        let other_widget_has_focus = ui.memory(|m| {
-            if let Some(focused_id) = m.focused() {
-                focused_id != response.id
-            } else {
-                false
-            }
-        });
-
-        // Clicking directly on the terminal grid always restores focus
         if response.clicked() || response.secondary_clicked() || response.drag_started() {
             user_clicked_pane = true;
             response.request_focus();
         }
 
         let is_active_session = has_focus || user_clicked_pane;
-        let active_focus = is_active_session && !other_widget_has_focus;
 
-        if active_focus && !response.has_focus() {
+        if is_active_session && !response.has_focus() {
             response.request_focus();
         }
 
-        if active_focus && response.has_focus() {
+        if is_active_session {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 
-        if app_wants_mouse && !is_shift && active_focus {
+        if app_wants_mouse && !is_shift && is_active_session {
             if grid_rect.contains(pointer_pos) {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 { i.raw_scroll_delta.y } else { i.smooth_scroll_delta.y }
@@ -1076,7 +1065,7 @@ impl TerminalSession {
             let (cursor_r, cursor_c) = screen.cursor_position();
             let hide_cursor = screen.hide_cursor();
 
-            let show_cursor = active_focus
+            let show_cursor = is_active_session
                 && !hide_cursor
                 && self.scroll_offset == 0
                 && (!settings.cursor_blink

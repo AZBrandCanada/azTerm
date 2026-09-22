@@ -1202,7 +1202,7 @@ impl eframe::App for AppState {
             || self.ssh_auth_modal.is_some()
             || self.sftp.has_open_modal();
 
-        if self.active_view == ActiveView::Terminal && !modal_open && !ctx.wants_keyboard_input() {
+        if self.active_view == ActiveView::Terminal && !modal_open {
             self.handle_terminal_shortcuts(ctx);
         }
 
