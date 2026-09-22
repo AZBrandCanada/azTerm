@@ -586,11 +586,6 @@ impl TerminalSession {
     }
 
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
-        // Do not intercept keystrokes when any text box or modal is actively focused
-        if ctx.wants_keyboard_input() {
-            return;
-        }
-
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
@@ -839,7 +834,6 @@ impl TerminalSession {
         );
 
         let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
-        let is_hovered = full_rect.contains(pointer_pos);
         let is_primary_down = ui.input(|i| i.pointer.primary_down());
         let is_primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
         let is_primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
@@ -859,28 +853,34 @@ impl TerminalSession {
             }
         }
 
-        if response.clicked()
-            || response.secondary_clicked()
-            || response.drag_started()
-            || (is_hovered && ui.input(|i| i.pointer.any_pressed()))
-        {
+        // Check if an external text edit widget or modal has focus
+        let other_widget_has_focus = ui.memory(|m| {
+            if let Some(focused_id) = m.focused() {
+                focused_id != response.id
+            } else {
+                false
+            }
+        });
+
+        // Clicking directly on the terminal grid always restores focus
+        if response.clicked() || response.secondary_clicked() || response.drag_started() {
             user_clicked_pane = true;
             response.request_focus();
         }
 
-        let active_focus = has_focus || user_clicked_pane;
+        let is_active_session = has_focus || user_clicked_pane;
+        let active_focus = is_active_session && !other_widget_has_focus;
 
         if active_focus && !response.has_focus() {
             response.request_focus();
         }
 
-        let is_typing_elsewhere = ui.ctx().wants_keyboard_input();
-        if active_focus && !is_typing_elsewhere {
+        if active_focus && response.has_focus() {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 
         if app_wants_mouse && !is_shift && active_focus {
-            if is_hovered {
+            if grid_rect.contains(pointer_pos) {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 { i.raw_scroll_delta.y } else { i.smooth_scroll_delta.y }
                 });
@@ -902,7 +902,7 @@ impl TerminalSession {
                 self.send_mouse_event(2, true, cell_c, cell_r, ui.input(|i| i.modifiers));
             }
         } else {
-            if is_hovered && !is_ctrl && !in_alternate {
+            if grid_rect.contains(pointer_pos) && !is_ctrl && !in_alternate {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {
                         i.raw_scroll_delta.y
