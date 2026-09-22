@@ -89,7 +89,7 @@ impl Default for AppSettings {
             paste_on_right_click: true,
             copy_on_select: true,
             must_hold_ctrl_for_links: false,
-            sftp_path_sync: false,
+            sftp_path_sync: true, // Enabled by default
             show_sftp_split_view: false,
             show_command_suggestions: true,
             auto_reconnect_terminal: false,

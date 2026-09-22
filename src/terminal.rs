@@ -106,6 +106,8 @@ pub struct TerminalSession {
     pub rx: Receiver<Vec<u8>>,
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    pub child_pid: Option<u32>,
+    pub current_dir: Option<String>,
     pub rows: u16,
     pub cols: u16,
     pub scroll_offset: usize,
@@ -139,7 +141,8 @@ impl TerminalSession {
             })
             .expect("Failed to open PTY");
 
-        let _child = pair.slave.spawn_command(cmd).expect("Failed to spawn shell");
+        let child = pair.slave.spawn_command(cmd).expect("Failed to spawn shell");
+        let child_pid = child.process_id();
 
         let mut reader = pair
             .master
@@ -167,6 +170,11 @@ impl TerminalSession {
             }
         });
 
+        let initial_dir = match &session_type {
+            SessionType::Local { working_dir } => Some(working_dir.clone()),
+            SessionType::Ssh { .. } => None,
+        };
+
         Self {
             id,
             title,
@@ -175,6 +183,8 @@ impl TerminalSession {
             rx,
             writer,
             master_pty,
+            child_pid,
+            current_dir: initial_dir,
             rows,
             cols,
             scroll_offset: 0,
@@ -183,6 +193,26 @@ impl TerminalSession {
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
+        }
+    }
+
+    pub fn get_current_dir(&self) -> Option<String> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(pid) = self.child_pid {
+                if let Ok(link) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
+                    return Some(link.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        if let Some(ref d) = self.current_dir {
+            return Some(d.clone());
+        }
+
+        match &self.session_type {
+            SessionType::Local { working_dir } => Some(working_dir.clone()),
+            _ => None,
         }
     }
 
@@ -294,7 +324,6 @@ impl TerminalSession {
         let mut total_bytes = 0;
         let in_alt = self.parser.screen().alternate_screen();
 
-        // Query maximum history lines before processing this batch to anchor scrolled view
         let old_max = if !in_alt && self.scroll_offset > 0 {
             self.query_max_scrollback()
         } else {
@@ -306,6 +335,28 @@ impl TerminalSession {
 
             if !in_alt && bytes.windows(4).any(|w| w == b"\x1b[3J") {
                 self.clear_screen_and_scrollback();
+            }
+
+            // Inspect OSC 7 path sequence: \x1b]7;file://[hostname]/path\x07 or \x1b\
+            if let Some(idx) = bytes.windows(9).position(|w| w == b"\x1b]7;file:") {
+                let rest = &bytes[idx + 9..];
+                let end_idx = rest.iter().position(|&b| b == 0x07 || b == 0x1b);
+                if let Some(end) = end_idx {
+                    if let Ok(s) = std::str::from_utf8(&rest[..end]) {
+                        let path_candidate = if let Some(stripped) = s.strip_prefix("//") {
+                            if let Some(slash_idx) = stripped.find('/') {
+                                &stripped[slash_idx..]
+                            } else {
+                                stripped
+                            }
+                        } else {
+                            s
+                        };
+                        if !path_candidate.is_empty() {
+                            self.current_dir = Some(path_candidate.replace("%20", " "));
+                        }
+                    }
+                }
             }
 
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -324,7 +375,6 @@ impl TerminalSession {
             let new_max = self.query_max_scrollback();
             if new_max > old_max {
                 let added = new_max - old_max;
-                // Anchor the view: advance scroll_offset by the number of new lines appended to buffer
                 self.scroll_offset = (self.scroll_offset + added).min(new_max);
                 self.parser.set_scrollback(self.scroll_offset);
             }
@@ -740,7 +790,6 @@ impl TerminalSession {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 
-        // TUI Interactive Mouse Forwarding (strictly active inside full-screen apps like htop, btop)
         if app_wants_mouse && !is_shift && active_focus {
             if is_hovered {
                 let scroll_y = ui.input(|i| {
@@ -764,7 +813,6 @@ impl TerminalSession {
                 self.send_mouse_event(2, true, cell_c, cell_r, ui.input(|i| i.modifiers));
             }
         } else {
-            // Standard Command-Line Terminal: 100% reliable text selection, copy on select, paste
             if is_hovered && !is_ctrl && !in_alternate {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {

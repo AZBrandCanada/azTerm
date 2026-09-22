@@ -86,7 +86,6 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                 changed = true;
                             }
 
-                            // Zoom Factor Setting
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("Window Zoom Level").strong().color(app.theme.text_primary_color()));
@@ -357,8 +356,8 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.add_space(12.0);
 
                             changed |= setting_row_toggle(ui, "Split View SFTP Explorer", "Show terminal on the left and directory browser on the right.", &mut app.settings.show_sftp_split_view, &app.theme);
+                            changed |= setting_row_toggle(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", &mut app.settings.sftp_path_sync, &app.theme);
 
-                            setting_row_disabled(ui, "Synchronize SFTP with Terminal Path", "Automatically follow the current directory of the active shell.", app.settings.sftp_path_sync);
                             setting_row_disabled(ui, "Auto Refresh on Tab Switch", "Query remote directory metadata when navigating between sessions.", app.settings.auto_refresh_sftp);
                             setting_row_disabled(ui, "Show Hidden Dotfiles", "Display files and folders prefixed with a dot by default.", app.settings.show_hidden_sftp);
                             setting_row_disabled(ui, "Disable SFTP Transfer History", "Do not write upload/download records to disk.", app.settings.disable_sftp_history);

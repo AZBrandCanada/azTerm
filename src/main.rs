@@ -897,8 +897,29 @@ impl AppState {
     }
 
     fn sync_sftp_with_active_session(&mut self) {
-        // Only synchronize if the user is actively working in the Terminal tab
-        // Never override the user's manual session choice when browsing SFTP Explorer
+        // Follow the active terminal's current directory when path synchronization is enabled
+        if self.settings.sftp_path_sync {
+            if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
+                if let Some(dir) = session.get_current_dir() {
+                    match &session.session_type {
+                        SessionType::Local { .. } => {
+                            if self.sftp.left_pane.target == SftpTarget::Local && self.sftp.left_pane.current_path != dir {
+                                self.sftp.left_pane.set_path(dir);
+                            }
+                        }
+                        SessionType::Ssh { profile_id } => {
+                            if let SftpTarget::RemoteSsh(ref p) = self.sftp.right_pane.target {
+                                if &p.id == profile_id && self.sftp.right_pane.current_path != dir {
+                                    self.sftp.right_pane.set_path(dir);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only synchronize remote session choice if the user is actively working in the Terminal tab
         if self.active_view != ActiveView::Terminal {
             return;
         }
