@@ -867,6 +867,7 @@ impl TerminalSession {
             response.request_focus();
         }
 
+        // Never steal focus or read keystrokes when any text box or dialog wants keyboard input
         let wants_kb = ui.ctx().wants_keyboard_input();
         let active_focus = (has_focus || user_clicked_pane) && !wants_kb;
 
