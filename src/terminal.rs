@@ -108,6 +108,7 @@ pub struct TerminalSession {
     pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub child_pid: Option<u32>,
     pub current_dir: Option<String>,
+    pub last_detected_dir: Option<String>,
     pub rows: u16,
     pub cols: u16,
     pub scroll_offset: usize,
@@ -184,7 +185,8 @@ impl TerminalSession {
             writer,
             master_pty,
             child_pid,
-            current_dir: initial_dir,
+            current_dir: initial_dir.clone(),
+            last_detected_dir: initial_dir,
             rows,
             cols,
             scroll_offset: 0,
@@ -197,14 +199,14 @@ impl TerminalSession {
     }
 
     pub fn detect_current_working_dir(&self, ssh_user: Option<&str>) -> Option<String> {
-        // 1. Explicit OSC 7 sequence if emitted
+        // 1. Explicit OSC 7 sequence if emitted by remote shell
         if let Some(ref d) = self.current_dir {
             if d.starts_with('/') && !d.contains("file:") {
                 return Some(d.clone());
             }
         }
 
-        // 2. Local sessions: inspect /proc/<pid>/cwd on Linux
+        // 2. Local sessions: read /proc/<pid>/cwd on Linux
         #[cfg(target_os = "linux")]
         {
             if matches!(self.session_type, SessionType::Local { .. }) {

@@ -897,28 +897,31 @@ impl AppState {
     }
 
     fn sync_sftp_with_active_session(&mut self) {
-        // Follow the active terminal's real-time directory
+        // Follow the active terminal's directory ONLY when a genuine new directory change occurs in the shell
         if self.settings.sftp_path_sync {
-            if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
+            if let Some(session) = self.sessions.iter_mut().find(|s| s.id == self.active_session_id) {
                 match &session.session_type {
                     SessionType::Local { .. } => {
-                        if self.sftp.left_pane.target == SftpTarget::Local {
-                            if let Some(dir) = session.detect_current_working_dir(None) {
-                                if self.sftp.left_pane.current_path != dir && !self.sftp.left_pane.is_loading {
-                                    self.sftp.left_pane.set_path(dir);
+                        if let Some(detected_dir) = session.detect_current_working_dir(None) {
+                            if session.last_detected_dir.as_deref() != Some(&detected_dir) {
+                                session.last_detected_dir = Some(detected_dir.clone());
+                                if self.sftp.left_pane.target == SftpTarget::Local && !self.sftp.left_pane.is_loading {
+                                    self.sftp.left_pane.set_path(detected_dir);
                                 }
                             }
                         }
                     }
                     SessionType::Ssh { profile_id } => {
-                        let prof_opt = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id).cloned();
+                        let profile_id = profile_id.clone();
+                        let prof_opt = self.ssh_store.profiles.iter().find(|p| p.id == profile_id).cloned();
                         if let Some(prof) = prof_opt {
-                            // Ensure the right pane is dedicated to THIS EXACT server before applying path
-                            if let SftpTarget::RemoteSsh(ref current_sftp_prof) = self.sftp.right_pane.target {
-                                if current_sftp_prof.id == prof.id {
-                                    if let Some(dir) = session.detect_current_working_dir(Some(&prof.username)) {
-                                        if self.sftp.right_pane.current_path != dir && !self.sftp.right_pane.is_loading {
-                                            self.sftp.right_pane.set_path(dir);
+                            if let Some(detected_dir) = session.detect_current_working_dir(Some(&prof.username)) {
+                                if session.last_detected_dir.as_deref() != Some(&detected_dir) {
+                                    session.last_detected_dir = Some(detected_dir.clone());
+                                    // Strictly isolate to the pane connected to THIS EXACT remote host
+                                    if let SftpTarget::RemoteSsh(ref current_sftp_prof) = self.sftp.right_pane.target {
+                                        if current_sftp_prof.id == prof.id && !self.sftp.right_pane.is_loading {
+                                            self.sftp.right_pane.set_path(detected_dir);
                                         }
                                     }
                                 }

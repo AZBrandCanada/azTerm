@@ -1,4 +1,6 @@
 // src/ui/terminal_view.rs
+use crate::sftp::{PaneBrowser, SftpTarget};
+use crate::ssh::SshStore;
 use crate::tiling::{detect_dock_zone, dock_zone_preview_rect, render_tile_tree, DockZone, PaneAction, SplitDirection, WorkspaceTab};
 use crate::AppState;
 use eframe::egui;
@@ -18,8 +20,9 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
     let total_area = ui.available_rect_before_wrap();
 
     let (term_area_rect, sftp_pane_rect) = if app.settings.show_sftp_split_view {
-        let split_w = (total_area.width() * 0.65).max(120.0);
-        let sftp_w = (total_area.width() - split_w - 6.0).max(120.0);
+        let total_w = total_area.width();
+        let sftp_w = (total_w * 0.38).clamp(340.0, 520.0);
+        let split_w = (total_w - sftp_w - 6.0).max(120.0);
         (
             egui::Rect::from_min_size(total_area.min, egui::vec2(split_w, total_area.height())),
             Some(egui::Rect::from_min_size(
@@ -231,26 +234,281 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
         }
     }
 
+    // Two-Tier Vertical SFTP Sync Explorer in Split Drawer
     if let Some(sftp_rect) = sftp_pane_rect {
         ui.allocate_ui_at_rect(sftp_rect, |ui| {
             app.theme.card_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.heading("SFTP Sync Pane");
+                    ui.label(egui::RichText::new("SFTP Sync Explorer").strong().color(app.theme.accent_color()));
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Close [X]").clicked() {
+                            app.settings.show_sftp_split_view = false;
+                            app.settings.save();
+                        }
                         let transfer_count = app.sftp.transfers.lock().map(|t| t.len()).unwrap_or(0);
                         let badge_text = if transfer_count > 0 {
-                            format!("<> Transfers ({})", transfer_count)
+                            format!("Transfers ({})", transfer_count)
                         } else {
-                            "<> Transfers".to_string()
+                            "Transfers".to_string()
                         };
-                        if ui.button(badge_text).clicked() {
+                        if ui.small_button(badge_text).clicked() {
                             app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
                         }
                     });
                 });
+
+                ui.add_space(2.0);
                 ui.separator();
-                let auth_req = app.sftp.right_pane.render(ui, &app.theme);
-                if let Some((p, pane_id)) = auth_req {
+
+                let avail_h = ui.available_height().max(160.0);
+                let bridge_h = 36.0_f32;
+                let sub_pane_h = ((avail_h - bridge_h - 10.0) * 0.5).max(60.0);
+
+                let mut auth_to_open = None;
+
+                // TOP PANE (Pane 1: Local / Source)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), sub_pane_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        let mut connect_profile = None;
+
+                        ui.horizontal(|ui| {
+                            let is_local = app.sftp.left_pane.target == SftpTarget::Local;
+                            let desc = match &app.sftp.left_pane.target {
+                                SftpTarget::Local => "Local".to_string(),
+                                SftpTarget::RemoteSsh(p) => format!("SSH: {}", p.name),
+                            };
+
+                            egui::ComboBox::from_id_source("sync_drawer_top_combo")
+                                .width(110.0)
+                                .selected_text(desc)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(is_local, "Local Filesystem").clicked() {
+                                        app.sftp.left_pane.set_target(SftpTarget::Local);
+                                    }
+                                    for p in &app.ssh_store.profiles {
+                                        let is_this = app.sftp.left_pane.target == SftpTarget::RemoteSsh(p.clone());
+                                        if ui.selectable_label(is_this, format!("SSH: {}", p.name)).clicked() {
+                                            app.sftp.left_pane.set_target(SftpTarget::RemoteSsh(p.clone()));
+                                        }
+                                    }
+                                });
+
+                            if let SftpTarget::RemoteSsh(ref p) = app.sftp.left_pane.target {
+                                let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
+                                if !sock.exists() {
+                                    if ui.small_button(egui::RichText::new("Connect").strong().color(app.theme.accent_color())).clicked() {
+                                        connect_profile = Some(p.clone());
+                                    }
+                                }
+                            }
+
+                            if ui.small_button("Up").on_hover_text("Parent folder").clicked() {
+                                app.sftp.left_pane.go_up();
+                            }
+                            if ui.small_button("Home").on_hover_text("Home folder").clicked() {
+                                app.sftp.left_pane.go_home();
+                            }
+                            if ui.small_button("Reload").on_hover_text("Reload").clicked() {
+                                app.sftp.left_pane.refresh();
+                            }
+                            if ui.small_button("+ Folder").on_hover_text("New directory").clicked() {
+                                app.sftp.left_pane.show_create_dir_modal = true;
+                                app.sftp.left_pane.new_dir_name = "new_folder".to_string();
+                            }
+
+                            if !app.sftp.left_pane.selected_items.is_empty() {
+                                let del_label = if app.sftp.left_pane.selected_items.len() > 1 {
+                                    format!("Del ({})", app.sftp.left_pane.selected_items.len())
+                                } else {
+                                    "Del".to_string()
+                                };
+                                if ui.small_button(egui::RichText::new(del_label).color(app.theme.danger_color())).clicked() {
+                                    app.sftp.left_pane.items_to_delete = app.sftp.left_pane.selected_items.clone();
+                                    app.sftp.left_pane.show_delete_confirm_modal = true;
+                                }
+                            }
+
+                            let path_w = ui.available_width().max(40.0);
+                            let p_edit = ui.add(
+                                egui::TextEdit::singleline(&mut app.sftp.left_pane.current_path)
+                                    .desired_width(path_w)
+                            );
+                            if p_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                app.sftp.left_pane.set_path(app.sftp.left_pane.current_path.clone());
+                            }
+                        });
+
+                        if let Some(p) = connect_profile {
+                            auth_to_open = Some((p, "sftp_left".to_string()));
+                        }
+
+                        let auth_req = app.sftp.left_pane.render_file_list(ui, &app.theme);
+                        if let Some(req) = auth_req {
+                            auth_to_open = Some(req);
+                        }
+                    },
+                );
+
+                // MIDDLE ACTION BAR (Vertical transfer buttons between Top & Bottom)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), bridge_h),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let l_count = app.sftp.left_pane.selected_items.len();
+                        let l_size: u64 = app.sftp.left_pane.entries
+                            .iter()
+                            .filter(|e| app.sftp.left_pane.selected_items.contains(&e.name))
+                            .map(|e| e.size)
+                            .sum();
+
+                        let l_summary = if l_count == 0 {
+                            "0 sel".to_string()
+                        } else if l_count == 1 {
+                            let name = &app.sftp.left_pane.selected_items[0];
+                            let short = if name.len() > 10 { format!("{}...", &name[..8]) } else { name.clone() };
+                            format!("{} ({})", short, PaneBrowser::format_size(l_size))
+                        } else {
+                            format!("Multiple ({}) ({})", l_count, PaneBrowser::format_size(l_size))
+                        };
+
+                        let up_btn = egui::Button::new(
+                            egui::RichText::new(format!("[v] Upload {}", l_summary))
+                                .strong()
+                                .small()
+                                .color(if l_count > 0 { app.theme.text_primary_color() } else { app.theme.text_muted_color() })
+                        )
+                        .min_size(egui::vec2(130.0, 24.0))
+                        .fill(if l_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
+
+                        if ui.add_enabled(l_count > 0, up_btn).on_hover_text("Upload selected files from Top to Bottom").clicked() {
+                            app.sftp.upload_selected();
+                        }
+
+                        ui.add_space(8.0);
+
+                        let r_count = app.sftp.right_pane.selected_items.len();
+                        let r_size: u64 = app.sftp.right_pane.entries
+                            .iter()
+                            .filter(|e| app.sftp.right_pane.selected_items.contains(&e.name))
+                            .map(|e| e.size)
+                            .sum();
+
+                        let r_summary = if r_count == 0 {
+                            "0 sel".to_string()
+                        } else if r_count == 1 {
+                            let name = &app.sftp.right_pane.selected_items[0];
+                            let short = if name.len() > 10 { format!("{}...", &name[..8]) } else { name.clone() };
+                            format!("{} ({})", short, PaneBrowser::format_size(r_size))
+                        } else {
+                            format!("Multiple ({}) ({})", r_count, PaneBrowser::format_size(r_size))
+                        };
+
+                        let dl_btn = egui::Button::new(
+                            egui::RichText::new(format!("[^] Download {}", r_summary))
+                                .strong()
+                                .small()
+                                .color(if r_count > 0 { app.theme.text_primary_color() } else { app.theme.text_muted_color() })
+                        )
+                        .min_size(egui::vec2(130.0, 24.0))
+                        .fill(if r_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
+
+                        if ui.add_enabled(r_count > 0, dl_btn).on_hover_text("Download selected files from Bottom to Top").clicked() {
+                            app.sftp.download_selected();
+                        }
+                    },
+                );
+
+                ui.separator();
+
+                // BOTTOM PANE (Pane 2: Remote / Target)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), sub_pane_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        let mut connect_profile = None;
+
+                        ui.horizontal(|ui| {
+                            let is_local = app.sftp.right_pane.target == SftpTarget::Local;
+                            let desc = match &app.sftp.right_pane.target {
+                                SftpTarget::Local => "Local".to_string(),
+                                SftpTarget::RemoteSsh(p) => format!("SSH: {}", p.name),
+                            };
+
+                            egui::ComboBox::from_id_source("sync_drawer_bottom_combo")
+                                .width(110.0)
+                                .selected_text(desc)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(is_local, "Local Filesystem").clicked() {
+                                        app.sftp.right_pane.set_target(SftpTarget::Local);
+                                    }
+                                    for p in &app.ssh_store.profiles {
+                                        let is_this = app.sftp.right_pane.target == SftpTarget::RemoteSsh(p.clone());
+                                        if ui.selectable_label(is_this, format!("SSH: {}", p.name)).clicked() {
+                                            app.sftp.right_pane.set_target(SftpTarget::RemoteSsh(p.clone()));
+                                        }
+                                    }
+                                });
+
+                            if let SftpTarget::RemoteSsh(ref p) = app.sftp.right_pane.target {
+                                let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
+                                if !sock.exists() {
+                                    if ui.small_button(egui::RichText::new("Connect").strong().color(app.theme.accent_color())).clicked() {
+                                        connect_profile = Some(p.clone());
+                                    }
+                                }
+                            }
+
+                            if ui.small_button("Up").on_hover_text("Parent folder").clicked() {
+                                app.sftp.right_pane.go_up();
+                            }
+                            if ui.small_button("Home").on_hover_text("Home folder").clicked() {
+                                app.sftp.right_pane.go_home();
+                            }
+                            if ui.small_button("Reload").on_hover_text("Reload").clicked() {
+                                app.sftp.right_pane.refresh();
+                            }
+                            if ui.small_button("+ Folder").on_hover_text("New directory").clicked() {
+                                app.sftp.right_pane.show_create_dir_modal = true;
+                                app.sftp.right_pane.new_dir_name = "new_folder".to_string();
+                            }
+
+                            if !app.sftp.right_pane.selected_items.is_empty() {
+                                let del_label = if app.sftp.right_pane.selected_items.len() > 1 {
+                                    format!("Del ({})", app.sftp.right_pane.selected_items.len())
+                                } else {
+                                    "Del".to_string()
+                                };
+                                if ui.small_button(egui::RichText::new(del_label).color(app.theme.danger_color())).clicked() {
+                                    app.sftp.right_pane.items_to_delete = app.sftp.right_pane.selected_items.clone();
+                                    app.sftp.right_pane.show_delete_confirm_modal = true;
+                                }
+                            }
+
+                            let path_w = ui.available_width().max(40.0);
+                            let p_edit = ui.add(
+                                egui::TextEdit::singleline(&mut app.sftp.right_pane.current_path)
+                                    .desired_width(path_w)
+                            );
+                            if p_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                app.sftp.right_pane.set_path(app.sftp.right_pane.current_path.clone());
+                            }
+                        });
+
+                        if let Some(p) = connect_profile {
+                            auth_to_open = Some((p, "sftp_right".to_string()));
+                        }
+
+                        let auth_req = app.sftp.right_pane.render_file_list(ui, &app.theme);
+                        if let Some(req) = auth_req {
+                            auth_to_open = Some(req);
+                        }
+                    },
+                );
+
+                if let Some((p, pane_id)) = auth_to_open {
                     app.open_ssh_auth_modal(p, pane_id, ctx.clone());
                 }
             });
