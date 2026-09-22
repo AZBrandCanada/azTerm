@@ -201,6 +201,9 @@ impl PaneBrowser {
             }),
         };
         self.selected_items.clear();
+        self.entries.clear();
+        self.is_loading = false;
+        self.rx = None;
         self.last_socket_state = false;
         if let SftpTarget::RemoteSsh(ref p) = self.target {
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", p.id));
@@ -390,7 +393,6 @@ impl PaneBrowser {
             return;
         }
 
-        // Lock onto the exact current directory so deleting never switches folders
         let active_dir = self.current_path.clone();
 
         match &self.target {
@@ -1527,7 +1529,6 @@ impl SftpManager {
     pub fn poll_transfers(&mut self, ctx: &egui::Context) {
         if let Ok(list) = self.transfers.lock() {
             if let Some(in_progress) = list.iter().find(|t| t.status == TransferStatus::InProgress) {
-                // Request active UI repainting during transfers for smooth 20+ FPS updates
                 ctx.request_repaint_after(Duration::from_millis(50));
 
                 let speed_str = PaneBrowser::format_speed(in_progress.speed_bytes_sec);

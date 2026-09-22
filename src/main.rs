@@ -897,20 +897,30 @@ impl AppState {
     }
 
     fn sync_sftp_with_active_session(&mut self) {
-        // Follow the active terminal's current directory when path synchronization is enabled
+        // Follow the active terminal's real-time directory
         if self.settings.sftp_path_sync {
             if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
-                if let Some(dir) = session.get_current_dir() {
-                    match &session.session_type {
-                        SessionType::Local { .. } => {
-                            if self.sftp.left_pane.target == SftpTarget::Local && self.sftp.left_pane.current_path != dir {
-                                self.sftp.left_pane.set_path(dir);
+                match &session.session_type {
+                    SessionType::Local { .. } => {
+                        if self.sftp.left_pane.target == SftpTarget::Local {
+                            if let Some(dir) = session.detect_current_working_dir(None) {
+                                if self.sftp.left_pane.current_path != dir && !self.sftp.left_pane.is_loading {
+                                    self.sftp.left_pane.set_path(dir);
+                                }
                             }
                         }
-                        SessionType::Ssh { profile_id } => {
-                            if let SftpTarget::RemoteSsh(ref p) = self.sftp.right_pane.target {
-                                if &p.id == profile_id && self.sftp.right_pane.current_path != dir {
-                                    self.sftp.right_pane.set_path(dir);
+                    }
+                    SessionType::Ssh { profile_id } => {
+                        let prof_opt = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id).cloned();
+                        if let Some(prof) = prof_opt {
+                            // Ensure the right pane is dedicated to THIS EXACT server before applying path
+                            if let SftpTarget::RemoteSsh(ref current_sftp_prof) = self.sftp.right_pane.target {
+                                if current_sftp_prof.id == prof.id {
+                                    if let Some(dir) = session.detect_current_working_dir(Some(&prof.username)) {
+                                        if self.sftp.right_pane.current_path != dir && !self.sftp.right_pane.is_loading {
+                                            self.sftp.right_pane.set_path(dir);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -919,7 +929,7 @@ impl AppState {
             }
         }
 
-        // Only synchronize remote session choice if the user is actively working in the Terminal tab
+        // Only switch the remote SFTP profile target when the user switches terminal tabs
         if self.active_view != ActiveView::Terminal {
             return;
         }

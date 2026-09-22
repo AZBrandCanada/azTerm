@@ -196,24 +196,111 @@ impl TerminalSession {
         }
     }
 
-    pub fn get_current_dir(&self) -> Option<String> {
+    pub fn detect_current_working_dir(&self, ssh_user: Option<&str>) -> Option<String> {
+        // 1. Explicit OSC 7 sequence if emitted
+        if let Some(ref d) = self.current_dir {
+            if d.starts_with('/') && !d.contains("file:") {
+                return Some(d.clone());
+            }
+        }
+
+        // 2. Local sessions: inspect /proc/<pid>/cwd on Linux
         #[cfg(target_os = "linux")]
         {
-            if let Some(pid) = self.child_pid {
-                if let Ok(link) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
-                    return Some(link.to_string_lossy().to_string());
+            if matches!(self.session_type, SessionType::Local { .. }) {
+                if let Some(pid) = self.child_pid {
+                    if let Ok(link) = std::fs::read_link(format!("/proc/{}/cwd", pid)) {
+                        return Some(link.to_string_lossy().to_string());
+                    }
                 }
             }
         }
 
-        if let Some(ref d) = self.current_dir {
-            return Some(d.clone());
+        // 3. Inspect Screen Window Title (OSC 0 / OSC 2 set by bash prompt command)
+        let screen = self.parser.screen();
+        let title = screen.title();
+        if !title.is_empty() {
+            if let Some(dir) = Self::parse_dir_from_str(title, ssh_user) {
+                return Some(dir);
+            }
         }
 
-        match &self.session_type {
-            SessionType::Local { working_dir } => Some(working_dir.clone()),
-            _ => None,
+        // 4. Inspect visible prompt lines on the virtual terminal screen
+        let (cursor_r, _) = screen.cursor_position();
+        let (rows, cols) = screen.size();
+        let start_r = cursor_r.min(rows.saturating_sub(1));
+        let min_r = start_r.saturating_sub(4);
+
+        for r in (min_r..=start_r).rev() {
+            let mut line_text = String::with_capacity(cols as usize);
+            for c in 0..cols {
+                if let Some(cell) = screen.cell(r, c) {
+                    let contents = cell.contents();
+                    if contents.is_empty() {
+                        line_text.push(' ');
+                    } else {
+                        line_text.push_str(&contents);
+                    }
+                }
+            }
+            let trimmed = line_text.trim();
+            if !trimmed.is_empty() {
+                if let Some(dir) = Self::parse_dir_from_str(trimmed, ssh_user) {
+                    return Some(dir);
+                }
+            }
         }
+
+        None
+    }
+
+    fn parse_dir_from_str(text: &str, ssh_user: Option<&str>) -> Option<String> {
+        let clean = text.trim();
+        if clean.is_empty() {
+            return None;
+        }
+
+        // Match user@host:path[$#%]
+        let candidate_path = if let Some(idx) = clean.find(':') {
+            let after_colon = &clean[idx + 1..];
+            let path_part = after_colon.trim_start();
+            let end_idx = path_part.find(|c| c == '$' || c == '#' || c == '%' || c == ' ' || c == '\n')
+                .unwrap_or(path_part.len());
+            path_part[..end_idx].trim()
+        } else if let Some(idx) = clean.find("] ") {
+            let after = &clean[idx + 2..];
+            let end_idx = after.find(|c| c == '$' || c == '#' || c == '%').unwrap_or(after.len());
+            after[..end_idx].trim()
+        } else {
+            return None;
+        };
+
+        if candidate_path.is_empty() {
+            return None;
+        }
+
+        let username = ssh_user.unwrap_or("root");
+        let home_dir = if username == "root" {
+            "/root".to_string()
+        } else {
+            format!("/home/{}", username)
+        };
+
+        let resolved = if candidate_path == "~" {
+            home_dir
+        } else if let Some(stripped) = candidate_path.strip_prefix("~/") {
+            format!("{}/{}", home_dir.trim_end_matches('/'), stripped.trim_matches('/'))
+        } else if candidate_path.starts_with('/') {
+            candidate_path.to_string()
+        } else {
+            return None;
+        };
+
+        if resolved.contains(' ') || resolved.contains("&&") || resolved.contains('|') {
+            return None;
+        }
+
+        Some(resolved)
     }
 
     pub fn clear_screen_and_scrollback(&mut self) {
@@ -337,7 +424,6 @@ impl TerminalSession {
                 self.clear_screen_and_scrollback();
             }
 
-            // Inspect OSC 7 path sequence: \x1b]7;file://[hostname]/path\x07 or \x1b\
             if let Some(idx) = bytes.windows(9).position(|w| w == b"\x1b]7;file:") {
                 let rest = &bytes[idx + 9..];
                 let end_idx = rest.iter().position(|&b| b == 0x07 || b == 0x1b);
