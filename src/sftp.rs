@@ -764,7 +764,7 @@ impl PaneBrowser {
                         ui.label(egui::RichText::new("Enter folder name:").strong());
                         ui.add_space(4.0);
                         let resp = ui.text_edit_singleline(&mut self.new_dir_name);
-                        if !resp.has_focus() {
+                        if ui.memory(|m| m.focused().is_none()) {
                             resp.request_focus();
                         }
 
@@ -808,7 +808,7 @@ impl PaneBrowser {
                         ui.label(egui::RichText::new("Enter new name:").strong());
                         ui.add_space(4.0);
                         let resp = ui.text_edit_singleline(&mut self.rename_new_name);
-                        if !resp.has_focus() {
+                        if ui.memory(|m| m.focused().is_none()) {
                             resp.request_focus();
                         }
 
@@ -851,7 +851,7 @@ impl PaneBrowser {
                         ui.label(egui::RichText::new(format!("Move {} item(s) to destination folder:", self.move_items.len())).strong());
                         ui.add_space(4.0);
                         let resp = ui.text_edit_singleline(&mut self.move_dest_path);
-                        if !resp.has_focus() {
+                        if ui.memory(|m| m.focused().is_none()) {
                             resp.request_focus();
                         }
 
@@ -1164,9 +1164,15 @@ impl PaneBrowser {
                                     entry.permissions
                                 ));
 
-                                // Right-click Context Menu
+                                // Right-click Context Menu with New Folder, Rename, Move, Delete
                                 row_resp.context_menu(|ui| {
-                                    ui.set_min_width(130.0);
+                                    ui.set_min_width(135.0);
+                                    if ui.button("+ New Folder").clicked() {
+                                        self.show_create_dir_modal = true;
+                                        self.new_dir_name = "new_folder".to_string();
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
                                     if ui.button("Rename").clicked() {
                                         self.show_rename_modal = true;
                                         self.rename_old_name = entry.name.clone();
@@ -1451,7 +1457,6 @@ impl SftpManager {
                 let file_name = rec.file_name.clone();
                 let start_t = Instant::now();
 
-                // Compute exact recursive directory payload before transfer
                 let mut actual_file_size = rec.file_size;
                 if is_dir {
                     let dir_stats = match &src_target {
