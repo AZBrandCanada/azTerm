@@ -351,13 +351,11 @@ impl AppState {
         }
         cc.egui_ctx.set_fonts(fonts);
 
-        // Load cached pending update from SQLite database immediately
         let current_version = env!("CARGO_PKG_VERSION");
         let initial_available_update = if let Some(ref tag) = settings.pending_update {
             if is_newer_version(tag, current_version) {
                 Some(tag.clone())
             } else {
-                // User has already updated to this version or newer: clear database cache
                 settings.pending_update = None;
                 settings.save();
                 None
@@ -416,7 +414,6 @@ impl AppState {
             ssh_auth_modal: None,
         };
 
-        // Schedule delayed boot check after ~30 seconds if not already cached
         app.schedule_boot_update_check(cc.egui_ctx.clone());
 
         if let Some(dir) = cli.working_directory {
@@ -461,7 +458,6 @@ impl AppState {
             return;
         }
 
-        // If an update is already known and saved in local DB, no need to hammer the API immediately
         if self.available_update.is_some() {
             return;
         }
@@ -472,8 +468,7 @@ impl AppState {
         let current_version = env!("CARGO_PKG_VERSION").to_string();
 
         thread::spawn(move || {
-            // Wait 30 seconds after app boots up before background check
-            thread::sleep(std::time::Duration::from_secs(10));
+            thread::sleep(std::time::Duration::from_secs(30));
 
             let res = Self::perform_github_update_check(&current_version);
             let _ = tx.send(res);
@@ -1205,9 +1200,11 @@ impl eframe::App for AppState {
             || self.show_profile_modal
             || self.show_keygen_modal
             || self.ssh_auth_modal.is_some()
-            || self.sftp.show_transfer_history;
+            || self.sftp.show_transfer_history
+            || self.sftp.left_pane.has_open_modal()
+            || self.sftp.right_pane.has_open_modal();
 
-        if self.active_view == ActiveView::Terminal && !modal_open {
+        if self.active_view == ActiveView::Terminal && !modal_open && !ctx.wants_keyboard_input() {
             self.handle_terminal_shortcuts(ctx);
         }
 

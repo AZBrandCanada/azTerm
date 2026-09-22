@@ -89,6 +89,14 @@ pub struct PaneBrowser {
     pub show_delete_confirm_modal: bool,
     pub items_to_delete: Vec<String>,
 
+    pub show_rename_modal: bool,
+    pub rename_old_name: String,
+    pub rename_new_name: String,
+
+    pub show_move_modal: bool,
+    pub move_items: Vec<String>,
+    pub move_dest_path: String,
+
     pub last_search_char: Option<char>,
     pub last_search_match_idx: usize,
     pub scroll_to_selected: bool,
@@ -128,6 +136,48 @@ pub fn build_ssh_base_command(profile: &SshProfile) -> Command {
 
     cmd.arg(format!("{}@{}", profile.username, profile.host));
     cmd
+}
+
+pub fn calculate_local_dir_stats(path: &Path) -> (u64, usize) {
+    let mut total_bytes = 0u64;
+    let mut total_files = 0usize;
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_dir() {
+                        stack.push(entry.path());
+                    } else {
+                        total_bytes += meta.len();
+                        total_files += 1;
+                    }
+                }
+            }
+        }
+    }
+    (total_bytes, total_files)
+}
+
+pub fn calculate_remote_dir_stats(profile: &SshProfile, remote_path: &str) -> (u64, usize) {
+    let safe_path = remote_path.replace('\'', "'\\''");
+    let cmd_str = format!(
+        "du -sb '{}' 2>/dev/null | awk '{{print $1}}'; find '{}' -type f 2>/dev/null | wc -l",
+        safe_path, safe_path
+    );
+    let mut cmd = build_ssh_base_command(profile);
+    cmd.arg(cmd_str);
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let out = String::from_utf8_lossy(&output.stdout);
+            let mut lines = out.lines();
+            let size = lines.next().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+            let count = lines.next().and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
+            return (size, count);
+        }
+    }
+    (0, 0)
 }
 
 pub fn fit_filename_to_width(
@@ -210,6 +260,14 @@ impl PaneBrowser {
             show_delete_confirm_modal: false,
             items_to_delete: Vec::new(),
 
+            show_rename_modal: false,
+            rename_old_name: String::new(),
+            rename_new_name: String::new(),
+
+            show_move_modal: false,
+            move_items: Vec::new(),
+            move_dest_path: String::new(),
+
             last_search_char: None,
             last_search_match_idx: 0,
             scroll_to_selected: false,
@@ -218,6 +276,13 @@ impl PaneBrowser {
         };
         pane.refresh();
         pane
+    }
+
+    pub fn has_open_modal(&self) -> bool {
+        self.show_create_dir_modal
+            || self.show_delete_confirm_modal
+            || self.show_rename_modal
+            || self.show_move_modal
     }
 
     pub fn set_target(&mut self, target: SftpTarget) {
@@ -441,6 +506,86 @@ impl PaneBrowser {
         }
     }
 
+    pub fn rename_item(&mut self, old_name: String, new_name: String) {
+        let clean_new = new_name.trim().to_string();
+        if clean_new.is_empty() || clean_new == old_name {
+            return;
+        }
+
+        match &self.target {
+            SftpTarget::Local => {
+                let src = PathBuf::from(&self.current_path).join(&old_name);
+                let dst = PathBuf::from(&self.current_path).join(&clean_new);
+                if let Err(e) = fs::rename(&src, &dst) {
+                    self.error_message = Some(format!("Rename failed: {}", e));
+                }
+                self.refresh();
+            }
+            SftpTarget::RemoteSsh(profile) => {
+                let src = format!("{}/{}", self.current_path.trim_end_matches('/'), old_name);
+                let dst = format!("{}/{}", self.current_path.trim_end_matches('/'), clean_new);
+                let profile_clone = profile.clone();
+                let escaped_src = src.replace('\'', "'\\''");
+                let escaped_dst = dst.replace('\'', "'\\''");
+                let remote_cmd = format!("mv '{}' '{}'", escaped_src, escaped_dst);
+
+                self.is_loading = true;
+                let (tx, rx): (Sender<Result<Vec<FileEntry>, String>>, Receiver<Result<Vec<FileEntry>, String>>) = channel();
+                self.rx = Some(rx);
+                let path_clone = self.current_path.clone();
+
+                thread::spawn(move || {
+                    let _ = Self::run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
+                    let _ = tx.send(res);
+                });
+            }
+        }
+    }
+
+    pub fn move_items_to_dest(&mut self, items: Vec<String>, dest_dir: String) {
+        let clean_dest = dest_dir.trim().to_string();
+        if items.is_empty() || clean_dest.is_empty() || clean_dest == self.current_path {
+            return;
+        }
+
+        match &self.target {
+            SftpTarget::Local => {
+                let current_dir = self.current_path.clone();
+                let dest_path = PathBuf::from(&clean_dest);
+                let _ = fs::create_dir_all(&dest_path);
+                for name in &items {
+                    let src = PathBuf::from(&current_dir).join(name);
+                    let dst = dest_path.join(name);
+                    let _ = fs::rename(&src, &dst);
+                }
+                self.refresh();
+            }
+            SftpTarget::RemoteSsh(profile) => {
+                let current_dir = self.current_path.clone();
+                let profile_clone = profile.clone();
+                self.is_loading = true;
+                let (tx, rx): (Sender<Result<Vec<FileEntry>, String>>, Receiver<Result<Vec<FileEntry>, String>>) = channel();
+                self.rx = Some(rx);
+                let path_clone = self.current_path.clone();
+
+                thread::spawn(move || {
+                    let safe_dest = clean_dest.trim_end_matches('/').replace('\'', "'\\''");
+                    let _ = Self::run_remote_ssh_cmd(&profile_clone, &format!("mkdir -p '{}'", safe_dest));
+                    for name in items {
+                        let src = format!("{}/{}", current_dir.trim_end_matches('/'), name);
+                        let dst = format!("{}/{}", clean_dest.trim_end_matches('/'), name);
+                        let escaped_src = src.replace('\'', "'\\''");
+                        let escaped_dst = dst.replace('\'', "'\\''");
+                        let _ = Self::run_remote_ssh_cmd(&profile_clone, &format!("mv '{}' '{}'", escaped_src, escaped_dst));
+                    }
+                    let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
+                    let _ = tx.send(res);
+                });
+            }
+        }
+    }
+
     pub fn refresh(&mut self) {
         if self.is_loading {
             return;
@@ -649,6 +794,93 @@ impl PaneBrowser {
             }
         }
 
+        if self.show_rename_modal {
+            let mut close_modal = false;
+            let mut execute_rename: Option<(String, String)> = None;
+
+            egui::Window::new(format!("Rename - {}", self.rename_old_name))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(320.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Enter new name:").strong());
+                        ui.add_space(4.0);
+                        let resp = ui.text_edit_singleline(&mut self.rename_new_name);
+                        if !resp.has_focus() {
+                            resp.request_focus();
+                        }
+
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Rename").clicked() || enter {
+                                let new_name = self.rename_new_name.trim().to_string();
+                                if !new_name.is_empty() {
+                                    execute_rename = Some((self.rename_old_name.clone(), new_name));
+                                }
+                                close_modal = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_modal = true;
+                            }
+                        });
+                    });
+                });
+
+            if let Some((old_n, new_n)) = execute_rename {
+                self.rename_item(old_n, new_n);
+            }
+            if close_modal {
+                self.show_rename_modal = false;
+            }
+        }
+
+        if self.show_move_modal {
+            let mut close_modal = false;
+            let mut execute_move: Option<(Vec<String>, String)> = None;
+
+            egui::Window::new("Move Item(s)")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(360.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(format!("Move {} item(s) to destination folder:", self.move_items.len())).strong());
+                        ui.add_space(4.0);
+                        let resp = ui.text_edit_singleline(&mut self.move_dest_path);
+                        if !resp.has_focus() {
+                            resp.request_focus();
+                        }
+
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Move").clicked() || enter {
+                                let dest = self.move_dest_path.trim().to_string();
+                                if !dest.is_empty() {
+                                    execute_move = Some((self.move_items.clone(), dest));
+                                }
+                                close_modal = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_modal = true;
+                            }
+                        });
+                    });
+                });
+
+            if let Some((items, dest)) = execute_move {
+                self.move_items_to_dest(items, dest);
+            }
+            if close_modal {
+                self.show_move_modal = false;
+                self.move_items.clear();
+            }
+        }
+
         if self.show_delete_confirm_modal {
             let mut close_modal = false;
             let mut execute_delete = false;
@@ -714,7 +946,7 @@ impl PaneBrowser {
         let mut auth_request = None;
         let pane_id = self.id.clone();
 
-        let is_typing_in_input = ui.memory(|m| m.focused().is_some());
+        let is_typing_in_input = ui.memory(|m| m.focused().is_some()) || ui.ctx().wants_keyboard_input();
         let mut pressed_char: Option<char> = None;
         let mut delete_pressed = false;
 
@@ -820,7 +1052,6 @@ impl PaneBrowser {
                 let right_reserved = size_col_w + perm_col_w + 14.0_f32;
                 let name_col_w = (ui.available_width() - right_reserved).max(60.0);
 
-                // Sortable Table Header Row
                 ui.horizontal(|ui| {
                     let name_indicator = if self.sort_column == SortColumn::Name {
                         if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
@@ -889,7 +1120,7 @@ impl PaneBrowser {
                             let is_selected = self.selected_items.contains(&entry.name);
 
                             ui.horizontal(|ui| {
-                                let (row_rect, mut row_resp) = ui.allocate_exact_size(egui::vec2(name_col_w, 19.0), egui::Sense::click());
+                                let (row_rect, mut row_resp) = ui.allocate_exact_size(egui::vec2(name_col_w, 19.0), egui::Sense::click_and_drag());
                                 if ui.is_rect_visible(row_rect) {
                                     let bg = if is_selected {
                                         theme.bg_card_color()
@@ -933,12 +1164,49 @@ impl PaneBrowser {
                                     entry.permissions
                                 ));
 
+                                // Right-click Context Menu
+                                row_resp.context_menu(|ui| {
+                                    ui.set_min_width(130.0);
+                                    if ui.button("Rename").clicked() {
+                                        self.show_rename_modal = true;
+                                        self.rename_old_name = entry.name.clone();
+                                        self.rename_new_name = entry.name.clone();
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Move to...").clicked() {
+                                        self.show_move_modal = true;
+                                        self.move_items = if self.selected_items.contains(&entry.name) {
+                                            self.selected_items.clone()
+                                        } else {
+                                            vec![entry.name.clone()]
+                                        };
+                                        self.move_dest_path = self.current_path.clone();
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button(egui::RichText::new("Delete").color(theme.danger_color())).clicked() {
+                                        self.items_to_delete = if self.selected_items.contains(&entry.name) {
+                                            self.selected_items.clone()
+                                        } else {
+                                            vec![entry.name.clone()]
+                                        };
+                                        self.show_delete_confirm_modal = true;
+                                        ui.close_menu();
+                                    }
+                                });
+
                                 if self.scroll_to_selected && is_selected {
                                     row_resp.scroll_to_me(Some(egui::Align::Center));
                                 }
 
                                 if row_resp.clicked() {
                                     toggled_item = Some((entry.name.clone(), is_ctrl));
+                                }
+
+                                if row_resp.secondary_clicked() {
+                                    if !self.selected_items.contains(&entry.name) {
+                                        self.selected_items = vec![entry.name.clone()];
+                                    }
                                 }
 
                                 if row_resp.double_clicked() && entry.is_dir {
@@ -1113,10 +1381,14 @@ impl SftpManager {
         for (idx, name) in selected.into_iter().enumerate() {
             let entry_opt = src_entries.iter().find(|e| e.name == name);
             let is_dir = entry_opt.map(|e| e.is_dir).unwrap_or(false);
-            let file_size = match &src_target {
+            let initial_size = match &src_target {
                 SftpTarget::Local => {
                     let local_path = PathBuf::from(&src_dir).join(&name);
-                    fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0)
+                    if is_dir {
+                        calculate_local_dir_stats(&local_path).0
+                    } else {
+                        fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0)
+                    }
                 }
                 SftpTarget::RemoteSsh(_) => entry_opt.map(|e| e.size).unwrap_or(0),
             };
@@ -1141,7 +1413,7 @@ impl SftpManager {
                     direction: transfer_direction.clone(),
                     from: from_str,
                     to: to_str,
-                    file_size,
+                    file_size: initial_size,
                     transferred_bytes: 0,
                     speed_bytes_sec: 0,
                     batch_index: idx + 1,
@@ -1176,12 +1448,30 @@ impl SftpManager {
         thread::spawn(move || {
             for (rec, is_dir) in batch_records {
                 let tid = rec.id;
-                let file_size = rec.file_size;
                 let file_name = rec.file_name.clone();
                 let start_t = Instant::now();
 
+                // Compute exact recursive directory payload before transfer
+                let mut actual_file_size = rec.file_size;
+                if is_dir {
+                    let dir_stats = match &src_target {
+                        SftpTarget::Local => {
+                            let local_path = PathBuf::from(&src_dir).join(&file_name);
+                            calculate_local_dir_stats(&local_path)
+                        }
+                        SftpTarget::RemoteSsh(prof) => {
+                            let remote_path = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
+                            calculate_remote_dir_stats(prof, &remote_path)
+                        }
+                    };
+                    if dir_stats.0 > 0 {
+                        actual_file_size = dir_stats.0;
+                    }
+                }
+
                 if let Ok(mut list) = transfers_clone.lock() {
                     if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                        item.file_size = actual_file_size;
                         item.status = TransferStatus::InProgress;
                     }
                 }
@@ -1385,7 +1675,7 @@ impl SftpManager {
                             if let Ok(out) = cmd.output() {
                                 if out.status.success() {
                                     transfer_success = true;
-                                    total_transferred = file_size;
+                                    total_transferred = actual_file_size;
                                 } else {
                                     error_msg = String::from_utf8_lossy(&out.stderr).to_string();
                                 }
@@ -1411,7 +1701,11 @@ impl SftpManager {
 
                             while is_active_clone.load(Ordering::Relaxed) {
                                 thread::sleep(Duration::from_millis(250));
-                                let current_bytes = fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0);
+                                let current_bytes = if is_dir {
+                                    calculate_local_dir_stats(&dest_check).0
+                                } else {
+                                    fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0)
+                                };
                                 let now = Instant::now();
                                 let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
                                 let delta_bytes = current_bytes.saturating_sub(last_bytes);
@@ -1465,7 +1759,11 @@ impl SftpManager {
                         is_active.store(false, Ordering::Relaxed);
                         let _ = monitor_handle.join();
 
-                        let final_bytes = fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(file_size);
+                        let final_bytes = if is_dir {
+                            calculate_local_dir_stats(&dest_local_file).0
+                        } else {
+                            fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(actual_file_size)
+                        };
                         total_transferred = final_bytes;
 
                         if let Ok(ref out) = output_res {
@@ -1497,7 +1795,7 @@ impl SftpManager {
                 }
 
                 let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
-                let final_transferred = if total_transferred > 0 { total_transferred } else { file_size };
+                let final_transferred = if total_transferred > 0 { total_transferred } else { actual_file_size };
                 let avg_speed = (final_transferred as f64 / elapsed_sec).round() as u64;
 
                 if let Ok(mut list) = transfers_clone.lock() {

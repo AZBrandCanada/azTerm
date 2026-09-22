@@ -199,14 +199,12 @@ impl TerminalSession {
     }
 
     pub fn detect_current_working_dir(&self, ssh_user: Option<&str>) -> Option<String> {
-        // 1. Explicit OSC 7 sequence if emitted by remote shell
         if let Some(ref d) = self.current_dir {
             if d.starts_with('/') && !d.contains("file:") {
                 return Some(d.clone());
             }
         }
 
-        // 2. Local sessions: read /proc/<pid>/cwd on Linux
         #[cfg(target_os = "linux")]
         {
             if matches!(self.session_type, SessionType::Local { .. }) {
@@ -218,7 +216,6 @@ impl TerminalSession {
             }
         }
 
-        // 3. Inspect Screen Window Title (OSC 0 / OSC 2 set by bash prompt command)
         let screen = self.parser.screen();
         let title = screen.title();
         if !title.is_empty() {
@@ -227,7 +224,6 @@ impl TerminalSession {
             }
         }
 
-        // 4. Inspect visible prompt lines on the virtual terminal screen
         let (cursor_r, _) = screen.cursor_position();
         let (rows, cols) = screen.size();
         let start_r = cursor_r.min(rows.saturating_sub(1));
@@ -262,7 +258,6 @@ impl TerminalSession {
             return None;
         }
 
-        // Match user@host:path[$#%]
         let candidate_path = if let Some(idx) = clean.find(':') {
             let after_colon = &clean[idx + 1..];
             let path_part = after_colon.trim_start();
@@ -591,6 +586,11 @@ impl TerminalSession {
     }
 
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+        // Do not intercept keystrokes when any text box or modal is actively focused
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
@@ -874,7 +874,8 @@ impl TerminalSession {
             response.request_focus();
         }
 
-        if active_focus {
+        let is_typing_elsewhere = ui.ctx().wants_keyboard_input();
+        if active_focus && !is_typing_elsewhere {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 
