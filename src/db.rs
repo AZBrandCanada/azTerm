@@ -84,7 +84,36 @@ impl Database {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ssh_last_paths (
+                profile_id TEXT PRIMARY KEY,
+                path TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(())
+    }
+
+    pub fn save_ssh_last_path(profile_id: &str, path: &str) {
+        if let Some(conn) = Self::get_connection() {
+            let _ = conn.execute(
+                "INSERT INTO ssh_last_paths (profile_id, path) VALUES (?1, ?2)
+                 ON CONFLICT(profile_id) DO UPDATE SET path = excluded.path",
+                params![profile_id, path],
+            );
+        }
+    }
+
+    pub fn load_ssh_last_path(profile_id: &str) -> Option<String> {
+        let conn = Self::get_connection()?;
+        let mut stmt = conn.prepare("SELECT path FROM ssh_last_paths WHERE profile_id = ?1").ok()?;
+        let path: String = stmt.query_row(params![profile_id], |row| row.get(0)).ok()?;
+        if path.trim().is_empty() {
+            None
+        } else {
+            Some(path)
+        }
     }
 
     pub fn save_settings(settings: &AppSettings) {

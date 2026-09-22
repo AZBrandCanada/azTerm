@@ -114,6 +114,206 @@ impl ThemeConfig {
         }
     }
 
+    pub fn sakura_blossom() -> Self {
+        Self {
+            id: "sakura_blossom".to_string(),
+            name: "Sakura Blossom".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [30, 22, 28],
+            bg_panel: [24, 17, 22],
+            bg_card: [44, 32, 41],
+            border: [78, 56, 73],
+            accent: [244, 114, 182],
+            accent_hover: [249, 168, 212],
+            text_primary: [253, 242, 248],
+            text_muted: [190, 150, 175],
+            success: [52, 211, 153],
+            danger: [251, 113, 133],
+            ansi_colors: [
+                [30, 22, 28], [251, 113, 133], [52, 211, 153], [251, 191, 36],
+                [167, 139, 250], [244, 114, 182], [103, 232, 249], [253, 242, 248],
+                [92, 68, 87], [253, 164, 175], [110, 231, 183], [253, 224, 71],
+                [196, 181, 253], [249, 168, 212], [165, 243, 252], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn rose_pine() -> Self {
+        Self {
+            id: "rose_pine".to_string(),
+            name: "Rose Pine".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [25, 23, 36],
+            bg_panel: [31, 29, 46],
+            bg_card: [38, 35, 58],
+            border: [68, 65, 90],
+            accent: [235, 188, 186],
+            accent_hover: [235, 111, 146],
+            text_primary: [224, 222, 244],
+            text_muted: [144, 140, 170],
+            success: [49, 116, 143],
+            danger: [235, 111, 146],
+            ansi_colors: [
+                [38, 35, 58], [235, 111, 146], [49, 116, 143], [246, 193, 119],
+                [156, 207, 216], [196, 167, 231], [235, 188, 186], [224, 222, 244],
+                [110, 106, 134], [235, 111, 146], [49, 116, 143], [246, 193, 119],
+                [156, 207, 216], [196, 167, 231], [235, 188, 186], [224, 222, 244],
+            ],
+        }
+    }
+
+    pub fn bubblegum_pink() -> Self {
+        Self {
+            id: "bubblegum_pink".to_string(),
+            name: "Bubblegum Pink".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [28, 18, 25],
+            bg_panel: [21, 13, 19],
+            bg_card: [48, 30, 42],
+            border: [90, 48, 76],
+            accent: [236, 72, 153],
+            accent_hover: [244, 114, 182],
+            text_primary: [255, 241, 242],
+            text_muted: [194, 138, 168],
+            success: [74, 222, 128],
+            danger: [244, 63, 94],
+            ansi_colors: [
+                [28, 18, 25], [244, 63, 94], [74, 222, 128], [250, 204, 21],
+                [192, 132, 252], [236, 72, 153], [56, 189, 248], [255, 241, 242],
+                [90, 48, 76], [251, 113, 133], [134, 239, 172], [253, 224, 71],
+                [216, 180, 254], [244, 114, 182], [125, 211, 252], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn lavender_mist() -> Self {
+        Self {
+            id: "lavender_mist".to_string(),
+            name: "Lavender Mist".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [26, 24, 38],
+            bg_panel: [20, 18, 30],
+            bg_card: [40, 36, 56],
+            border: [70, 62, 94],
+            accent: [196, 167, 231],
+            accent_hover: [216, 180, 254],
+            text_primary: [245, 243, 255],
+            text_muted: [167, 155, 194],
+            success: [110, 231, 183],
+            danger: [248, 113, 113],
+            ansi_colors: [
+                [26, 24, 38], [248, 113, 113], [110, 231, 183], [253, 224, 71],
+                [167, 139, 250], [196, 167, 231], [147, 197, 253], [245, 243, 255],
+                [76, 68, 102], [252, 165, 165], [167, 243, 208], [254, 240, 138],
+                [196, 181, 253], [216, 180, 254], [191, 219, 254], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn sunset_coral() -> Self {
+        Self {
+            id: "sunset_coral".to_string(),
+            name: "Sunset Coral".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [28, 21, 24],
+            bg_panel: [22, 16, 18],
+            bg_card: [46, 32, 36],
+            border: [86, 54, 60],
+            accent: [251, 146, 60],
+            accent_hover: [244, 114, 182],
+            text_primary: [255, 247, 237],
+            text_muted: [194, 148, 138],
+            success: [52, 211, 153],
+            danger: [239, 68, 68],
+            ansi_colors: [
+                [28, 21, 24], [239, 68, 68], [52, 211, 153], [251, 146, 60],
+                [147, 197, 253], [244, 114, 182], [94, 234, 212], [255, 247, 237],
+                [86, 54, 60], [248, 113, 113], [110, 231, 183], [253, 186, 116],
+                [191, 219, 254], [249, 168, 212], [153, 246, 228], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn catppuccin_frappe() -> Self {
+        Self {
+            id: "catppuccin_frappe".to_string(),
+            name: "Catppuccin Frappe".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [48, 52, 70],
+            bg_panel: [41, 44, 60],
+            bg_card: [65, 69, 89],
+            border: [98, 104, 128],
+            accent: [234, 153, 156],
+            accent_hover: [202, 158, 230],
+            text_primary: [198, 208, 245],
+            text_muted: [131, 139, 167],
+            success: [166, 209, 137],
+            danger: [231, 130, 132],
+            ansi_colors: [
+                [41, 44, 60], [231, 130, 132], [166, 209, 137], [229, 200, 144],
+                [140, 170, 238], [202, 158, 230], [129, 200, 190], [198, 208, 245],
+                [98, 104, 128], [234, 153, 156], [166, 209, 137], [229, 200, 144],
+                [140, 170, 238], [244, 184, 228], [129, 200, 190], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn emerald_forest() -> Self {
+        Self {
+            id: "emerald_forest".to_string(),
+            name: "Emerald Forest".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [15, 24, 20],
+            bg_panel: [10, 18, 15],
+            bg_card: [24, 40, 32],
+            border: [38, 66, 52],
+            accent: [16, 185, 129],
+            accent_hover: [52, 211, 153],
+            text_primary: [236, 253, 245],
+            text_muted: [110, 160, 135],
+            success: [16, 185, 129],
+            danger: [239, 68, 68],
+            ansi_colors: [
+                [15, 24, 20], [239, 68, 68], [16, 185, 129], [245, 158, 11],
+                [59, 130, 246], [168, 85, 247], [20, 184, 166], [236, 253, 245],
+                [38, 66, 52], [248, 113, 113], [52, 211, 153], [251, 191, 36],
+                [96, 165, 250], [192, 132, 252], [45, 212, 191], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn amber_glow() -> Self {
+        Self {
+            id: "amber_glow".to_string(),
+            name: "Amber Glow".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [24, 20, 15],
+            bg_panel: [18, 14, 10],
+            bg_card: [40, 32, 24],
+            border: [70, 55, 38],
+            accent: [245, 158, 11],
+            accent_hover: [251, 191, 36],
+            text_primary: [254, 243, 199],
+            text_muted: [180, 150, 115],
+            success: [34, 197, 94],
+            danger: [239, 68, 68],
+            ansi_colors: [
+                [24, 20, 15], [239, 68, 68], [34, 197, 94], [245, 158, 11],
+                [99, 102, 241], [217, 70, 239], [20, 184, 166], [254, 243, 199],
+                [70, 55, 38], [248, 113, 113], [74, 222, 128], [251, 191, 36],
+                [129, 140, 248], [232, 121, 249], [45, 212, 191], [255, 255, 255],
+            ],
+        }
+    }
+
     pub fn dracula() -> Self {
         Self {
             id: "dracula".to_string(),
@@ -292,6 +492,14 @@ impl ThemeConfig {
     pub fn builtins() -> Vec<Self> {
         vec![
             Self::cyber_cyan(),
+            Self::sakura_blossom(),
+            Self::rose_pine(),
+            Self::bubblegum_pink(),
+            Self::lavender_mist(),
+            Self::sunset_coral(),
+            Self::catppuccin_frappe(),
+            Self::emerald_forest(),
+            Self::amber_glow(),
             Self::dracula(),
             Self::nord(),
             Self::tokyo_night(),
@@ -428,7 +636,7 @@ pub fn session_tab_chip(
             ui.painter().text(
                 close_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "×",
+                "x",
                 font_id,
                 x_color,
             );

@@ -1,13 +1,17 @@
 // src/sftp.rs
+use crate::db::Database;
 use crate::ssh::{SshAuthType, SshProfile, SshStore};
 use crate::theme::ThemeConfig;
 use eframe::egui;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SftpTarget {
@@ -31,6 +35,7 @@ pub enum TransferDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferStatus {
+    Queued,
     InProgress,
     Completed,
     Failed(String),
@@ -44,6 +49,10 @@ pub struct FileTransferRecord {
     pub from: String,
     pub to: String,
     pub file_size: u64,
+    pub transferred_bytes: u64,
+    pub speed_bytes_sec: u64,
+    pub batch_index: usize,
+    pub batch_total: usize,
     pub status: TransferStatus,
     pub time: chrono::DateTime<chrono::Local>,
 }
@@ -53,7 +62,7 @@ pub struct PaneBrowser {
     pub target: SftpTarget,
     pub current_path: String,
     pub entries: Vec<FileEntry>,
-    pub selected_item: Option<String>,
+    pub selected_items: Vec<String>,
     pub is_loading: bool,
     pub error_message: Option<String>,
     pub last_socket_state: bool,
@@ -65,7 +74,13 @@ impl PaneBrowser {
         let id = id.into();
         let initial_path = match &target {
             SftpTarget::Local => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
-            SftpTarget::RemoteSsh(_) => ".".to_string(),
+            SftpTarget::RemoteSsh(p) => Database::load_ssh_last_path(&p.id).unwrap_or_else(|| {
+                if p.username == "root" {
+                    "/root".to_string()
+                } else {
+                    format!("/home/{}", p.username)
+                }
+            }),
         };
 
         let mut pane = Self {
@@ -73,7 +88,7 @@ impl PaneBrowser {
             target,
             current_path: initial_path,
             entries: Vec::new(),
-            selected_item: None,
+            selected_items: Vec::new(),
             is_loading: false,
             error_message: None,
             last_socket_state: false,
@@ -90,9 +105,15 @@ impl PaneBrowser {
         self.target = target;
         self.current_path = match &self.target {
             SftpTarget::Local => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
-            SftpTarget::RemoteSsh(_) => ".".to_string(),
+            SftpTarget::RemoteSsh(p) => Database::load_ssh_last_path(&p.id).unwrap_or_else(|| {
+                if p.username == "root" {
+                    "/root".to_string()
+                } else {
+                    format!("/home/{}", p.username)
+                }
+            }),
         };
-        self.selected_item = None;
+        self.selected_items.clear();
         self.last_socket_state = false;
         if let SftpTarget::RemoteSsh(ref p) = self.target {
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", p.id));
@@ -102,9 +123,29 @@ impl PaneBrowser {
     }
 
     pub fn set_path(&mut self, path: String) {
-        self.current_path = path;
-        self.selected_item = None;
+        self.current_path = path.clone();
+        if let SftpTarget::RemoteSsh(ref p) = self.target {
+            Database::save_ssh_last_path(&p.id, &path);
+        }
+        self.selected_items.clear();
         self.refresh();
+    }
+
+    pub fn go_home(&mut self) {
+        match &self.target {
+            SftpTarget::Local => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+                self.set_path(home);
+            }
+            SftpTarget::RemoteSsh(p) => {
+                let home = if p.username == "root" {
+                    "/root".to_string()
+                } else {
+                    format!("/home/{}", p.username)
+                };
+                self.set_path(home);
+            }
+        }
     }
 
     pub fn go_up(&mut self) {
@@ -132,7 +173,6 @@ impl PaneBrowser {
     }
 
     pub fn refresh(&mut self) {
-        // Prevent concurrent thread piling when network is slow
         if self.is_loading {
             return;
         }
@@ -183,7 +223,6 @@ impl PaneBrowser {
 
         let mut cmd = Command::new("ssh");
 
-        // Fail-fast timeout parameters so remote listing never blocks
         cmd.arg("-o").arg("BatchMode=yes");
         cmd.arg("-o").arg("ConnectTimeout=5");
         cmd.arg("-o").arg("ServerAliveInterval=10");
@@ -223,7 +262,6 @@ impl PaneBrowser {
         let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            // Automatically clean up stale or hung sockets
             if socket_path.exists() {
                 SshStore::cleanup_stale_socket(&profile.id);
             }
@@ -265,7 +303,6 @@ impl PaneBrowser {
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
             let is_connected = socket_path.exists();
 
-            // Refresh ONLY on connection edge transitions to prevent 60fps thread-fork loops
             if is_connected != self.last_socket_state {
                 self.last_socket_state = is_connected;
                 if is_connected && !self.is_loading {
@@ -306,6 +343,34 @@ impl PaneBrowser {
         }
     }
 
+    pub fn format_speed(bytes_per_sec: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = 1024 * KB;
+        const GB: u64 = 1024 * MB;
+
+        if bytes_per_sec >= GB {
+            format!("{:.1} GB/s", bytes_per_sec as f64 / GB as f64)
+        } else if bytes_per_sec >= MB {
+            format!("{:.1} MB/s", bytes_per_sec as f64 / MB as f64)
+        } else if bytes_per_sec >= KB {
+            format!("{:.1} KB/s", bytes_per_sec as f64 / KB as f64)
+        } else {
+            format!("{} B/s", bytes_per_sec)
+        }
+    }
+
+    pub fn format_eta(seconds: u64) -> String {
+        if seconds == 0 {
+            "0s".to_string()
+        } else if seconds < 60 {
+            format!("{}s", seconds)
+        } else if seconds < 3600 {
+            format!("{}m {:02}s", seconds / 60, seconds % 60)
+        } else {
+            format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
+        }
+    }
+
     pub fn render_file_list(&mut self, ui: &mut egui::Ui, theme: &ThemeConfig) -> Option<(SshProfile, String)> {
         self.poll();
 
@@ -316,25 +381,36 @@ impl PaneBrowser {
             ui.vertical(|ui| {
                 if let SftpTarget::RemoteSsh(ref profile) = self.target {
                     let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
-                    if !socket_path.exists() {
+                    let needs_auth = !socket_path.exists()
+                        || self.error_message.as_deref() == Some("Authentication required");
+
+                    if needs_auth {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(24.0);
-                            ui.label(
-                                egui::RichText::new("[SSH Session Not Connected]")
-                                    .strong()
-                                    .size(14.0)
-                                    .color(theme.accent_color()),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new(format!("Target: {}@{}:{}", profile.username, profile.host, profile.port))
-                                    .small()
-                                    .color(theme.text_muted_color()),
-                            );
-                            ui.add_space(12.0);
-                            if ui.button(egui::RichText::new("Connect & Authenticate").strong().size(13.0)).clicked() {
-                                auth_request = Some((profile.clone(), self.id.clone()));
-                            }
+                            ui.add_space(20.0);
+                            theme.card_frame().show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new("[SSH Authentication Required]")
+                                        .strong()
+                                        .size(14.0)
+                                        .color(theme.accent_color()),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(format!("Connection: {}@{}:{}", profile.username, profile.host, profile.port))
+                                        .small()
+                                        .color(theme.text_muted_color()),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new("Session multiplexing is inactive. Authenticate with your SSH key, password, or 2FA token to browse remote files.")
+                                        .small()
+                                        .color(theme.text_primary_color()),
+                                );
+                                ui.add_space(12.0);
+                                if ui.button(egui::RichText::new("Login & Authenticate").strong().size(13.0)).clicked() {
+                                    auth_request = Some((profile.clone(), self.id.clone()));
+                                }
+                            });
                             ui.add_space(16.0);
                         });
                         return;
@@ -370,8 +446,9 @@ impl PaneBrowser {
 
                 ui.separator();
 
-                let mut clicked_item: Option<String> = None;
+                let mut toggled_item: Option<(String, bool)> = None;
                 let mut nav_to: Option<String> = None;
+                let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift);
 
                 egui::ScrollArea::vertical()
                     .id_source(format!("{}_file_scroll", self.id))
@@ -379,7 +456,7 @@ impl PaneBrowser {
                     .show(ui, |ui| {
                         for entry in &self.entries {
                             let prefix = if entry.is_dir { "[DIR] " } else { "[FILE] " };
-                            let is_selected = self.selected_item.as_deref() == Some(&entry.name);
+                            let is_selected = self.selected_items.contains(&entry.name);
                             let full_label = format!("{}{}", prefix, entry.name);
 
                             ui.horizontal(|ui| {
@@ -392,7 +469,7 @@ impl PaneBrowser {
                                 );
 
                                 if resp.clicked() {
-                                    clicked_item = Some(entry.name.clone());
+                                    toggled_item = Some((entry.name.clone(), is_ctrl));
                                 }
 
                                 if resp.double_clicked() && entry.is_dir {
@@ -432,8 +509,16 @@ impl PaneBrowser {
                         }
                     });
 
-                if let Some(item) = clicked_item {
-                    self.selected_item = Some(item);
+                if let Some((item, multi)) = toggled_item {
+                    if multi {
+                        if let Some(pos) = self.selected_items.iter().position(|x| x == &item) {
+                            self.selected_items.remove(pos);
+                        } else {
+                            self.selected_items.push(item);
+                        }
+                    } else {
+                        self.selected_items = vec![item];
+                    }
                 }
 
                 if let Some(p) = nav_to {
@@ -452,6 +537,9 @@ impl PaneBrowser {
             if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
                 self.go_up();
             }
+            if ui.small_button("Home").on_hover_text("Go to home folder").clicked() {
+                self.go_home();
+            }
             if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                 self.refresh();
             }
@@ -461,7 +549,7 @@ impl PaneBrowser {
                 egui::TextEdit::singleline(&mut self.current_path)
                     .desired_width(path_w)
             ).lost_focus() {
-                self.refresh();
+                self.set_path(self.current_path.clone());
             }
         });
 
@@ -481,7 +569,7 @@ pub struct SftpManager {
     pub right_pane: PaneBrowser,
     pub transfers: Arc<Mutex<Vec<FileTransferRecord>>>,
     pub show_transfer_history: bool,
-    pub transfer_status: Option<(String, bool, std::time::Instant)>,
+    pub transfer_status: Option<(String, bool, Instant)>,
     last_notified_transfer_id: Option<usize>,
     next_transfer_id: usize,
 }
@@ -500,110 +588,232 @@ impl SftpManager {
     }
 
     pub fn upload_selected(&mut self) {
-        if let (Some(selected_name), SftpTarget::Local, SftpTarget::RemoteSsh(profile)) = (
-            self.left_pane.selected_item.clone(),
+        let selected = self.left_pane.selected_items.clone();
+        if selected.is_empty() {
+            return;
+        }
+
+        if let (SftpTarget::Local, SftpTarget::RemoteSsh(profile)) = (
             &self.left_pane.target,
             &self.right_pane.target,
         ) {
-            let local_path = PathBuf::from(&self.left_pane.current_path).join(&selected_name);
-            let file_size = fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
+            let total_batch = selected.len();
             let remote_dir = self.right_pane.current_path.clone();
             let profile_clone = profile.clone();
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+            let left_path = self.left_pane.current_path.clone();
 
-            let transfer_id = self.next_transfer_id;
-            self.next_transfer_id += 1;
+            let mut batch_records = Vec::new();
+            for (idx, name) in selected.into_iter().enumerate() {
+                let local_path = PathBuf::from(&left_path).join(&name);
+                let file_size = fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
+                let dest_display = format!("{}@{}:{}/", profile.username, profile.host, remote_dir);
 
-            let dest_display = format!("{}@{}:{}/", profile.username, profile.host, remote_dir);
-            let record = FileTransferRecord {
-                id: transfer_id,
-                file_name: selected_name.clone(),
-                direction: TransferDirection::Upload,
-                from: local_path.to_string_lossy().to_string(),
-                to: dest_display.clone(),
-                file_size,
-                status: TransferStatus::InProgress,
-                time: chrono::Local::now(),
-            };
+                let transfer_id = self.next_transfer_id;
+                self.next_transfer_id += 1;
 
-            if let Ok(mut list) = self.transfers.lock() {
-                list.insert(0, record);
+                batch_records.push((
+                    FileTransferRecord {
+                        id: transfer_id,
+                        file_name: name,
+                        direction: TransferDirection::Upload,
+                        from: local_path.to_string_lossy().to_string(),
+                        to: dest_display,
+                        file_size,
+                        transferred_bytes: 0,
+                        speed_bytes_sec: 0,
+                        batch_index: idx + 1,
+                        batch_total: total_batch,
+                        status: TransferStatus::Queued,
+                        time: chrono::Local::now(),
+                    },
+                    local_path,
+                ));
             }
-
-            self.transfer_status = Some((
-                format!("Uploading {} ({})...", selected_name, PaneBrowser::format_size(file_size)),
-                false,
-                std::time::Instant::now(),
-            ));
 
             let transfers_clone = self.transfers.clone();
 
+            if let Ok(mut list) = transfers_clone.lock() {
+                for (rec, _) in &batch_records {
+                    list.insert(0, rec.clone());
+                }
+            }
+
+            self.transfer_status = Some((
+                format!("[1/{}] Queuing upload batch...", total_batch),
+                false,
+                Instant::now(),
+            ));
+
             thread::spawn(move || {
-                let mut cmd = Command::new("scp");
-                cmd.arg("-o").arg("BatchMode=yes");
-                cmd.arg("-o").arg("ConnectTimeout=10");
-                cmd.arg("-o").arg("ServerAliveInterval=10");
-                cmd.arg("-o").arg("ServerAliveCountMax=2");
+                for (rec, local_path) in batch_records {
+                    let tid = rec.id;
+                    let file_size = rec.file_size;
+                    let start_t = Instant::now();
 
-                if socket_path.exists() {
-                    cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-                }
-                cmd.arg("-P").arg(profile_clone.port.to_string());
-                cmd.arg("-r");
-
-                match &profile_clone.auth_type {
-                    SshAuthType::KeyFile(path) => {
-                        if !path.trim().is_empty() {
-                            SshStore::ensure_secure_permissions(path);
-                            cmd.arg("-i").arg(path.trim());
+                    if let Ok(mut list) = transfers_clone.lock() {
+                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                            item.status = TransferStatus::InProgress;
                         }
                     }
-                    SshAuthType::PastedKey { key_id } => {
-                        let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                        if key_path.exists() {
-                            SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
-                            cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+
+                    let remote_file = if remote_dir.ends_with('/') {
+                        format!("{}{}", remote_dir, rec.file_name)
+                    } else {
+                        format!("{}/{}", remote_dir, rec.file_name)
+                    };
+
+                    let mut upload_success = false;
+                    let mut error_msg = String::new();
+
+                    // If it is a regular file, stream via SSH stdin for exact byte tracking & live ETA
+                    if local_path.is_file() {
+                        if let Ok(mut file) = fs::File::open(&local_path) {
+                            let mut cmd = Command::new("ssh");
+                            cmd.arg("-o").arg("BatchMode=yes");
+                            cmd.arg("-o").arg("ConnectTimeout=10");
+                            cmd.arg("-o").arg("ServerAliveInterval=10");
+                            cmd.arg("-o").arg("ServerAliveCountMax=2");
+
+                            if socket_path.exists() {
+                                cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
+                            }
+                            cmd.arg("-p").arg(profile_clone.port.to_string());
+
+                            match &profile_clone.auth_type {
+                                SshAuthType::KeyFile(path) => {
+                                    if !path.trim().is_empty() {
+                                        cmd.arg("-i").arg(path.trim());
+                                    }
+                                }
+                                SshAuthType::PastedKey { key_id } => {
+                                    let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                                    if key_path.exists() {
+                                        cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+                                    }
+                                }
+                                SshAuthType::PasswordOrAgent => {}
+                            }
+
+                            cmd.arg(format!("{}@{}", profile_clone.username, profile_clone.host));
+                            let safe_remote = remote_file.replace('\'', "'\\''");
+                            cmd.arg(format!("cat > '{}'", safe_remote));
+
+                            cmd.stdin(std::process::Stdio::piped());
+                            cmd.stdout(std::process::Stdio::null());
+                            cmd.stderr(std::process::Stdio::piped());
+
+                            if let Ok(mut child) = cmd.spawn() {
+                                if let Some(mut stdin) = child.stdin.take() {
+                                    let mut buf = [0u8; 65536];
+                                    let mut total_sent = 0u64;
+                                    let mut last_sample_t = Instant::now();
+                                    let mut last_sample_bytes = 0u64;
+                                    let mut stream_err = false;
+
+                                    while let Ok(n) = file.read(&mut buf) {
+                                        if n == 0 {
+                                            break;
+                                        }
+                                        if stdin.write_all(&buf[..n]).is_err() {
+                                            stream_err = true;
+                                            break;
+                                        }
+                                        total_sent += n as u64;
+
+                                        let now = Instant::now();
+                                        let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
+                                        if sample_dt >= 0.25 {
+                                            let speed = ((total_sent.saturating_sub(last_sample_bytes)) as f64 / sample_dt).round() as u64;
+                                            last_sample_t = now;
+                                            last_sample_bytes = total_sent;
+
+                                            if let Ok(mut list) = transfers_clone.lock() {
+                                                if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                                    item.transferred_bytes = total_sent;
+                                                    item.speed_bytes_sec = speed;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    drop(stdin);
+
+                                    if !stream_err {
+                                        if let Ok(out) = child.wait_with_output() {
+                                            if out.status.success() {
+                                                upload_success = true;
+                                            } else {
+                                                error_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    SshAuthType::PasswordOrAgent => {}
-                }
 
-                cmd.arg(local_path.to_string_lossy().to_string());
-                let remote_dest = if remote_dir.ends_with('/') {
-                    format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_dir)
-                } else {
-                    format!("{}@{}:{}/", profile_clone.username, profile_clone.host, remote_dir)
-                };
-                cmd.arg(remote_dest);
+                    // Fallback to scp for directories or if stream failed
+                    if !upload_success {
+                        let mut cmd = Command::new("scp");
+                        cmd.arg("-o").arg("BatchMode=yes");
+                        cmd.arg("-o").arg("ConnectTimeout=10");
+                        cmd.arg("-o").arg("ServerAliveInterval=10");
+                        cmd.arg("-o").arg("ServerAliveCountMax=2");
 
-                let output_res = cmd.output();
-                let success = match output_res {
-                    Ok(ref out) if out.status.success() => true,
-                    _ => false,
-                };
-
-                let error_msg = match output_res {
-                    Ok(out) if !out.status.success() => {
-                        let err = String::from_utf8_lossy(&out.stderr).to_string();
                         if socket_path.exists() {
-                            SshStore::cleanup_stale_socket(&profile_clone.id);
+                            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
                         }
-                        if err.trim().is_empty() {
-                            format!("SCP exited with code {:?}", out.status.code())
+                        cmd.arg("-P").arg(profile_clone.port.to_string());
+                        cmd.arg("-r");
+
+                        match &profile_clone.auth_type {
+                            SshAuthType::KeyFile(path) => {
+                                if !path.trim().is_empty() {
+                                    cmd.arg("-i").arg(path.trim());
+                                }
+                            }
+                            SshAuthType::PastedKey { key_id } => {
+                                let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                                if key_path.exists() {
+                                    cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+                                }
+                            }
+                            SshAuthType::PasswordOrAgent => {}
+                        }
+
+                        cmd.arg(local_path.to_string_lossy().to_string());
+                        let remote_dest = if remote_dir.ends_with('/') {
+                            format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_dir)
                         } else {
-                            err
+                            format!("{}@{}:{}/", profile_clone.username, profile_clone.host, remote_dir)
+                        };
+                        cmd.arg(remote_dest);
+
+                        if let Ok(out) = cmd.output() {
+                            if out.status.success() {
+                                upload_success = true;
+                            } else {
+                                error_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                            }
                         }
                     }
-                    Err(e) => format!("Failed to run scp: {}", e),
-                    _ => String::new(),
-                };
 
-                if let Ok(mut list) = transfers_clone.lock() {
-                    if let Some(item) = list.iter_mut().find(|t| t.id == transfer_id) {
-                        if success {
-                            item.status = TransferStatus::Completed;
-                        } else {
-                            item.status = TransferStatus::Failed(error_msg);
+                    let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
+                    let avg_speed = (file_size as f64 / elapsed_sec).round() as u64;
+
+                    if let Ok(mut list) = transfers_clone.lock() {
+                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                            item.speed_bytes_sec = avg_speed;
+                            item.transferred_bytes = file_size;
+                            if upload_success {
+                                item.status = TransferStatus::Completed;
+                            } else {
+                                if socket_path.exists() {
+                                    SshStore::cleanup_stale_socket(&profile_clone.id);
+                                }
+                                item.status = TransferStatus::Failed(error_msg);
+                            }
                         }
                     }
                 }
@@ -612,108 +822,184 @@ impl SftpManager {
     }
 
     pub fn download_selected(&mut self) {
-        if let (Some(selected_name), SftpTarget::RemoteSsh(profile), SftpTarget::Local) = (
-            self.right_pane.selected_item.clone(),
+        let selected = self.right_pane.selected_items.clone();
+        if selected.is_empty() {
+            return;
+        }
+
+        if let (SftpTarget::RemoteSsh(profile), SftpTarget::Local) = (
             &self.right_pane.target,
             &self.left_pane.target,
         ) {
-            let remote_file = if self.right_pane.current_path.ends_with('/') {
-                format!("{}{}", self.right_pane.current_path, selected_name)
-            } else {
-                format!("{}/{}", self.right_pane.current_path, selected_name)
-            };
+            let total_batch = selected.len();
             let local_dir = self.left_pane.current_path.clone();
             let profile_clone = profile.clone();
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+            let right_path = self.right_pane.current_path.clone();
 
-            let transfer_id = self.next_transfer_id;
-            self.next_transfer_id += 1;
+            let mut batch_records = Vec::new();
+            for (idx, name) in selected.into_iter().enumerate() {
+                let remote_file = if right_path.ends_with('/') {
+                    format!("{}{}", right_path, name)
+                } else {
+                    format!("{}/{}", right_path, name)
+                };
+                let file_size = self.right_pane.entries.iter()
+                    .find(|e| e.name == name)
+                    .map(|e| e.size)
+                    .unwrap_or(0);
 
-            let source_display = format!("{}@{}:{}", profile.username, profile.host, remote_file);
-            let record = FileTransferRecord {
-                id: transfer_id,
-                file_name: selected_name.clone(),
-                direction: TransferDirection::Download,
-                from: source_display.clone(),
-                to: local_dir.clone(),
-                file_size: 0,
-                status: TransferStatus::InProgress,
-                time: chrono::Local::now(),
-            };
+                let source_display = format!("{}@{}:{}", profile.username, profile.host, remote_file);
+                let transfer_id = self.next_transfer_id;
+                self.next_transfer_id += 1;
 
-            if let Ok(mut list) = self.transfers.lock() {
-                list.insert(0, record);
+                batch_records.push((
+                    FileTransferRecord {
+                        id: transfer_id,
+                        file_name: name,
+                        direction: TransferDirection::Download,
+                        from: source_display,
+                        to: local_dir.clone(),
+                        file_size,
+                        transferred_bytes: 0,
+                        speed_bytes_sec: 0,
+                        batch_index: idx + 1,
+                        batch_total: total_batch,
+                        status: TransferStatus::Queued,
+                        time: chrono::Local::now(),
+                    },
+                    remote_file,
+                ));
             }
-
-            self.transfer_status = Some((
-                format!("Downloading {}...", selected_name),
-                false,
-                std::time::Instant::now(),
-            ));
 
             let transfers_clone = self.transfers.clone();
 
+            if let Ok(mut list) = transfers_clone.lock() {
+                for (rec, _) in &batch_records {
+                    list.insert(0, rec.clone());
+                }
+            }
+
+            self.transfer_status = Some((
+                format!("[1/{}] Queuing download batch...", total_batch),
+                false,
+                Instant::now(),
+            ));
+
             thread::spawn(move || {
-                let mut cmd = Command::new("scp");
-                cmd.arg("-o").arg("BatchMode=yes");
-                cmd.arg("-o").arg("ConnectTimeout=10");
-                cmd.arg("-o").arg("ServerAliveInterval=10");
-                cmd.arg("-o").arg("ServerAliveCountMax=2");
+                for (rec, remote_file) in batch_records {
+                    let tid = rec.id;
+                    let file_size = rec.file_size;
+                    let start_t = Instant::now();
 
-                if socket_path.exists() {
-                    cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-                }
-                cmd.arg("-P").arg(profile_clone.port.to_string());
-                cmd.arg("-r");
-
-                match &profile_clone.auth_type {
-                    SshAuthType::KeyFile(path) => {
-                        if !path.trim().is_empty() {
-                            SshStore::ensure_secure_permissions(path);
-                            cmd.arg("-i").arg(path.trim());
+                    if let Ok(mut list) = transfers_clone.lock() {
+                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                            item.status = TransferStatus::InProgress;
                         }
                     }
-                    SshAuthType::PastedKey { key_id } => {
-                        let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                        if key_path.exists() {
-                            SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
-                            cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+
+                    let dest_local_file = PathBuf::from(&local_dir).join(&rec.file_name);
+                    let is_active = Arc::new(AtomicBool::new(true));
+                    let is_active_clone = is_active.clone();
+                    let dest_check = dest_local_file.clone();
+                    let transfers_clone_monitor = transfers_clone.clone();
+
+                    let monitor_handle = thread::spawn(move || {
+                        let mut last_bytes = 0u64;
+                        let mut last_time = Instant::now();
+
+                        while is_active_clone.load(Ordering::Relaxed) {
+                            thread::sleep(std::time::Duration::from_millis(250));
+                            let current_bytes = fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0);
+                            let now = Instant::now();
+                            let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
+                            let delta_bytes = current_bytes.saturating_sub(last_bytes);
+                            let speed = (delta_bytes as f64 / dt).round() as u64;
+
+                            last_bytes = current_bytes;
+                            last_time = now;
+
+                            if let Ok(mut list) = transfers_clone_monitor.lock() {
+                                if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                    item.transferred_bytes = current_bytes;
+                                    if speed > 0 {
+                                        item.speed_bytes_sec = speed;
+                                    }
+                                }
+                            }
                         }
+                    });
+
+                    let mut cmd = Command::new("scp");
+                    cmd.arg("-o").arg("BatchMode=yes");
+                    cmd.arg("-o").arg("ConnectTimeout=10");
+                    cmd.arg("-o").arg("ServerAliveInterval=10");
+                    cmd.arg("-o").arg("ServerAliveCountMax=2");
+
+                    if socket_path.exists() {
+                        cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
                     }
-                    SshAuthType::PasswordOrAgent => {}
-                }
+                    cmd.arg("-P").arg(profile_clone.port.to_string());
+                    cmd.arg("-r");
 
-                cmd.arg(format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_file));
-                cmd.arg(local_dir);
-
-                let output_res = cmd.output();
-                let success = match output_res {
-                    Ok(ref out) if out.status.success() => true,
-                    _ => false,
-                };
-
-                let error_msg = match output_res {
-                    Ok(out) if !out.status.success() => {
-                        let err = String::from_utf8_lossy(&out.stderr).to_string();
-                        if socket_path.exists() {
-                            SshStore::cleanup_stale_socket(&profile_clone.id);
+                    match &profile_clone.auth_type {
+                        SshAuthType::KeyFile(path) => {
+                            if !path.trim().is_empty() {
+                                SshStore::ensure_secure_permissions(path);
+                                cmd.arg("-i").arg(path.trim());
+                            }
                         }
-                        if err.trim().is_empty() {
-                            format!("SCP exited with code {:?}", out.status.code())
-                        } else {
-                            err
+                        SshAuthType::PastedKey { key_id } => {
+                            let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                            if key_path.exists() {
+                                SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
+                                cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+                            }
                         }
+                        SshAuthType::PasswordOrAgent => {}
                     }
-                    Err(e) => format!("Failed to run scp: {}", e),
-                    _ => String::new(),
-                };
 
-                if let Ok(mut list) = transfers_clone.lock() {
-                    if let Some(item) = list.iter_mut().find(|t| t.id == transfer_id) {
-                        if success {
-                            item.status = TransferStatus::Completed;
-                        } else {
-                            item.status = TransferStatus::Failed(error_msg);
+                    cmd.arg(format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_file));
+                    cmd.arg(&local_dir);
+
+                    let output_res = cmd.output();
+                    is_active.store(false, Ordering::Relaxed);
+                    let _ = monitor_handle.join();
+
+                    let final_bytes = fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(file_size);
+                    let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
+                    let avg_speed = (final_bytes as f64 / elapsed_sec).round() as u64;
+
+                    let success = match output_res {
+                        Ok(ref out) if out.status.success() => true,
+                        _ => false,
+                    };
+
+                    let error_msg = match output_res {
+                        Ok(out) if !out.status.success() => {
+                            let err = String::from_utf8_lossy(&out.stderr).to_string();
+                            if socket_path.exists() {
+                                SshStore::cleanup_stale_socket(&profile_clone.id);
+                            }
+                            if err.trim().is_empty() {
+                                format!("SCP exited with code {:?}", out.status.code())
+                            } else {
+                                err
+                            }
+                        }
+                        Err(e) => format!("Failed to run scp: {}", e),
+                        _ => String::new(),
+                    };
+
+                    if let Ok(mut list) = transfers_clone.lock() {
+                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                            item.speed_bytes_sec = avg_speed;
+                            item.transferred_bytes = final_bytes;
+                            if success {
+                                item.status = TransferStatus::Completed;
+                            } else {
+                                item.status = TransferStatus::Failed(error_msg);
+                            }
                         }
                     }
                 }
@@ -723,16 +1009,63 @@ impl SftpManager {
 
     pub fn poll_transfers(&mut self) {
         if let Ok(list) = self.transfers.lock() {
+            if let Some(in_progress) = list.iter().find(|t| t.status == TransferStatus::InProgress) {
+                let speed_str = PaneBrowser::format_speed(in_progress.speed_bytes_sec);
+                let remaining_bytes = in_progress.file_size.saturating_sub(in_progress.transferred_bytes);
+                let remaining_str = PaneBrowser::format_size(remaining_bytes);
+                let transferred_str = PaneBrowser::format_size(in_progress.transferred_bytes);
+                let total_str = PaneBrowser::format_size(in_progress.file_size);
+
+                let eta_str = if in_progress.speed_bytes_sec > 0 && remaining_bytes > 0 {
+                    let eta_secs = remaining_bytes / in_progress.speed_bytes_sec;
+                    format!(" | ETA: {}", PaneBrowser::format_eta(eta_secs))
+                } else {
+                    String::new()
+                };
+
+                let progress_pct = if in_progress.file_size > 0 {
+                    ((in_progress.transferred_bytes as f64 / in_progress.file_size as f64) * 100.0).clamp(0.0, 100.0).round() as u32
+                } else {
+                    0
+                };
+
+                let dir_label = match in_progress.direction {
+                    TransferDirection::Upload => "Uploading",
+                    TransferDirection::Download => "Downloading",
+                };
+
+                let progress_label = format!(
+                    "[{}/{}] {} {} ({} / {}, {} left, {}%){}{}",
+                    in_progress.batch_index,
+                    in_progress.batch_total,
+                    dir_label,
+                    in_progress.file_name,
+                    transferred_str,
+                    total_str,
+                    remaining_str,
+                    progress_pct,
+                    if in_progress.speed_bytes_sec > 0 { format!(" @ {}", speed_str) } else { String::new() },
+                    eta_str
+                );
+                self.transfer_status = Some((progress_label, false, Instant::now()));
+                return;
+            }
+
             if let Some(first) = list.first() {
                 match &first.status {
-                    TransferStatus::InProgress => {}
+                    TransferStatus::Queued | TransferStatus::InProgress => {}
                     TransferStatus::Completed => {
                         if self.last_notified_transfer_id != Some(first.id) {
                             self.last_notified_transfer_id = Some(first.id);
+                            let speed_info = if first.speed_bytes_sec > 0 {
+                                format!(" @ {}", PaneBrowser::format_speed(first.speed_bytes_sec))
+                            } else {
+                                String::new()
+                            };
                             self.transfer_status = Some((
-                                format!("[Done] Transfer completed: {}", first.file_name),
+                                format!("[Done {}/{}] {}{}", first.batch_index, first.batch_total, first.file_name, speed_info),
                                 false,
-                                std::time::Instant::now(),
+                                Instant::now(),
                             ));
                             self.left_pane.refresh();
                             self.right_pane.refresh();
@@ -747,9 +1080,9 @@ impl SftpManager {
                             self.last_notified_transfer_id = Some(first.id);
                             let err_preview = if err.len() > 40 { format!("{}...", &err[..37]) } else { err.clone() };
                             self.transfer_status = Some((
-                                format!("[Failed] {}", err_preview.trim()),
+                                format!("[Failed {}/{}] {}", first.batch_index, first.batch_total, err_preview.trim()),
                                 true,
-                                std::time::Instant::now(),
+                                Instant::now(),
                             ));
                         }
                     }
@@ -768,8 +1101,8 @@ impl SftpManager {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(620.0)
-            .default_height(340.0)
+            .default_width(680.0)
+            .default_height(380.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
@@ -778,7 +1111,7 @@ impl SftpManager {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Clear Finished").clicked() {
                                 if let Ok(mut list) = self.transfers.lock() {
-                                    list.retain(|t| matches!(t.status, TransferStatus::InProgress));
+                                    list.retain(|t| matches!(t.status, TransferStatus::InProgress | TransferStatus::Queued));
                                 }
                             }
                         });
@@ -803,12 +1136,17 @@ impl SftpManager {
                             for t in transfers {
                                 theme.card_frame().show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        let (dir_icon, dir_color) = match t.direction {
+                                        let (dir_label, dir_color) = match t.direction {
                                             TransferDirection::Upload => ("[Upload]", theme.success_color()),
                                             TransferDirection::Download => ("[Download]", theme.accent_color()),
                                         };
 
-                                        ui.label(egui::RichText::new(dir_icon).strong().color(dir_color));
+                                        ui.label(egui::RichText::new(dir_label).strong().color(dir_color));
+                                        ui.label(
+                                            egui::RichText::new(format!("[{}/{}]", t.batch_index, t.batch_total))
+                                                .small()
+                                                .color(theme.accent_color()),
+                                        );
                                         ui.label(egui::RichText::new(&t.file_name).strong().color(theme.text_primary_color()));
 
                                         if t.file_size > 0 {
@@ -818,10 +1156,23 @@ impl SftpManager {
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             match &t.status {
                                                 TransferStatus::Completed => {
-                                                    ui.label(egui::RichText::new("[Completed]").strong().color(theme.success_color()));
+                                                    let speed = if t.speed_bytes_sec > 0 {
+                                                        format!(" ({})", PaneBrowser::format_speed(t.speed_bytes_sec))
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                    ui.label(egui::RichText::new(format!("[Completed{}]", speed)).strong().color(theme.success_color()));
                                                 }
                                                 TransferStatus::InProgress => {
-                                                    ui.label(egui::RichText::new("[In Progress]").strong().color(theme.accent_color()));
+                                                    let speed = if t.speed_bytes_sec > 0 {
+                                                        format!(" ({})", PaneBrowser::format_speed(t.speed_bytes_sec))
+                                                    } else {
+                                                        String::new()
+                                                    };
+                                                    ui.label(egui::RichText::new(format!("[In Progress{}]", speed)).strong().color(theme.accent_color()));
+                                                }
+                                                TransferStatus::Queued => {
+                                                    ui.label(egui::RichText::new("[Queued]").color(theme.text_muted_color()));
                                                 }
                                                 TransferStatus::Failed(err) => {
                                                     ui.label(egui::RichText::new("[Failed]").strong().color(theme.danger_color())).on_hover_text(err);
@@ -830,6 +1181,32 @@ impl SftpManager {
                                             ui.label(egui::RichText::new(t.time.format("%H:%M:%S").to_string()).small().color(theme.text_muted_color()));
                                         });
                                     });
+
+                                    if matches!(t.status, TransferStatus::InProgress) && t.file_size > 0 {
+                                        ui.add_space(4.0);
+                                        let frac = (t.transferred_bytes as f32 / t.file_size as f32).clamp(0.0, 1.0);
+                                        ui.add(egui::ProgressBar::new(frac).show_percentage());
+
+                                        let remaining = t.file_size.saturating_sub(t.transferred_bytes);
+                                        let eta_str = if t.speed_bytes_sec > 0 && remaining > 0 {
+                                            format!(" | ETA: {}", PaneBrowser::format_eta(remaining / t.speed_bytes_sec))
+                                        } else {
+                                            String::new()
+                                        };
+
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Transferred: {} / {} | Remaining: {} | Speed: {}{}",
+                                                PaneBrowser::format_size(t.transferred_bytes),
+                                                PaneBrowser::format_size(t.file_size),
+                                                PaneBrowser::format_size(remaining),
+                                                PaneBrowser::format_speed(t.speed_bytes_sec),
+                                                eta_str
+                                            ))
+                                            .small()
+                                            .color(theme.text_muted_color()),
+                                        );
+                                    }
 
                                     ui.add_space(2.0);
                                     ui.label(

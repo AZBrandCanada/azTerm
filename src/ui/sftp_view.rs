@@ -8,7 +8,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
     ui.vertical(|ui| {
         ui.add_space(4.0);
 
-        // Compact Top Toolbar
+        // Top Toolbar with live queue counter and batch upload/download buttons
         app.theme.card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -18,11 +18,31 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         .color(app.theme.accent_color()),
                 );
 
+                if let Some((ref status_msg, is_error, _)) = app.sftp.transfer_status {
+                    let col = if is_error { app.theme.danger_color() } else { app.theme.accent_color() };
+                    ui.label(egui::RichText::new(format!("| {}", status_msg)).small().strong().color(col));
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Download (Right -> Left)").on_hover_text("Download selected file/folder from Right to Left").clicked() {
+                    let r_sel = app.sftp.right_pane.selected_items.len();
+                    let dl_label = if r_sel > 1 {
+                        format!("Download [{}] (Right -> Left)", r_sel)
+                    } else {
+                        "Download (Right -> Left)".to_string()
+                    };
+
+                    if ui.button(dl_label).on_hover_text("Download selected files/folders from Right to Left").clicked() {
                         app.sftp.download_selected();
                     }
-                    if ui.button("Upload (Left -> Right)").on_hover_text("Upload selected file/folder from Left to Right").clicked() {
+
+                    let l_sel = app.sftp.left_pane.selected_items.len();
+                    let up_label = if l_sel > 1 {
+                        format!("Upload [{}] (Left -> Right)", l_sel)
+                    } else {
+                        "Upload (Left -> Right)".to_string()
+                    };
+
+                    if ui.button(up_label).on_hover_text("Upload selected files/folders from Left to Right").clicked() {
                         app.sftp.upload_selected();
                     }
 
@@ -53,12 +73,12 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                         let is_local = app.sftp.left_pane.target == SftpTarget::Local;
                         let desc = match &app.sftp.left_pane.target {
-                            SftpTarget::Local => "Local".to_string(),
+                            SftpTarget::Local => "Local Filesystem".to_string(),
                             SftpTarget::RemoteSsh(p) => format!("SSH: {}", p.name),
                         };
 
                         egui::ComboBox::from_id_source("sftp_left_combo")
-                            .width(115.0)
+                            .width(135.0)
                             .selected_text(desc)
                             .show_ui(ui, |ui| {
                                 if ui.selectable_label(is_local, "Local Filesystem").clicked() {
@@ -84,6 +104,9 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
                             app.sftp.left_pane.go_up();
                         }
+                        if ui.small_button("Home").on_hover_text("Go to home folder").clicked() {
+                            app.sftp.left_pane.go_home();
+                        }
                         if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                             app.sftp.left_pane.refresh();
                         }
@@ -93,7 +116,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             egui::TextEdit::singleline(&mut app.sftp.left_pane.current_path)
                                 .desired_width(path_w)
                         ).lost_focus() {
-                            app.sftp.left_pane.refresh();
+                            app.sftp.left_pane.set_path(app.sftp.left_pane.current_path.clone());
                         }
                     });
 
@@ -121,12 +144,12 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                         let is_local = app.sftp.right_pane.target == SftpTarget::Local;
                         let desc = match &app.sftp.right_pane.target {
-                            SftpTarget::Local => "Local".to_string(),
+                            SftpTarget::Local => "Local Filesystem".to_string(),
                             SftpTarget::RemoteSsh(p) => format!("SSH: {}", p.name),
                         };
 
                         egui::ComboBox::from_id_source("sftp_right_combo")
-                            .width(115.0)
+                            .width(135.0)
                             .selected_text(desc)
                             .show_ui(ui, |ui| {
                                 if ui.selectable_label(is_local, "Local Filesystem").clicked() {
@@ -152,6 +175,9 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
                             app.sftp.right_pane.go_up();
                         }
+                        if ui.small_button("Home").on_hover_text("Go to home folder").clicked() {
+                            app.sftp.right_pane.go_home();
+                        }
                         if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                             app.sftp.right_pane.refresh();
                         }
@@ -161,7 +187,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             egui::TextEdit::singleline(&mut app.sftp.right_pane.current_path)
                                 .desired_width(path_w)
                         ).lost_focus() {
-                            app.sftp.right_pane.refresh();
+                            app.sftp.right_pane.set_path(app.sftp.right_pane.current_path.clone());
                         }
                     });
 

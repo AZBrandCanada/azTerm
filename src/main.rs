@@ -259,6 +259,7 @@ pub struct AppState {
     pub workspaces: Vec<WorkspaceTab>,
     pub active_workspace_idx: usize,
     pub active_session_id: usize,
+    pub last_synced_session_id: Option<usize>,
     pub dragging_tab_idx: Option<usize>,
     pub dragging_pane_id: Option<usize>,
     pub next_split_id: usize,
@@ -350,6 +351,7 @@ impl AppState {
             workspaces: Vec::new(),
             active_workspace_idx: 0,
             active_session_id: 1,
+            last_synced_session_id: None,
             dragging_tab_idx: None,
             dragging_pane_id: None,
             next_split_id: 1,
@@ -895,6 +897,17 @@ impl AppState {
     }
 
     fn sync_sftp_with_active_session(&mut self) {
+        // Only synchronize if the user is actively working in the Terminal tab
+        // Never override the user's manual session choice when browsing SFTP Explorer
+        if self.active_view != ActiveView::Terminal {
+            return;
+        }
+
+        if self.last_synced_session_id == Some(self.active_session_id) {
+            return;
+        }
+        self.last_synced_session_id = Some(self.active_session_id);
+
         if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
             if let SessionType::Ssh { profile_id } = &session.session_type {
                 if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
