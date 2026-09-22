@@ -3,6 +3,7 @@ use crate::db::Database;
 use crate::ssh::{SshAuthType, SshProfile, SshStore};
 use crate::theme::ThemeConfig;
 use eframe::egui;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -71,6 +72,20 @@ pub struct FileTransferRecord {
     pub time: chrono::DateTime<chrono::Local>,
 }
 
+#[derive(Clone)]
+pub struct SftpSudoPrompt {
+    pub host_label: String,
+    pub username: String,
+    pub item_name: String,
+    pub is_source: bool,
+    pub profile_opt: Option<SshProfile>,
+    pub password_input: String,
+    pub show_plain: bool,
+    pub error_msg: Option<String>,
+    pub needs_focus: bool,
+    pub tx_reply: Arc<Mutex<Option<Sender<Option<String>>>>>,
+}
+
 pub struct PaneBrowser {
     pub id: String,
     pub target: SftpTarget,
@@ -136,6 +151,36 @@ pub fn build_ssh_base_command(profile: &SshProfile) -> Command {
 
     cmd.arg(format!("{}@{}", profile.username, profile.host));
     cmd
+}
+
+pub fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), String> {
+    let mut cmd = build_ssh_base_command(profile);
+    cmd.arg(remote_cmd);
+
+    let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(err);
+    }
+    Ok(())
+}
+
+pub fn wrap_cmd_with_remote_sudo(inner_cmd: &str, password: &str) -> String {
+    let safe_pw = password.replace('\'', "'\\''");
+    let safe_inner = inner_cmd.replace('\'', "'\\''");
+    format!(
+        "sh -c 'P=$(mktemp); printf \"%s\\n\" \"#!/bin/sh\" \"printf '\\''%s\\n'\\'' \\\"\\$1\\\"\" > \"$P\"; chmod 700 \"$P\"; SUDO_ASKPASS=\"$P\" sudo -A sh -c '\\''{}'\\''; R=$?; rm -f \"$P\"; exit $R' -- '{}'",
+        safe_inner, safe_pw
+    )
+}
+
+pub fn verify_remote_sudo_password(profile: &SshProfile, password: &str) -> bool {
+    let safe_pw = password.replace('\'', "'\\''");
+    let test_cmd = format!(
+        "sh -c 'P=$(mktemp); printf \"%s\\n\" \"#!/bin/sh\" \"printf '\\''%s\\n'\\'' \\\"\\$1\\\"\" > \"$P\"; chmod 700 \"$P\"; SUDO_ASKPASS=\"$P\" sudo -A true; R=$?; rm -f \"$P\"; exit $R' -- '{}'",
+        safe_pw
+    );
+    run_remote_ssh_cmd(profile, &test_cmd).is_ok()
 }
 
 pub fn calculate_local_dir_stats(path: &Path) -> (u64, usize) {
@@ -402,18 +447,6 @@ impl PaneBrowser {
         self.apply_sorting();
     }
 
-    fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), String> {
-        let mut cmd = build_ssh_base_command(profile);
-        cmd.arg(remote_cmd);
-
-        let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
-        if !output.status.success() {
-            let err = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(err);
-        }
-        Ok(())
-    }
-
     pub fn create_directory(&mut self, dir_name: String) {
         let clean_name = dir_name.trim().to_string();
         if clean_name.is_empty() {
@@ -444,7 +477,7 @@ impl PaneBrowser {
                 let path_clone = self.current_path.clone();
 
                 thread::spawn(move || {
-                    let _ = Self::run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    let _ = run_remote_ssh_cmd(&profile_clone, &remote_cmd);
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
                 });
@@ -495,7 +528,7 @@ impl PaneBrowser {
                         };
                         let escaped = full_path.replace('\'', "'\\''");
                         let remote_cmd = format!("rm -rf '{}'", escaped);
-                        let _ = Self::run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                        let _ = run_remote_ssh_cmd(&profile_clone, &remote_cmd);
                     }
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
@@ -535,7 +568,7 @@ impl PaneBrowser {
                 let path_clone = self.current_path.clone();
 
                 thread::spawn(move || {
-                    let _ = Self::run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    let _ = run_remote_ssh_cmd(&profile_clone, &remote_cmd);
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
                 });
@@ -571,13 +604,13 @@ impl PaneBrowser {
 
                 thread::spawn(move || {
                     let safe_dest = clean_dest.trim_end_matches('/').replace('\'', "'\\''");
-                    let _ = Self::run_remote_ssh_cmd(&profile_clone, &format!("mkdir -p '{}'", safe_dest));
+                    let _ = run_remote_ssh_cmd(&profile_clone, &format!("mkdir -p '{}'", safe_dest));
                     for name in items {
                         let src = format!("{}/{}", current_dir.trim_end_matches('/'), name);
                         let dst = format!("{}/{}", clean_dest.trim_end_matches('/'), name);
                         let escaped_src = src.replace('\'', "'\\''");
                         let escaped_dst = dst.replace('\'', "'\\''");
-                        let _ = Self::run_remote_ssh_cmd(&profile_clone, &format!("mv '{}' '{}'", escaped_src, escaped_dst));
+                        let _ = run_remote_ssh_cmd(&profile_clone, &format!("mv '{}' '{}'", escaped_src, escaped_dst));
                     }
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
@@ -1164,7 +1197,7 @@ impl PaneBrowser {
                                     entry.permissions
                                 ));
 
-                                // Right-click Context Menu with New Folder, Rename, Move, Delete
+                                // Right-click Context Menu with + New Folder, Rename, Move, Delete
                                 row_resp.context_menu(|ui| {
                                     ui.set_min_width(135.0);
                                     if ui.button("+ New Folder").clicked() {
@@ -1332,6 +1365,8 @@ pub struct SftpManager {
     pub transfers: Arc<Mutex<Vec<FileTransferRecord>>>,
     pub show_transfer_history: bool,
     pub transfer_status: Option<(String, bool, Instant)>,
+    pub sudo_prompt: Arc<Mutex<Option<SftpSudoPrompt>>>,
+    pub sudo_passwords: Arc<Mutex<HashMap<String, String>>>,
     last_notified_transfer_id: Option<usize>,
     next_transfer_id: usize,
 }
@@ -1344,9 +1379,18 @@ impl SftpManager {
             transfers: Arc::new(Mutex::new(Vec::new())),
             show_transfer_history: false,
             transfer_status: None,
+            sudo_prompt: Arc::new(Mutex::new(None)),
+            sudo_passwords: Arc::new(Mutex::new(HashMap::new())),
             last_notified_transfer_id: None,
             next_transfer_id: 1,
         }
+    }
+
+    pub fn has_open_modal(&self) -> bool {
+        self.left_pane.has_open_modal()
+            || self.right_pane.has_open_modal()
+            || self.sudo_prompt.lock().map(|p| p.is_some()).unwrap_or(false)
+            || self.show_transfer_history
     }
 
     pub fn upload_selected(&mut self) {
@@ -1432,6 +1476,8 @@ impl SftpManager {
         }
 
         let transfers_clone = self.transfers.clone();
+        let sudo_prompt_clone = self.sudo_prompt.clone();
+        let sudo_passwords_clone = self.sudo_passwords.clone();
 
         if let Ok(mut list) = transfers_clone.lock() {
             for (rec, _) in &batch_records {
@@ -1485,132 +1531,83 @@ impl SftpManager {
                 let mut error_msg = String::new();
                 let mut total_transferred = 0u64;
 
-                match (&src_target, &dest_target) {
-                    // REMOTE TO REMOTE: In-Memory Piped Proxy Streaming
-                    (SftpTarget::RemoteSsh(src_prof), SftpTarget::RemoteSsh(dest_prof)) => {
-                        let remote_src_path = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
-                        let remote_dest_path = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
-                        let safe_src = remote_src_path.replace('\'', "'\\''");
-                        let safe_dest = remote_dest_path.replace('\'', "'\\''");
-                        let safe_dest_dir = dest_dir.trim_end_matches('/').replace('\'', "'\\''");
+                let mut sudo_pw_src: Option<String> = match &src_target {
+                    SftpTarget::RemoteSsh(p) => sudo_passwords_clone.lock().unwrap().get(&p.id).cloned(),
+                    _ => None,
+                };
+                let mut sudo_pw_dest: Option<String> = match &dest_target {
+                    SftpTarget::RemoteSsh(p) => sudo_passwords_clone.lock().unwrap().get(&p.id).cloned(),
+                    _ => None,
+                };
 
-                        let mut src_cmd = build_ssh_base_command(src_prof);
-                        let mut dest_cmd = build_ssh_base_command(dest_prof);
+                loop {
+                    transfer_success = false;
+                    error_msg.clear();
+                    total_transferred = 0;
 
-                        if !is_dir {
-                            src_cmd.arg(format!("cat '{}'", safe_src));
-                            dest_cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_dest));
-                        } else {
-                            let safe_parent_src = src_dir.trim_end_matches('/').replace('\'', "'\\''");
-                            let safe_folder_name = file_name.replace('\'', "'\\''");
-                            src_cmd.arg(format!("tar -czf - -C '{}' '{}'", safe_parent_src, safe_folder_name));
-                            dest_cmd.arg(format!("mkdir -p '{}' && tar -xzf - -C '{}'", safe_dest_dir, safe_dest_dir));
-                        }
+                    match (&src_target, &dest_target) {
+                        // REMOTE TO REMOTE: In-Memory Piped Proxy Streaming
+                        (SftpTarget::RemoteSsh(src_prof), SftpTarget::RemoteSsh(dest_prof)) => {
+                            let remote_src_path = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
+                            let remote_dest_path = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
+                            let safe_src = remote_src_path.replace('\'', "'\\''");
+                            let safe_dest = remote_dest_path.replace('\'', "'\\''");
+                            let safe_dest_dir = dest_dir.trim_end_matches('/').replace('\'', "'\\''");
 
-                        src_cmd.stdout(Stdio::piped());
-                        src_cmd.stderr(Stdio::piped());
-                        dest_cmd.stdin(Stdio::piped());
-                        dest_cmd.stderr(Stdio::piped());
-                        dest_cmd.stdout(Stdio::null());
+                            let mut src_cmd = build_ssh_base_command(src_prof);
+                            let mut dest_cmd = build_ssh_base_command(dest_prof);
 
-                        match (src_cmd.spawn(), dest_cmd.spawn()) {
-                            (Ok(mut src_child), Ok(mut dest_child)) => {
-                                if let (Some(mut src_out), Some(mut dest_in)) = (src_child.stdout.take(), dest_child.stdin.take()) {
-                                    let mut buf = [0u8; 65536];
-                                    let mut last_sample_t = Instant::now();
-                                    let mut last_sample_bytes = 0u64;
-                                    let mut stream_err = false;
-                                    let mut filtered_speed = 0.0f64;
+                            if !is_dir {
+                                if let Some(ref pw) = sudo_pw_src {
+                                    src_cmd.arg(wrap_cmd_with_remote_sudo(&format!("cat '{}'", safe_src), pw));
+                                } else {
+                                    src_cmd.arg(format!("cat '{}'", safe_src));
+                                }
 
-                                    while let Ok(n) = src_out.read(&mut buf) {
-                                        if n == 0 { break; }
-                                        if dest_in.write_all(&buf[..n]).is_err() {
-                                            stream_err = true;
-                                            break;
-                                        }
-                                        let _ = dest_in.flush();
-                                        total_transferred += n as u64;
+                                if let Some(ref pw) = sudo_pw_dest {
+                                    dest_cmd.arg(wrap_cmd_with_remote_sudo(&format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_dest), pw));
+                                } else {
+                                    dest_cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_dest));
+                                }
+                            } else {
+                                let safe_parent_src = src_dir.trim_end_matches('/').replace('\'', "'\\''");
+                                let safe_folder_name = file_name.replace('\'', "'\\''");
 
-                                        let now = Instant::now();
-                                        let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
-                                        if sample_dt >= 0.10 {
-                                            let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
-                                            filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
+                                if let Some(ref pw) = sudo_pw_src {
+                                    src_cmd.arg(wrap_cmd_with_remote_sudo(&format!("tar -czf - -C '{}' '{}'", safe_parent_src, safe_folder_name), pw));
+                                } else {
+                                    src_cmd.arg(format!("tar -czf - -C '{}' '{}'", safe_parent_src, safe_folder_name));
+                                }
 
-                                            last_sample_t = now;
-                                            last_sample_bytes = total_transferred;
-
-                                            if let Ok(mut list) = transfers_clone.lock() {
-                                                if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                                                    item.transferred_bytes = total_transferred;
-                                                    item.speed_bytes_sec = filtered_speed.round() as u64;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    drop(dest_in);
-                                    drop(src_out);
-
-                                    let src_wait = src_child.wait_with_output();
-                                    let dest_wait = dest_child.wait_with_output();
-
-                                    let src_ok = src_wait.as_ref().map(|o| o.status.success()).unwrap_or(false);
-                                    let dest_ok = dest_wait.as_ref().map(|o| o.status.success()).unwrap_or(false);
-
-                                    if !stream_err && src_ok && dest_ok {
-                                        transfer_success = true;
-                                    } else {
-                                        if !src_ok {
-                                            if let Ok(ref o) = src_wait {
-                                                error_msg.push_str(&String::from_utf8_lossy(&o.stderr));
-                                            }
-                                        }
-                                        if !dest_ok {
-                                            if let Ok(ref o) = dest_wait {
-                                                error_msg.push_str(&String::from_utf8_lossy(&o.stderr));
-                                            }
-                                        }
-                                    }
+                                if let Some(ref pw) = sudo_pw_dest {
+                                    dest_cmd.arg(wrap_cmd_with_remote_sudo(&format!("mkdir -p '{}' && tar -xzf - -C '{}'", safe_dest_dir, safe_dest_dir), pw));
+                                } else {
+                                    dest_cmd.arg(format!("mkdir -p '{}' && tar -xzf - -C '{}'", safe_dest_dir, safe_dest_dir));
                                 }
                             }
-                            _ => {
-                                error_msg = "Failed to spawn SSH streaming processes".to_string();
-                            }
-                        }
-                    }
 
-                    // LOCAL TO REMOTE: Upload
-                    (SftpTarget::Local, SftpTarget::RemoteSsh(profile)) => {
-                        let local_path = PathBuf::from(&src_dir).join(&file_name);
-                        let remote_file = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
-                        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+                            src_cmd.stdout(Stdio::piped());
+                            src_cmd.stderr(Stdio::piped());
+                            dest_cmd.stdin(Stdio::piped());
+                            dest_cmd.stderr(Stdio::piped());
+                            dest_cmd.stdout(Stdio::null());
 
-                        if local_path.is_file() {
-                            if let Ok(mut file) = fs::File::open(&local_path) {
-                                let mut cmd = build_ssh_base_command(profile);
-                                let safe_remote = remote_file.replace('\'', "'\\''");
-                                let safe_dest_dir = dest_dir.trim_end_matches('/').replace('\'', "'\\''");
-                                cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_remote));
-                                cmd.stdin(Stdio::piped());
-                                cmd.stdout(Stdio::null());
-                                cmd.stderr(Stdio::piped());
-
-                                if let Ok(mut child) = cmd.spawn() {
-                                    if let Some(mut stdin) = child.stdin.take() {
-                                        let mut buf = [0u8; 32768];
+                            match (src_cmd.spawn(), dest_cmd.spawn()) {
+                                (Ok(mut src_child), Ok(mut dest_child)) => {
+                                    if let (Some(mut src_out), Some(mut dest_in)) = (src_child.stdout.take(), dest_child.stdin.take()) {
+                                        let mut buf = [0u8; 65536];
                                         let mut last_sample_t = Instant::now();
                                         let mut last_sample_bytes = 0u64;
                                         let mut stream_err = false;
                                         let mut filtered_speed = 0.0f64;
 
-                                        while let Ok(n) = file.read(&mut buf) {
+                                        while let Ok(n) = src_out.read(&mut buf) {
                                             if n == 0 { break; }
-                                            if stdin.write_all(&buf[..n]).is_err() {
+                                            if dest_in.write_all(&buf[..n]).is_err() {
                                                 stream_err = true;
                                                 break;
                                             }
-                                            let _ = stdin.flush();
+                                            let _ = dest_in.flush();
                                             total_transferred += n as u64;
 
                                             let now = Instant::now();
@@ -1631,172 +1628,322 @@ impl SftpManager {
                                             }
                                         }
 
-                                        drop(stdin);
-                                        if !stream_err {
-                                            if let Ok(out) = child.wait_with_output() {
-                                                if out.status.success() {
-                                                    transfer_success = true;
-                                                } else {
-                                                    error_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                        drop(dest_in);
+                                        drop(src_out);
+
+                                        let src_wait = src_child.wait_with_output();
+                                        let dest_wait = dest_child.wait_with_output();
+
+                                        let src_ok = src_wait.as_ref().map(|o| o.status.success()).unwrap_or(false);
+                                        let dest_ok = dest_wait.as_ref().map(|o| o.status.success()).unwrap_or(false);
+
+                                        if !stream_err && src_ok && dest_ok {
+                                            transfer_success = true;
+                                        } else {
+                                            let mut src_err_txt = String::new();
+                                            let mut dest_err_txt = String::new();
+                                            if !src_ok {
+                                                if let Ok(ref o) = src_wait {
+                                                    src_err_txt = String::from_utf8_lossy(&o.stderr).to_string();
+                                                    error_msg.push_str(&src_err_txt);
+                                                }
+                                            }
+                                            if !dest_ok {
+                                                if let Ok(ref o) = dest_wait {
+                                                    dest_err_txt = String::from_utf8_lossy(&o.stderr).to_string();
+                                                    error_msg.push_str(&dest_err_txt);
+                                                }
+                                            }
+
+                                            // Detect permission denial on source or destination and prompt for sudo
+                                            if sudo_pw_src.is_none() && src_err_txt.contains("Permission denied") {
+                                                let (tx_r, rx_r) = channel::<Option<String>>();
+                                                {
+                                                    let mut p_lock = sudo_prompt_clone.lock().unwrap();
+                                                    *p_lock = Some(SftpSudoPrompt {
+                                                        host_label: format!("{}:{}", src_prof.host, src_prof.port),
+                                                        username: src_prof.username.clone(),
+                                                        item_name: file_name.clone(),
+                                                        is_source: true,
+                                                        profile_opt: Some(src_prof.clone()),
+                                                        password_input: String::new(),
+                                                        show_plain: false,
+                                                        error_msg: None,
+                                                        needs_focus: true,
+                                                        tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                                    });
+                                                }
+
+                                                if let Ok(Some(pw)) = rx_r.recv() {
+                                                    sudo_passwords_clone.lock().unwrap().insert(src_prof.id.clone(), pw.clone());
+                                                    sudo_pw_src = Some(pw);
+                                                    continue;
+                                                }
+                                            } else if sudo_pw_dest.is_none() && dest_err_txt.contains("Permission denied") {
+                                                let (tx_r, rx_r) = channel::<Option<String>>();
+                                                {
+                                                    let mut p_lock = sudo_prompt_clone.lock().unwrap();
+                                                    *p_lock = Some(SftpSudoPrompt {
+                                                        host_label: format!("{}:{}", dest_prof.host, dest_prof.port),
+                                                        username: dest_prof.username.clone(),
+                                                        item_name: file_name.clone(),
+                                                        is_source: false,
+                                                        profile_opt: Some(dest_prof.clone()),
+                                                        password_input: String::new(),
+                                                        show_plain: false,
+                                                        error_msg: None,
+                                                        needs_focus: true,
+                                                        tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                                    });
+                                                }
+
+                                                if let Ok(Some(pw)) = rx_r.recv() {
+                                                    sudo_passwords_clone.lock().unwrap().insert(dest_prof.id.clone(), pw.clone());
+                                                    sudo_pw_dest = Some(pw);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    error_msg = "Failed to spawn SSH streaming processes".to_string();
+                                }
+                            }
+                        }
+
+                        // LOCAL TO REMOTE: Upload
+                        (SftpTarget::Local, SftpTarget::RemoteSsh(profile)) => {
+                            let local_path = PathBuf::from(&src_dir).join(&file_name);
+                            let remote_file = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
+                            let safe_remote = remote_file.replace('\'', "'\\''");
+                            let safe_dest_dir = dest_dir.trim_end_matches('/').replace('\'', "'\\''");
+
+                            if local_path.is_file() {
+                                if let Ok(mut file) = fs::File::open(&local_path) {
+                                    let mut cmd = build_ssh_base_command(profile);
+                                    if let Some(ref pw) = sudo_pw_dest {
+                                        cmd.arg(wrap_cmd_with_remote_sudo(&format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_remote), pw));
+                                    } else {
+                                        cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_remote));
+                                    }
+
+                                    cmd.stdin(Stdio::piped());
+                                    cmd.stdout(Stdio::null());
+                                    cmd.stderr(Stdio::piped());
+
+                                    if let Ok(mut child) = cmd.spawn() {
+                                        if let Some(mut stdin) = child.stdin.take() {
+                                            let mut buf = [0u8; 32768];
+                                            let mut last_sample_t = Instant::now();
+                                            let mut last_sample_bytes = 0u64;
+                                            let mut stream_err = false;
+                                            let mut filtered_speed = 0.0f64;
+
+                                            while let Ok(n) = file.read(&mut buf) {
+                                                if n == 0 { break; }
+                                                if stdin.write_all(&buf[..n]).is_err() {
+                                                    stream_err = true;
+                                                    break;
+                                                }
+                                                let _ = stdin.flush();
+                                                total_transferred += n as u64;
+
+                                                let now = Instant::now();
+                                                let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
+                                                if sample_dt >= 0.10 {
+                                                    let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                                    filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
+
+                                                    last_sample_t = now;
+                                                    last_sample_bytes = total_transferred;
+
+                                                    if let Ok(mut list) = transfers_clone.lock() {
+                                                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                                            item.transferred_bytes = total_transferred;
+                                                            item.speed_bytes_sec = filtered_speed.round() as u64;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            drop(stdin);
+                                            if !stream_err {
+                                                if let Ok(out) = child.wait_with_output() {
+                                                    if out.status.success() {
+                                                        transfer_success = true;
+                                                    } else {
+                                                        error_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
+
+                            if !transfer_success && error_msg.is_empty() {
+                                let mut cmd = Command::new("scp");
+                                cmd.arg("-o").arg("BatchMode=yes");
+                                cmd.arg("-o").arg("ConnectTimeout=10");
+                                cmd.arg("-o").arg("ServerAliveInterval=10");
+                                cmd.arg("-o").arg("ServerAliveCountMax=2");
+                                cmd.arg("-P").arg(profile.port.to_string());
+                                cmd.arg("-r");
+
+                                cmd.arg(local_path.to_string_lossy().to_string());
+                                cmd.arg(format!("{}@{}:{}/", profile.username, profile.host, dest_dir.trim_end_matches('/')));
+
+                                if let Ok(out) = cmd.output() {
+                                    if out.status.success() {
+                                        transfer_success = true;
+                                        total_transferred = actual_file_size;
+                                    } else {
+                                        error_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                    }
+                                }
+                            }
+
+                            if !transfer_success && sudo_pw_dest.is_none() && error_msg.contains("Permission denied") {
+                                let (tx_r, rx_r) = channel::<Option<String>>();
+                                {
+                                    let mut p_lock = sudo_prompt_clone.lock().unwrap();
+                                    *p_lock = Some(SftpSudoPrompt {
+                                        host_label: format!("{}:{}", profile.host, profile.port),
+                                        username: profile.username.clone(),
+                                        item_name: file_name.clone(),
+                                        is_source: false,
+                                        profile_opt: Some(profile.clone()),
+                                        password_input: String::new(),
+                                        show_plain: false,
+                                        error_msg: None,
+                                        needs_focus: true,
+                                        tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                    });
+                                }
+
+                                if let Ok(Some(pw)) = rx_r.recv() {
+                                    sudo_passwords_clone.lock().unwrap().insert(profile.id.clone(), pw.clone());
+                                    sudo_pw_dest = Some(pw);
+                                    continue;
+                                }
+                            }
                         }
 
-                        if !transfer_success && error_msg.is_empty() {
+                        // REMOTE TO LOCAL: Download
+                        (SftpTarget::RemoteSsh(profile), SftpTarget::Local) => {
+                            let local_dir = dest_dir.clone();
+                            let remote_file = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
+                            let dest_local_file = PathBuf::from(&local_dir).join(&file_name);
+
+                            let is_active = Arc::new(AtomicBool::new(true));
+                            let is_active_clone = is_active.clone();
+                            let dest_check = dest_local_file.clone();
+                            let transfers_clone_monitor = transfers_clone.clone();
+
+                            let monitor_handle = thread::spawn(move || {
+                                let mut last_bytes = 0u64;
+                                let mut last_time = Instant::now();
+
+                                while is_active_clone.load(Ordering::Relaxed) {
+                                    thread::sleep(Duration::from_millis(250));
+                                    let current_bytes = if is_dir {
+                                        calculate_local_dir_stats(&dest_check).0
+                                    } else {
+                                        fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0)
+                                    };
+                                    let now = Instant::now();
+                                    let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
+                                    let delta_bytes = current_bytes.saturating_sub(last_bytes);
+                                    let speed = (delta_bytes as f64 / dt).round() as u64;
+
+                                    last_bytes = current_bytes;
+                                    last_time = now;
+
+                                    if let Ok(mut list) = transfers_clone_monitor.lock() {
+                                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                            item.transferred_bytes = current_bytes;
+                                            if speed > 0 {
+                                                item.speed_bytes_sec = speed;
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+
                             let mut cmd = Command::new("scp");
                             cmd.arg("-o").arg("BatchMode=yes");
                             cmd.arg("-o").arg("ConnectTimeout=10");
                             cmd.arg("-o").arg("ServerAliveInterval=10");
                             cmd.arg("-o").arg("ServerAliveCountMax=2");
-
-                            if socket_path.exists() {
-                                cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-                            }
                             cmd.arg("-P").arg(profile.port.to_string());
                             cmd.arg("-r");
 
-                            match &profile.auth_type {
-                                SshAuthType::KeyFile(path) => {
-                                    if !path.trim().is_empty() {
-                                        cmd.arg("-i").arg(path.trim());
-                                    }
-                                }
-                                SshAuthType::PastedKey { key_id } => {
-                                    let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                                    if key_path.exists() {
-                                        cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
-                                    }
-                                }
-                                SshAuthType::PasswordOrAgent => {}
-                            }
+                            cmd.arg(format!("{}@{}:{}", profile.username, profile.host, remote_file));
+                            cmd.arg(&local_dir);
 
-                            cmd.arg(local_path.to_string_lossy().to_string());
-                            cmd.arg(format!("{}@{}:{}/", profile.username, profile.host, dest_dir.trim_end_matches('/')));
+                            let output_res = cmd.output();
+                            is_active.store(false, Ordering::Relaxed);
+                            let _ = monitor_handle.join();
 
-                            if let Ok(out) = cmd.output() {
+                            let final_bytes = if is_dir {
+                                calculate_local_dir_stats(&dest_local_file).0
+                            } else {
+                                fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(actual_file_size)
+                            };
+                            total_transferred = final_bytes;
+
+                            if let Ok(ref out) = output_res {
                                 if out.status.success() {
                                     transfer_success = true;
-                                    total_transferred = actual_file_size;
                                 } else {
                                     error_msg = String::from_utf8_lossy(&out.stderr).to_string();
                                 }
+                            } else {
+                                error_msg = "Failed to execute SCP".to_string();
+                            }
+
+                            if !transfer_success && sudo_pw_src.is_none() && error_msg.contains("Permission denied") {
+                                let (tx_r, rx_r) = channel::<Option<String>>();
+                                {
+                                    let mut p_lock = sudo_prompt_clone.lock().unwrap();
+                                    *p_lock = Some(SftpSudoPrompt {
+                                        host_label: format!("{}:{}", profile.host, profile.port),
+                                        username: profile.username.clone(),
+                                        item_name: file_name.clone(),
+                                        is_source: true,
+                                        profile_opt: Some(profile.clone()),
+                                        password_input: String::new(),
+                                        show_plain: false,
+                                        error_msg: None,
+                                        needs_focus: true,
+                                        tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                    });
+                                }
+
+                                if let Ok(Some(pw)) = rx_r.recv() {
+                                    sudo_passwords_clone.lock().unwrap().insert(profile.id.clone(), pw.clone());
+                                    sudo_pw_src = Some(pw);
+                                    continue;
+                                }
                             }
                         }
-                    }
 
-                    // REMOTE TO LOCAL: Download
-                    (SftpTarget::RemoteSsh(profile), SftpTarget::Local) => {
-                        let local_dir = dest_dir.clone();
-                        let remote_file = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
-                        let dest_local_file = PathBuf::from(&local_dir).join(&file_name);
-                        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
-
-                        let is_active = Arc::new(AtomicBool::new(true));
-                        let is_active_clone = is_active.clone();
-                        let dest_check = dest_local_file.clone();
-                        let transfers_clone_monitor = transfers_clone.clone();
-
-                        let monitor_handle = thread::spawn(move || {
-                            let mut last_bytes = 0u64;
-                            let mut last_time = Instant::now();
-
-                            while is_active_clone.load(Ordering::Relaxed) {
-                                thread::sleep(Duration::from_millis(250));
-                                let current_bytes = if is_dir {
-                                    calculate_local_dir_stats(&dest_check).0
+                        // LOCAL TO LOCAL
+                        (SftpTarget::Local, SftpTarget::Local) => {
+                            let local_src = PathBuf::from(&src_dir).join(&file_name);
+                            let local_dest = PathBuf::from(&dest_dir).join(&file_name);
+                            if local_src.is_file() {
+                                if let Ok(b) = fs::copy(&local_src, &local_dest) {
+                                    transfer_success = true;
+                                    total_transferred = b;
                                 } else {
-                                    fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0)
-                                };
-                                let now = Instant::now();
-                                let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
-                                let delta_bytes = current_bytes.saturating_sub(last_bytes);
-                                let speed = (delta_bytes as f64 / dt).round() as u64;
-
-                                last_bytes = current_bytes;
-                                last_time = now;
-
-                                if let Ok(mut list) = transfers_clone_monitor.lock() {
-                                    if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                                        item.transferred_bytes = current_bytes;
-                                        if speed > 0 {
-                                            item.speed_bytes_sec = speed;
-                                        }
-                                    }
+                                    error_msg = "Local file copy failed".to_string();
                                 }
                             }
-                        });
-
-                        let mut cmd = Command::new("scp");
-                        cmd.arg("-o").arg("BatchMode=yes");
-                        cmd.arg("-o").arg("ConnectTimeout=10");
-                        cmd.arg("-o").arg("ServerAliveInterval=10");
-                        cmd.arg("-o").arg("ServerAliveCountMax=2");
-
-                        if socket_path.exists() {
-                            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-                        }
-                        cmd.arg("-P").arg(profile.port.to_string());
-                        cmd.arg("-r");
-
-                        match &profile.auth_type {
-                            SshAuthType::KeyFile(path) => {
-                                if !path.trim().is_empty() {
-                                    cmd.arg("-i").arg(path.trim());
-                                }
-                            }
-                            SshAuthType::PastedKey { key_id } => {
-                                let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                                if key_path.exists() {
-                                    cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
-                                }
-                            }
-                            SshAuthType::PasswordOrAgent => {}
-                        }
-
-                        cmd.arg(format!("{}@{}:{}", profile.username, profile.host, remote_file));
-                        cmd.arg(&local_dir);
-
-                        let output_res = cmd.output();
-                        is_active.store(false, Ordering::Relaxed);
-                        let _ = monitor_handle.join();
-
-                        let final_bytes = if is_dir {
-                            calculate_local_dir_stats(&dest_local_file).0
-                        } else {
-                            fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(actual_file_size)
-                        };
-                        total_transferred = final_bytes;
-
-                        if let Ok(ref out) = output_res {
-                            if out.status.success() {
-                                transfer_success = true;
-                            } else {
-                                error_msg = String::from_utf8_lossy(&out.stderr).to_string();
-                            }
-                        } else {
-                            error_msg = "Failed to execute SCP".to_string();
                         }
                     }
-
-                    // LOCAL TO LOCAL: File System Copy
-                    (SftpTarget::Local, SftpTarget::Local) => {
-                        let local_src = PathBuf::from(&src_dir).join(&file_name);
-                        let local_dest = PathBuf::from(&dest_dir).join(&file_name);
-                        if local_src.is_file() {
-                            if let Ok(b) = fs::copy(&local_src, &local_dest) {
-                                transfer_success = true;
-                                total_transferred = b;
-                            } else {
-                                error_msg = "Local file copy failed".to_string();
-                            }
-                        } else {
-                            error_msg = "Directory copy within local system not implemented".to_string();
-                        }
-                    }
+                    break;
                 }
 
                 let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
@@ -1909,6 +2056,104 @@ impl SftpManager {
     }
 
     pub fn render_transfer_history_window(&mut self, ctx: &egui::Context, theme: &ThemeConfig) {
+        let mut sudo_to_cancel = false;
+        let mut sudo_to_submit: Option<String> = None;
+
+        if let Some(ref mut prompt) = *self.sudo_prompt.lock().unwrap() {
+            egui::Window::new("[Sudo Authentication Required]")
+                .collapsible(false)
+                .resizable(false)
+                .default_width(420.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        let side_label = if prompt.is_source { "source" } else { "destination" };
+                        ui.label(
+                            egui::RichText::new(format!("Permission denied on {} host ({})", side_label, prompt.host_label))
+                                .strong()
+                                .color(theme.accent_color()),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!("Item: '{}'", prompt.item_name))
+                                .small()
+                                .color(theme.text_primary_color()),
+                        );
+                        ui.label(
+                            egui::RichText::new(format!("Enter sudo password for user '{}' to complete the transfer:", prompt.username))
+                                .small()
+                                .color(theme.text_muted_color()),
+                        );
+                        ui.add_space(8.0);
+
+                        let mut submit_pressed = false;
+
+                        ui.horizontal(|ui| {
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut prompt.password_input)
+                                    .password(!prompt.show_plain)
+                                    .desired_width(240.0)
+                            );
+
+                            if prompt.needs_focus {
+                                resp.request_focus();
+                                prompt.needs_focus = false;
+                            }
+
+                            ui.checkbox(&mut prompt.show_plain, "Show");
+
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                submit_pressed = true;
+                            }
+                        });
+
+                        if let Some(ref err) = prompt.error_msg {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(err).small().color(theme.danger_color()));
+                        }
+
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("Authenticate & Continue").strong().color(theme.accent_color())).clicked() || submit_pressed {
+                                let pw = prompt.password_input.clone();
+                                let valid = if let Some(ref prof) = prompt.profile_opt {
+                                    verify_remote_sudo_password(prof, &pw)
+                                } else {
+                                    true
+                                };
+
+                                if valid {
+                                    sudo_to_submit = Some(pw);
+                                } else {
+                                    prompt.error_msg = Some("Incorrect sudo password. Please try again.".to_string());
+                                }
+                            }
+                            if ui.button("Cancel").clicked() {
+                                sudo_to_cancel = true;
+                            }
+                        });
+                    });
+                });
+        }
+
+        if let Some(pw) = sudo_to_submit {
+            let mut p_lock = self.sudo_prompt.lock().unwrap();
+            if let Some(prompt) = p_lock.take() {
+                if let Some(tx) = prompt.tx_reply.lock().unwrap().take() {
+                    let _ = tx.send(Some(pw));
+                }
+            }
+        }
+
+        if sudo_to_cancel {
+            let mut p_lock = self.sudo_prompt.lock().unwrap();
+            if let Some(prompt) = p_lock.take() {
+                if let Some(tx) = prompt.tx_reply.lock().unwrap().take() {
+                    let _ = tx.send(None);
+                }
+            }
+        }
+
         if !self.show_transfer_history {
             return;
         }
