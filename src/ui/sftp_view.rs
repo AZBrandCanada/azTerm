@@ -138,7 +138,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                 },
             );
 
-            // MIDDLE TRANSFER BRIDGE (Action Area)
+            // MIDDLE TRANSFER BRIDGE (Context-aware labels: Upload / Download / VPS -> VPS)
             ui.allocate_ui_with_layout(
                 egui::vec2(middle_w, avail_h),
                 egui::Layout::top_down(egui::Align::Center),
@@ -148,7 +148,14 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                     app.theme.card_frame().show(ui, |ui| {
                         ui.set_width(middle_w - 24.0);
                         ui.vertical_centered(|ui| {
-                            // UPLOAD ACTION (Left -> Right)
+                            // Left -> Right Action
+                            let lr_title = match (&app.sftp.left_pane.target, &app.sftp.right_pane.target) {
+                                (SftpTarget::Local, SftpTarget::RemoteSsh(_)) => "Upload",
+                                (SftpTarget::RemoteSsh(_), SftpTarget::Local) => "Download",
+                                (SftpTarget::RemoteSsh(_), SftpTarget::RemoteSsh(_)) => "VPS -> VPS",
+                                _ => "Copy",
+                            };
+
                             let l_count = app.sftp.left_pane.selected_items.len();
                             let l_size: u64 = app.sftp.left_pane.entries
                                 .iter()
@@ -156,7 +163,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                                 .map(|e| e.size)
                                 .sum();
 
-                            ui.label(egui::RichText::new("Upload").strong().small().color(app.theme.accent_color()));
+                            ui.label(egui::RichText::new(lr_title).strong().small().color(app.theme.accent_color()));
 
                             if l_count == 0 {
                                 ui.label(egui::RichText::new("0 selected").small().color(app.theme.text_muted_color()));
@@ -184,7 +191,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             .min_size(egui::vec2(72.0, 26.0))
                             .fill(if l_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
 
-                            if ui.add_enabled(l_count > 0, up_btn).on_hover_text("Upload selected files from Left to Right").clicked() {
+                            if ui.add_enabled(l_count > 0, up_btn).on_hover_text("Transfer selected files from Left to Right").clicked() {
                                 app.sftp.upload_selected();
                             }
 
@@ -192,7 +199,14 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             ui.separator();
                             ui.add_space(14.0);
 
-                            // DOWNLOAD ACTION (Right -> Left)
+                            // Right -> Left Action
+                            let rl_title = match (&app.sftp.right_pane.target, &app.sftp.left_pane.target) {
+                                (SftpTarget::RemoteSsh(_), SftpTarget::Local) => "Download",
+                                (SftpTarget::Local, SftpTarget::RemoteSsh(_)) => "Upload",
+                                (SftpTarget::RemoteSsh(_), SftpTarget::RemoteSsh(_)) => "VPS -> VPS",
+                                _ => "Copy",
+                            };
+
                             let r_count = app.sftp.right_pane.selected_items.len();
                             let r_size: u64 = app.sftp.right_pane.entries
                                 .iter()
@@ -200,7 +214,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                                 .map(|e| e.size)
                                 .sum();
 
-                            ui.label(egui::RichText::new("Download").strong().small().color(app.theme.accent_color()));
+                            ui.label(egui::RichText::new(rl_title).strong().small().color(app.theme.accent_color()));
 
                             if r_count == 0 {
                                 ui.label(egui::RichText::new("0 selected").small().color(app.theme.text_muted_color()));
@@ -228,7 +242,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             .min_size(egui::vec2(72.0, 26.0))
                             .fill(if r_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
 
-                            if ui.add_enabled(r_count > 0, dl_btn).on_hover_text("Download selected files from Right to Left").clicked() {
+                            if ui.add_enabled(r_count > 0, dl_btn).on_hover_text("Transfer selected files from Right to Left").clicked() {
                                 app.sftp.download_selected();
                             }
                         });

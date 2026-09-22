@@ -352,11 +352,18 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                     },
                 );
 
-                // MIDDLE ACTION BAR (Vertical transfer buttons between Top & Bottom)
+                // MIDDLE ACTION BAR (Context-aware Top <-> Bottom transfer)
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), bridge_h),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
+                        let top_to_bot_title = match (&app.sftp.left_pane.target, &app.sftp.right_pane.target) {
+                            (SftpTarget::Local, SftpTarget::RemoteSsh(_)) => "[v] Upload",
+                            (SftpTarget::RemoteSsh(_), SftpTarget::Local) => "[v] Download",
+                            (SftpTarget::RemoteSsh(_), SftpTarget::RemoteSsh(_)) => "[v] VPS -> VPS",
+                            _ => "[v] Copy",
+                        };
+
                         let l_count = app.sftp.left_pane.selected_items.len();
                         let l_size: u64 = app.sftp.left_pane.entries
                             .iter()
@@ -375,7 +382,7 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                         };
 
                         let up_btn = egui::Button::new(
-                            egui::RichText::new(format!("[v] Upload {}", l_summary))
+                            egui::RichText::new(format!("{} {}", top_to_bot_title, l_summary))
                                 .strong()
                                 .small()
                                 .color(if l_count > 0 { app.theme.text_primary_color() } else { app.theme.text_muted_color() })
@@ -383,11 +390,18 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                         .min_size(egui::vec2(130.0, 24.0))
                         .fill(if l_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
 
-                        if ui.add_enabled(l_count > 0, up_btn).on_hover_text("Upload selected files from Top to Bottom").clicked() {
+                        if ui.add_enabled(l_count > 0, up_btn).on_hover_text("Transfer selected files from Top to Bottom").clicked() {
                             app.sftp.upload_selected();
                         }
 
                         ui.add_space(8.0);
+
+                        let bot_to_top_title = match (&app.sftp.right_pane.target, &app.sftp.left_pane.target) {
+                            (SftpTarget::RemoteSsh(_), SftpTarget::Local) => "[^] Download",
+                            (SftpTarget::Local, SftpTarget::RemoteSsh(_)) => "[^] Upload",
+                            (SftpTarget::RemoteSsh(_), SftpTarget::RemoteSsh(_)) => "[^] VPS -> VPS",
+                            _ => "[^] Copy",
+                        };
 
                         let r_count = app.sftp.right_pane.selected_items.len();
                         let r_size: u64 = app.sftp.right_pane.entries
@@ -407,7 +421,7 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                         };
 
                         let dl_btn = egui::Button::new(
-                            egui::RichText::new(format!("[^] Download {}", r_summary))
+                            egui::RichText::new(format!("{} {}", bot_to_top_title, r_summary))
                                 .strong()
                                 .small()
                                 .color(if r_count > 0 { app.theme.text_primary_color() } else { app.theme.text_muted_color() })
@@ -415,7 +429,7 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                         .min_size(egui::vec2(130.0, 24.0))
                         .fill(if r_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
 
-                        if ui.add_enabled(r_count > 0, dl_btn).on_hover_text("Download selected files from Bottom to Top").clicked() {
+                        if ui.add_enabled(r_count > 0, dl_btn).on_hover_text("Transfer selected files from Bottom to Top").clicked() {
                             app.sftp.download_selected();
                         }
                     },

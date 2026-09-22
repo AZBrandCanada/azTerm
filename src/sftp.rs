@@ -6,7 +6,7 @@ use eframe::egui;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -44,6 +44,7 @@ pub enum SortDirection {
 pub enum TransferDirection {
     Upload,
     Download,
+    RemoteToRemote,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,40 @@ pub struct PaneBrowser {
     pub scroll_to_selected: bool,
 
     rx: Option<Receiver<Result<Vec<FileEntry>, String>>>,
+}
+
+pub fn build_ssh_base_command(profile: &SshProfile) -> Command {
+    let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-o").arg("BatchMode=yes");
+    cmd.arg("-o").arg("ConnectTimeout=10");
+    cmd.arg("-o").arg("ServerAliveInterval=10");
+    cmd.arg("-o").arg("ServerAliveCountMax=2");
+
+    if socket_path.exists() {
+        cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
+    }
+    cmd.arg("-p").arg(profile.port.to_string());
+
+    match &profile.auth_type {
+        SshAuthType::KeyFile(path) => {
+            if !path.trim().is_empty() {
+                SshStore::ensure_secure_permissions(path);
+                cmd.arg("-i").arg(path.trim());
+            }
+        }
+        SshAuthType::PastedKey { key_id } => {
+            let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
+            if key_path.exists() {
+                SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
+                cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+            }
+        }
+        SshAuthType::PasswordOrAgent => {}
+    }
+
+    cmd.arg(format!("{}@{}", profile.username, profile.host));
+    cmd
 }
 
 pub fn fit_filename_to_width(
@@ -303,43 +338,7 @@ impl PaneBrowser {
     }
 
     fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), String> {
-        let socket_dir = SshStore::sockets_dir();
-        let socket_path = socket_dir.join(format!("{}.sock", profile.id));
-
-        let mut cmd = Command::new("ssh");
-        cmd.arg("-o").arg("BatchMode=yes");
-        cmd.arg("-o").arg("ConnectTimeout=5");
-        cmd.arg("-o").arg("ServerAliveInterval=10");
-        cmd.arg("-o").arg("ServerAliveCountMax=2");
-
-        if socket_path.exists() {
-            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-        } else {
-            cmd.arg("-o").arg("ControlMaster=auto");
-            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-            cmd.arg("-o").arg("ControlPersist=5m");
-        }
-
-        cmd.arg("-p").arg(profile.port.to_string());
-
-        match &profile.auth_type {
-            SshAuthType::KeyFile(path) => {
-                if !path.trim().is_empty() {
-                    SshStore::ensure_secure_permissions(path);
-                    cmd.arg("-i").arg(path.trim());
-                }
-            }
-            SshAuthType::PastedKey { key_id } => {
-                let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                if key_path.exists() {
-                    SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
-                    cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
-                }
-            }
-            SshAuthType::PasswordOrAgent => {}
-        }
-
-        cmd.arg(format!("{}@{}", profile.username, profile.host));
+        let mut cmd = build_ssh_base_command(profile);
         cmd.arg(remote_cmd);
 
         let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
@@ -487,44 +486,9 @@ impl PaneBrowser {
     }
 
     fn fetch_remote_listing(profile: &SshProfile, dir_path: &str) -> Result<Vec<FileEntry>, String> {
-        let socket_dir = SshStore::sockets_dir();
-        let socket_path = socket_dir.join(format!("{}.sock", profile.id));
+        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+        let mut cmd = build_ssh_base_command(profile);
 
-        let mut cmd = Command::new("ssh");
-
-        cmd.arg("-o").arg("BatchMode=yes");
-        cmd.arg("-o").arg("ConnectTimeout=5");
-        cmd.arg("-o").arg("ServerAliveInterval=10");
-        cmd.arg("-o").arg("ServerAliveCountMax=2");
-
-        if socket_path.exists() {
-            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-        } else {
-            cmd.arg("-o").arg("ControlMaster=auto");
-            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-            cmd.arg("-o").arg("ControlPersist=5m");
-        }
-
-        cmd.arg("-p").arg(profile.port.to_string());
-
-        match &profile.auth_type {
-            SshAuthType::KeyFile(path) => {
-                if !path.trim().is_empty() {
-                    SshStore::ensure_secure_permissions(path);
-                    cmd.arg("-i").arg(path.trim());
-                }
-            }
-            SshAuthType::PastedKey { key_id } => {
-                let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                if key_path.exists() {
-                    SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
-                    cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
-                }
-            }
-            SshAuthType::PasswordOrAgent => {}
-        }
-
-        cmd.arg(format!("{}@{}", profile.username, profile.host));
         let target_dir = if dir_path.trim().is_empty() || dir_path == "." { "$PWD" } else { dir_path };
         cmd.arg(format!("ls -la \"{}\"", target_dir));
 
@@ -881,7 +845,6 @@ impl PaneBrowser {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // 1. Rightmost header: Permissions
                         let perm_indicator = if self.sort_column == SortColumn::Permissions {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -895,7 +858,6 @@ impl PaneBrowser {
                             self.toggle_sort(SortColumn::Permissions);
                         }
 
-                        // 2. Middle header: Size
                         let size_indicator = if self.sort_column == SortColumn::Size {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -1114,87 +1076,283 @@ impl SftpManager {
     }
 
     pub fn upload_selected(&mut self) {
-        let selected = self.left_pane.selected_items.clone();
+        self.execute_transfer(true);
+    }
+
+    pub fn download_selected(&mut self) {
+        self.execute_transfer(false);
+    }
+
+    pub fn execute_transfer(&mut self, left_to_right: bool) {
+        let (src_pane, dest_pane) = if left_to_right {
+            (&self.left_pane, &self.right_pane)
+        } else {
+            (&self.right_pane, &self.left_pane)
+        };
+
+        let selected = src_pane.selected_items.clone();
         if selected.is_empty() {
             return;
         }
 
-        if let (SftpTarget::Local, SftpTarget::RemoteSsh(profile)) = (
-            &self.left_pane.target,
-            &self.right_pane.target,
-        ) {
-            let total_batch = selected.len();
-            let remote_dir = self.right_pane.current_path.clone();
-            let profile_clone = profile.clone();
-            let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
-            let left_path = self.left_pane.current_path.clone();
+        let src_target = src_pane.target.clone();
+        let dest_target = dest_pane.target.clone();
+        let src_dir = src_pane.current_path.clone();
+        let dest_dir = dest_pane.current_path.clone();
+        let src_entries = src_pane.entries.clone();
+        let total_batch = selected.len();
 
-            let mut batch_records = Vec::new();
-            for (idx, name) in selected.into_iter().enumerate() {
-                let local_path = PathBuf::from(&left_path).join(&name);
-                let file_size = fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
-                let dest_display = format!("{}@{}:{}/", profile.username, profile.host, remote_dir);
+        let transfer_direction = match (&src_target, &dest_target) {
+            (SftpTarget::Local, SftpTarget::RemoteSsh(_)) => TransferDirection::Upload,
+            (SftpTarget::RemoteSsh(_), SftpTarget::Local) => TransferDirection::Download,
+            (SftpTarget::RemoteSsh(_), SftpTarget::RemoteSsh(_)) => TransferDirection::RemoteToRemote,
+            (SftpTarget::Local, SftpTarget::Local) => TransferDirection::Upload,
+        };
 
-                let transfer_id = self.next_transfer_id;
-                self.next_transfer_id += 1;
-
-                batch_records.push((
-                    FileTransferRecord {
-                        id: transfer_id,
-                        file_name: name,
-                        direction: TransferDirection::Upload,
-                        from: local_path.to_string_lossy().to_string(),
-                        to: dest_display,
-                        file_size,
-                        transferred_bytes: 0,
-                        speed_bytes_sec: 0,
-                        batch_index: idx + 1,
-                        batch_total: total_batch,
-                        status: TransferStatus::Queued,
-                        time: chrono::Local::now(),
-                    },
-                    local_path,
-                ));
-            }
-
-            let transfers_clone = self.transfers.clone();
-
-            if let Ok(mut list) = transfers_clone.lock() {
-                for (rec, _) in &batch_records {
-                    list.insert(0, rec.clone());
+        let mut batch_records = Vec::new();
+        for (idx, name) in selected.into_iter().enumerate() {
+            let entry_opt = src_entries.iter().find(|e| e.name == name);
+            let is_dir = entry_opt.map(|e| e.is_dir).unwrap_or(false);
+            let file_size = match &src_target {
+                SftpTarget::Local => {
+                    let local_path = PathBuf::from(&src_dir).join(&name);
+                    fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0)
                 }
-            }
+                SftpTarget::RemoteSsh(_) => entry_opt.map(|e| e.size).unwrap_or(0),
+            };
 
-            self.transfer_status = Some((
-                format!("[1/{}] Queuing upload batch...", total_batch),
-                false,
-                Instant::now(),
+            let from_str = match &src_target {
+                SftpTarget::Local => PathBuf::from(&src_dir).join(&name).to_string_lossy().to_string(),
+                SftpTarget::RemoteSsh(p) => format!("{}@{}:{}/{}", p.username, p.host, src_dir.trim_end_matches('/'), name),
+            };
+
+            let to_str = match &dest_target {
+                SftpTarget::Local => PathBuf::from(&dest_dir).join(&name).to_string_lossy().to_string(),
+                SftpTarget::RemoteSsh(p) => format!("{}@{}:{}/{}", p.username, p.host, dest_dir.trim_end_matches('/'), name),
+            };
+
+            let transfer_id = self.next_transfer_id;
+            self.next_transfer_id += 1;
+
+            batch_records.push((
+                FileTransferRecord {
+                    id: transfer_id,
+                    file_name: name,
+                    direction: transfer_direction.clone(),
+                    from: from_str,
+                    to: to_str,
+                    file_size,
+                    transferred_bytes: 0,
+                    speed_bytes_sec: 0,
+                    batch_index: idx + 1,
+                    batch_total: total_batch,
+                    status: TransferStatus::Queued,
+                    time: chrono::Local::now(),
+                },
+                is_dir,
             ));
+        }
 
-            thread::spawn(move || {
-                for (rec, local_path) in batch_records {
-                    let tid = rec.id;
-                    let file_size = rec.file_size;
-                    let start_t = Instant::now();
+        let transfers_clone = self.transfers.clone();
 
-                    if let Ok(mut list) = transfers_clone.lock() {
-                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                            item.status = TransferStatus::InProgress;
+        if let Ok(mut list) = transfers_clone.lock() {
+            for (rec, _) in &batch_records {
+                list.insert(0, rec.clone());
+            }
+        }
+
+        let batch_label = match transfer_direction {
+            TransferDirection::Upload => "upload",
+            TransferDirection::Download => "download",
+            TransferDirection::RemoteToRemote => "VPS-to-VPS",
+        };
+
+        self.transfer_status = Some((
+            format!("[1/{}] Queuing {} batch...", total_batch, batch_label),
+            false,
+            Instant::now(),
+        ));
+
+        thread::spawn(move || {
+            for (rec, is_dir) in batch_records {
+                let tid = rec.id;
+                let file_size = rec.file_size;
+                let file_name = rec.file_name.clone();
+                let start_t = Instant::now();
+
+                if let Ok(mut list) = transfers_clone.lock() {
+                    if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                        item.status = TransferStatus::InProgress;
+                    }
+                }
+
+                let mut transfer_success = false;
+                let mut error_msg = String::new();
+                let mut total_transferred = 0u64;
+
+                match (&src_target, &dest_target) {
+                    // REMOTE TO REMOTE: In-Memory Piped Proxy Streaming
+                    (SftpTarget::RemoteSsh(src_prof), SftpTarget::RemoteSsh(dest_prof)) => {
+                        let remote_src_path = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
+                        let remote_dest_path = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
+                        let safe_src = remote_src_path.replace('\'', "'\\''");
+                        let safe_dest = remote_dest_path.replace('\'', "'\\''");
+                        let safe_dest_dir = dest_dir.trim_end_matches('/').replace('\'', "'\\''");
+
+                        let mut src_cmd = build_ssh_base_command(src_prof);
+                        let mut dest_cmd = build_ssh_base_command(dest_prof);
+
+                        if !is_dir {
+                            src_cmd.arg(format!("cat '{}'", safe_src));
+                            dest_cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_dest));
+                        } else {
+                            let safe_parent_src = src_dir.trim_end_matches('/').replace('\'', "'\\''");
+                            let safe_folder_name = file_name.replace('\'', "'\\''");
+                            src_cmd.arg(format!("tar -czf - -C '{}' '{}'", safe_parent_src, safe_folder_name));
+                            dest_cmd.arg(format!("mkdir -p '{}' && tar -xzf - -C '{}'", safe_dest_dir, safe_dest_dir));
+                        }
+
+                        src_cmd.stdout(Stdio::piped());
+                        src_cmd.stderr(Stdio::piped());
+                        dest_cmd.stdin(Stdio::piped());
+                        dest_cmd.stderr(Stdio::piped());
+                        dest_cmd.stdout(Stdio::null());
+
+                        match (src_cmd.spawn(), dest_cmd.spawn()) {
+                            (Ok(mut src_child), Ok(mut dest_child)) => {
+                                if let (Some(mut src_out), Some(mut dest_in)) = (src_child.stdout.take(), dest_child.stdin.take()) {
+                                    let mut buf = [0u8; 65536];
+                                    let mut last_sample_t = Instant::now();
+                                    let mut last_sample_bytes = 0u64;
+                                    let mut stream_err = false;
+                                    let mut filtered_speed = 0.0f64;
+
+                                    while let Ok(n) = src_out.read(&mut buf) {
+                                        if n == 0 { break; }
+                                        if dest_in.write_all(&buf[..n]).is_err() {
+                                            stream_err = true;
+                                            break;
+                                        }
+                                        let _ = dest_in.flush();
+                                        total_transferred += n as u64;
+
+                                        let now = Instant::now();
+                                        let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
+                                        if sample_dt >= 0.10 {
+                                            let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                            filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
+
+                                            last_sample_t = now;
+                                            last_sample_bytes = total_transferred;
+
+                                            if let Ok(mut list) = transfers_clone.lock() {
+                                                if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                                    item.transferred_bytes = total_transferred;
+                                                    item.speed_bytes_sec = filtered_speed.round() as u64;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    drop(dest_in);
+                                    drop(src_out);
+
+                                    let src_wait = src_child.wait_with_output();
+                                    let dest_wait = dest_child.wait_with_output();
+
+                                    let src_ok = src_wait.as_ref().map(|o| o.status.success()).unwrap_or(false);
+                                    let dest_ok = dest_wait.as_ref().map(|o| o.status.success()).unwrap_or(false);
+
+                                    if !stream_err && src_ok && dest_ok {
+                                        transfer_success = true;
+                                    } else {
+                                        if !src_ok {
+                                            if let Ok(ref o) = src_wait {
+                                                error_msg.push_str(&String::from_utf8_lossy(&o.stderr));
+                                            }
+                                        }
+                                        if !dest_ok {
+                                            if let Ok(ref o) = dest_wait {
+                                                error_msg.push_str(&String::from_utf8_lossy(&o.stderr));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                error_msg = "Failed to spawn SSH streaming processes".to_string();
+                            }
                         }
                     }
 
-                    let remote_file = if remote_dir.ends_with('/') {
-                        format!("{}{}", remote_dir, rec.file_name)
-                    } else {
-                        format!("{}/{}", remote_dir, rec.file_name)
-                    };
+                    // LOCAL TO REMOTE: Upload
+                    (SftpTarget::Local, SftpTarget::RemoteSsh(profile)) => {
+                        let local_path = PathBuf::from(&src_dir).join(&file_name);
+                        let remote_file = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
+                        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
 
-                    let mut upload_success = false;
-                    let mut error_msg = String::new();
+                        if local_path.is_file() {
+                            if let Ok(mut file) = fs::File::open(&local_path) {
+                                let mut cmd = build_ssh_base_command(profile);
+                                let safe_remote = remote_file.replace('\'', "'\\''");
+                                let safe_dest_dir = dest_dir.trim_end_matches('/').replace('\'', "'\\''");
+                                cmd.arg(format!("mkdir -p '{}' && cat > '{}'", safe_dest_dir, safe_remote));
+                                cmd.stdin(Stdio::piped());
+                                cmd.stdout(Stdio::null());
+                                cmd.stderr(Stdio::piped());
 
-                    if local_path.is_file() {
-                        if let Ok(mut file) = fs::File::open(&local_path) {
-                            let mut cmd = Command::new("ssh");
+                                if let Ok(mut child) = cmd.spawn() {
+                                    if let Some(mut stdin) = child.stdin.take() {
+                                        let mut buf = [0u8; 32768];
+                                        let mut last_sample_t = Instant::now();
+                                        let mut last_sample_bytes = 0u64;
+                                        let mut stream_err = false;
+                                        let mut filtered_speed = 0.0f64;
+
+                                        while let Ok(n) = file.read(&mut buf) {
+                                            if n == 0 { break; }
+                                            if stdin.write_all(&buf[..n]).is_err() {
+                                                stream_err = true;
+                                                break;
+                                            }
+                                            let _ = stdin.flush();
+                                            total_transferred += n as u64;
+
+                                            let now = Instant::now();
+                                            let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
+                                            if sample_dt >= 0.10 {
+                                                let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                                filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
+
+                                                last_sample_t = now;
+                                                last_sample_bytes = total_transferred;
+
+                                                if let Ok(mut list) = transfers_clone.lock() {
+                                                    if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                                        item.transferred_bytes = total_transferred;
+                                                        item.speed_bytes_sec = filtered_speed.round() as u64;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        drop(stdin);
+                                        if !stream_err {
+                                            if let Ok(out) = child.wait_with_output() {
+                                                if out.status.success() {
+                                                    transfer_success = true;
+                                                } else {
+                                                    error_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !transfer_success && error_msg.is_empty() {
+                            let mut cmd = Command::new("scp");
                             cmd.arg("-o").arg("BatchMode=yes");
                             cmd.arg("-o").arg("ConnectTimeout=10");
                             cmd.arg("-o").arg("ServerAliveInterval=10");
@@ -1203,9 +1361,10 @@ impl SftpManager {
                             if socket_path.exists() {
                                 cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
                             }
-                            cmd.arg("-p").arg(profile_clone.port.to_string());
+                            cmd.arg("-P").arg(profile.port.to_string());
+                            cmd.arg("-r");
 
-                            match &profile_clone.auth_type {
+                            match &profile.auth_type {
                                 SshAuthType::KeyFile(path) => {
                                     if !path.trim().is_empty() {
                                         cmd.arg("-i").arg(path.trim());
@@ -1220,73 +1379,58 @@ impl SftpManager {
                                 SshAuthType::PasswordOrAgent => {}
                             }
 
-                            cmd.arg(format!("{}@{}", profile_clone.username, profile_clone.host));
-                            let safe_remote = remote_file.replace('\'', "'\\''");
-                            cmd.arg(format!("cat > '{}'", safe_remote));
+                            cmd.arg(local_path.to_string_lossy().to_string());
+                            cmd.arg(format!("{}@{}:{}/", profile.username, profile.host, dest_dir.trim_end_matches('/')));
 
-                            cmd.stdin(std::process::Stdio::piped());
-                            cmd.stdout(std::process::Stdio::null());
-                            cmd.stderr(std::process::Stdio::piped());
-
-                            if let Ok(mut child) = cmd.spawn() {
-                                if let Some(mut stdin) = child.stdin.take() {
-                                    let mut buf = [0u8; 32768];
-                                    let mut total_sent = 0u64;
-                                    let mut last_sample_t = Instant::now();
-                                    let mut last_sample_bytes = 0u64;
-                                    let mut stream_err = false;
-                                    let mut filtered_speed = 0.0f64;
-
-                                    while let Ok(n) = file.read(&mut buf) {
-                                        if n == 0 {
-                                            break;
-                                        }
-                                        if stdin.write_all(&buf[..n]).is_err() {
-                                            stream_err = true;
-                                            break;
-                                        }
-                                        let _ = stdin.flush();
-                                        total_sent += n as u64;
-
-                                        let now = Instant::now();
-                                        let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
-                                        if sample_dt >= 0.10 {
-                                            let raw_speed = (total_sent.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
-                                            filtered_speed = if filtered_speed == 0.0 {
-                                                raw_speed
-                                            } else {
-                                                0.35 * raw_speed + 0.65 * filtered_speed
-                                            };
-
-                                            last_sample_t = now;
-                                            last_sample_bytes = total_sent;
-
-                                            if let Ok(mut list) = transfers_clone.lock() {
-                                                if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                                                    item.transferred_bytes = total_sent;
-                                                    item.speed_bytes_sec = filtered_speed.round() as u64;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    drop(stdin);
-
-                                    if !stream_err {
-                                        if let Ok(out) = child.wait_with_output() {
-                                            if out.status.success() {
-                                                upload_success = true;
-                                            } else {
-                                                error_msg = String::from_utf8_lossy(&out.stderr).to_string();
-                                            }
-                                        }
-                                    }
+                            if let Ok(out) = cmd.output() {
+                                if out.status.success() {
+                                    transfer_success = true;
+                                    total_transferred = file_size;
+                                } else {
+                                    error_msg = String::from_utf8_lossy(&out.stderr).to_string();
                                 }
                             }
                         }
                     }
 
-                    if !upload_success {
+                    // REMOTE TO LOCAL: Download
+                    (SftpTarget::RemoteSsh(profile), SftpTarget::Local) => {
+                        let local_dir = dest_dir.clone();
+                        let remote_file = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
+                        let dest_local_file = PathBuf::from(&local_dir).join(&file_name);
+                        let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
+
+                        let is_active = Arc::new(AtomicBool::new(true));
+                        let is_active_clone = is_active.clone();
+                        let dest_check = dest_local_file.clone();
+                        let transfers_clone_monitor = transfers_clone.clone();
+
+                        let monitor_handle = thread::spawn(move || {
+                            let mut last_bytes = 0u64;
+                            let mut last_time = Instant::now();
+
+                            while is_active_clone.load(Ordering::Relaxed) {
+                                thread::sleep(Duration::from_millis(250));
+                                let current_bytes = fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0);
+                                let now = Instant::now();
+                                let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
+                                let delta_bytes = current_bytes.saturating_sub(last_bytes);
+                                let speed = (delta_bytes as f64 / dt).round() as u64;
+
+                                last_bytes = current_bytes;
+                                last_time = now;
+
+                                if let Ok(mut list) = transfers_clone_monitor.lock() {
+                                    if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                        item.transferred_bytes = current_bytes;
+                                        if speed > 0 {
+                                            item.speed_bytes_sec = speed;
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
                         let mut cmd = Command::new("scp");
                         cmd.arg("-o").arg("BatchMode=yes");
                         cmd.arg("-o").arg("ConnectTimeout=10");
@@ -1296,10 +1440,10 @@ impl SftpManager {
                         if socket_path.exists() {
                             cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
                         }
-                        cmd.arg("-P").arg(profile_clone.port.to_string());
+                        cmd.arg("-P").arg(profile.port.to_string());
                         cmd.arg("-r");
 
-                        match &profile_clone.auth_type {
+                        match &profile.auth_type {
                             SshAuthType::KeyFile(path) => {
                                 if !path.trim().is_empty() {
                                     cmd.arg("-i").arg(path.trim());
@@ -1314,216 +1458,64 @@ impl SftpManager {
                             SshAuthType::PasswordOrAgent => {}
                         }
 
-                        cmd.arg(local_path.to_string_lossy().to_string());
-                        let remote_dest = if remote_dir.ends_with('/') {
-                            format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_dir)
-                        } else {
-                            format!("{}@{}:{}/", profile_clone.username, profile_clone.host, remote_dir)
-                        };
-                        cmd.arg(remote_dest);
+                        cmd.arg(format!("{}@{}:{}", profile.username, profile.host, remote_file));
+                        cmd.arg(&local_dir);
 
-                        if let Ok(out) = cmd.output() {
+                        let output_res = cmd.output();
+                        is_active.store(false, Ordering::Relaxed);
+                        let _ = monitor_handle.join();
+
+                        let final_bytes = fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(file_size);
+                        total_transferred = final_bytes;
+
+                        if let Ok(ref out) = output_res {
                             if out.status.success() {
-                                upload_success = true;
+                                transfer_success = true;
                             } else {
                                 error_msg = String::from_utf8_lossy(&out.stderr).to_string();
                             }
+                        } else {
+                            error_msg = "Failed to execute SCP".to_string();
                         }
                     }
 
-                    let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
-                    let avg_speed = (file_size as f64 / elapsed_sec).round() as u64;
-
-                    if let Ok(mut list) = transfers_clone.lock() {
-                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                            item.speed_bytes_sec = avg_speed;
-                            item.transferred_bytes = file_size;
-                            if upload_success {
-                                item.status = TransferStatus::Completed;
+                    // LOCAL TO LOCAL: File System Copy
+                    (SftpTarget::Local, SftpTarget::Local) => {
+                        let local_src = PathBuf::from(&src_dir).join(&file_name);
+                        let local_dest = PathBuf::from(&dest_dir).join(&file_name);
+                        if local_src.is_file() {
+                            if let Ok(b) = fs::copy(&local_src, &local_dest) {
+                                transfer_success = true;
+                                total_transferred = b;
                             } else {
-                                if socket_path.exists() {
-                                    SshStore::cleanup_stale_socket(&profile_clone.id);
-                                }
-                                item.status = TransferStatus::Failed(error_msg);
+                                error_msg = "Local file copy failed".to_string();
                             }
+                        } else {
+                            error_msg = "Directory copy within local system not implemented".to_string();
                         }
                     }
                 }
-            });
-        }
-    }
 
-    pub fn download_selected(&mut self) {
-        let selected = self.right_pane.selected_items.clone();
-        if selected.is_empty() {
-            return;
-        }
+                let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
+                let final_transferred = if total_transferred > 0 { total_transferred } else { file_size };
+                let avg_speed = (final_transferred as f64 / elapsed_sec).round() as u64;
 
-        if let (SftpTarget::RemoteSsh(profile), SftpTarget::Local) = (
-            &self.right_pane.target,
-            &self.left_pane.target,
-        ) {
-            let total_batch = selected.len();
-            let local_dir = self.left_pane.current_path.clone();
-            let profile_clone = profile.clone();
-            let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
-            let right_path = self.right_pane.current_path.clone();
-
-            let mut batch_records = Vec::new();
-            for (idx, name) in selected.into_iter().enumerate() {
-                let remote_file = if right_path.ends_with('/') {
-                    format!("{}{}", right_path, name)
-                } else {
-                    format!("{}/{}", right_path, name)
-                };
-                let file_size = self.right_pane.entries.iter()
-                    .find(|e| e.name == name)
-                    .map(|e| e.size)
-                    .unwrap_or(0);
-
-                let source_display = format!("{}@{}:{}", profile.username, profile.host, remote_file);
-                let transfer_id = self.next_transfer_id;
-                self.next_transfer_id += 1;
-
-                batch_records.push((
-                    FileTransferRecord {
-                        id: transfer_id,
-                        file_name: name,
-                        direction: TransferDirection::Download,
-                        from: source_display,
-                        to: local_dir.clone(),
-                        file_size,
-                        transferred_bytes: 0,
-                        speed_bytes_sec: 0,
-                        batch_index: idx + 1,
-                        batch_total: total_batch,
-                        status: TransferStatus::Queued,
-                        time: chrono::Local::now(),
-                    },
-                    remote_file,
-                ));
-            }
-
-            let transfers_clone = self.transfers.clone();
-
-            if let Ok(mut list) = transfers_clone.lock() {
-                for (rec, _) in &batch_records {
-                    list.insert(0, rec.clone());
+                if let Ok(mut list) = transfers_clone.lock() {
+                    if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                        item.speed_bytes_sec = avg_speed;
+                        item.transferred_bytes = final_transferred;
+                        if transfer_success {
+                            item.status = TransferStatus::Completed;
+                        } else {
+                            if error_msg.trim().is_empty() {
+                                error_msg = "Transfer failed".to_string();
+                            }
+                            item.status = TransferStatus::Failed(error_msg);
+                        }
+                    }
                 }
             }
-
-            self.transfer_status = Some((
-                format!("[1/{}] Queuing download batch...", total_batch),
-                false,
-                Instant::now(),
-            ));
-
-            thread::spawn(move || {
-                for (rec, remote_file) in batch_records {
-                    let tid = rec.id;
-                    let file_size = rec.file_size;
-                    let start_t = Instant::now();
-
-                    if let Ok(mut list) = transfers_clone.lock() {
-                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                            item.status = TransferStatus::InProgress;
-                        }
-                    }
-
-                    let dest_local_file = PathBuf::from(&local_dir).join(&rec.file_name);
-                    let is_active = Arc::new(AtomicBool::new(true));
-                    let is_active_clone = is_active.clone();
-                    let dest_check = dest_local_file.clone();
-                    let transfers_clone_monitor = transfers_clone.clone();
-
-                    let monitor_handle = thread::spawn(move || {
-                        let mut last_bytes = 0u64;
-                        let mut last_time = Instant::now();
-
-                        while is_active_clone.load(Ordering::Relaxed) {
-                            thread::sleep(std::time::Duration::from_millis(250));
-                            let current_bytes = fs::metadata(&dest_check).map(|m| m.len()).unwrap_or(0);
-                            let now = Instant::now();
-                            let dt = now.duration_since(last_time).as_secs_f64().max(0.001);
-                            let delta_bytes = current_bytes.saturating_sub(last_bytes);
-                            let speed = (delta_bytes as f64 / dt).round() as u64;
-
-                            last_bytes = current_bytes;
-                            last_time = now;
-
-                            if let Ok(mut list) = transfers_clone_monitor.lock() {
-                                if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                                    item.transferred_bytes = current_bytes;
-                                    if speed > 0 {
-                                        item.speed_bytes_sec = speed;
-                                    }
-                                }
-                            }
-                        }
-                    });
-
-                    let mut cmd = Command::new("scp");
-                    cmd.arg("-o").arg("BatchMode=yes");
-                    cmd.arg("-o").arg("ConnectTimeout=10");
-                    cmd.arg("-o").arg("ServerAliveInterval=10");
-                    cmd.arg("-o").arg("ServerAliveCountMax=2");
-
-                    if socket_path.exists() {
-                        cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-                    }
-                    cmd.arg("-P").arg(profile_clone.port.to_string());
-                    cmd.arg("-r");
-
-                    match &profile_clone.auth_type {
-                        SshAuthType::KeyFile(path) => {
-                            if !path.trim().is_empty() {
-                                SshStore::ensure_secure_permissions(path);
-                                cmd.arg("-i").arg(path.trim());
-                            }
-                        }
-                        SshAuthType::PastedKey { key_id } => {
-                            let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
-                            if key_path.exists() {
-                                SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
-                                cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
-                            }
-                        }
-                        SshAuthType::PasswordOrAgent => {}
-                    }
-
-                    cmd.arg(format!("{}@{}:{}", profile_clone.username, profile_clone.host, remote_file));
-                    cmd.arg(&local_dir);
-
-                    let output_res = cmd.output();
-                    is_active.store(false, Ordering::Relaxed);
-                    let _ = monitor_handle.join();
-
-                    let final_bytes = fs::metadata(&dest_local_file).map(|m| m.len()).unwrap_or(file_size);
-                    let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
-                    let avg_speed = (final_bytes as f64 / elapsed_sec).round() as u64;
-
-                    if let Ok(mut list) = transfers_clone.lock() {
-                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
-                            item.speed_bytes_sec = avg_speed;
-                            item.transferred_bytes = final_bytes;
-                            if let Ok(ref out) = output_res {
-                                if out.status.success() {
-                                    item.status = TransferStatus::Completed;
-                                } else {
-                                    let err = String::from_utf8_lossy(&out.stderr).to_string();
-                                    if socket_path.exists() {
-                                        SshStore::cleanup_stale_socket(&profile_clone.id);
-                                    }
-                                    item.status = TransferStatus::Failed(err);
-                                }
-                            } else {
-                                item.status = TransferStatus::Failed("Failed to execute SCP".to_string());
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        });
     }
 
     pub fn poll_transfers(&mut self, ctx: &egui::Context) {
@@ -1553,6 +1545,7 @@ impl SftpManager {
                 let dir_label = match in_progress.direction {
                     TransferDirection::Upload => "Uploading",
                     TransferDirection::Download => "Downloading",
+                    TransferDirection::RemoteToRemote => "Streaming VPS->VPS",
                 };
 
                 let progress_label = format!(
@@ -1660,6 +1653,7 @@ impl SftpManager {
                                         let (dir_label, dir_color) = match t.direction {
                                             TransferDirection::Upload => ("[Upload]", theme.success_color()),
                                             TransferDirection::Download => ("[Download]", theme.accent_color()),
+                                            TransferDirection::RemoteToRemote => ("[VPS -> VPS]", theme.accent_hover_color()),
                                         };
 
                                         ui.label(egui::RichText::new(dir_label).strong().color(dir_color));
