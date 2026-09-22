@@ -110,6 +110,22 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                             app.sftp.left_pane.refresh();
                         }
+                        if ui.small_button("+ Folder").on_hover_text("Create new directory").clicked() {
+                            app.sftp.left_pane.show_create_dir_modal = true;
+                            app.sftp.left_pane.new_dir_name = "new_folder".to_string();
+                        }
+
+                        if !app.sftp.left_pane.selected_items.is_empty() {
+                            let del_label = if app.sftp.left_pane.selected_items.len() > 1 {
+                                format!("Delete ({})", app.sftp.left_pane.selected_items.len())
+                            } else {
+                                "Delete".to_string()
+                            };
+                            if ui.small_button(egui::RichText::new(del_label).color(app.theme.danger_color())).on_hover_text("Delete selected item(s)").clicked() {
+                                app.sftp.left_pane.items_to_delete = app.sftp.left_pane.selected_items.clone();
+                                app.sftp.left_pane.show_delete_confirm_modal = true;
+                            }
+                        }
 
                         let path_w = ui.available_width().max(40.0);
                         if ui.add(
@@ -180,6 +196,22 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         }
                         if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                             app.sftp.right_pane.refresh();
+                        }
+                        if ui.small_button("+ Folder").on_hover_text("Create new directory").clicked() {
+                            app.sftp.right_pane.show_create_dir_modal = true;
+                            app.sftp.right_pane.new_dir_name = "new_folder".to_string();
+                        }
+
+                        if !app.sftp.right_pane.selected_items.is_empty() {
+                            let del_label = if app.sftp.right_pane.selected_items.len() > 1 {
+                                format!("Delete ({})", app.sftp.right_pane.selected_items.len())
+                            } else {
+                                "Delete".to_string()
+                            };
+                            if ui.small_button(egui::RichText::new(del_label).color(app.theme.danger_color())).on_hover_text("Delete selected item(s)").clicked() {
+                                app.sftp.right_pane.items_to_delete = app.sftp.right_pane.selected_items.clone();
+                                app.sftp.right_pane.show_delete_confirm_modal = true;
+                            }
                         }
 
                         let path_w = ui.available_width().max(40.0);

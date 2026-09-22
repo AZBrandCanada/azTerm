@@ -27,6 +27,19 @@ pub struct FileEntry {
     pub permissions: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    Name,
+    Size,
+    Permissions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransferDirection {
     Upload,
@@ -66,6 +79,19 @@ pub struct PaneBrowser {
     pub is_loading: bool,
     pub error_message: Option<String>,
     pub last_socket_state: bool,
+
+    pub sort_column: SortColumn,
+    pub sort_direction: SortDirection,
+
+    pub show_create_dir_modal: bool,
+    pub new_dir_name: String,
+    pub show_delete_confirm_modal: bool,
+    pub items_to_delete: Vec<String>,
+
+    pub last_search_char: Option<char>,
+    pub last_search_match_idx: usize,
+    pub scroll_to_selected: bool,
+
     rx: Option<Receiver<Result<Vec<FileEntry>, String>>>,
 }
 
@@ -92,6 +118,19 @@ impl PaneBrowser {
             is_loading: false,
             error_message: None,
             last_socket_state: false,
+
+            sort_column: SortColumn::Name,
+            sort_direction: SortDirection::Ascending,
+
+            show_create_dir_modal: false,
+            new_dir_name: "new_folder".to_string(),
+            show_delete_confirm_modal: false,
+            items_to_delete: Vec::new(),
+
+            last_search_char: None,
+            last_search_match_idx: 0,
+            scroll_to_selected: false,
+
             rx: None,
         };
         pane.refresh();
@@ -172,6 +211,172 @@ impl PaneBrowser {
         }
     }
 
+    pub fn apply_sorting(&mut self) {
+        let col = self.sort_column;
+        let dir = self.sort_direction;
+
+        self.entries.sort_by(|a, b| {
+            if a.is_dir != b.is_dir {
+                return b.is_dir.cmp(&a.is_dir);
+            }
+
+            let ord = match col {
+                SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                SortColumn::Size => a.size.cmp(&b.size).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                SortColumn::Permissions => a.permissions.cmp(&b.permissions).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            };
+
+            match dir {
+                SortDirection::Ascending => ord,
+                SortDirection::Descending => ord.reverse(),
+            }
+        });
+    }
+
+    pub fn toggle_sort(&mut self, col: SortColumn) {
+        if self.sort_column == col {
+            self.sort_direction = match self.sort_direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            };
+        } else {
+            self.sort_column = col;
+            self.sort_direction = SortDirection::Ascending;
+        }
+        self.apply_sorting();
+    }
+
+    fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), String> {
+        let socket_dir = SshStore::sockets_dir();
+        let socket_path = socket_dir.join(format!("{}.sock", profile.id));
+
+        let mut cmd = Command::new("ssh");
+        cmd.arg("-o").arg("BatchMode=yes");
+        cmd.arg("-o").arg("ConnectTimeout=5");
+        cmd.arg("-o").arg("ServerAliveInterval=10");
+        cmd.arg("-o").arg("ServerAliveCountMax=2");
+
+        if socket_path.exists() {
+            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
+        } else {
+            cmd.arg("-o").arg("ControlMaster=auto");
+            cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
+            cmd.arg("-o").arg("ControlPersist=5m");
+        }
+
+        cmd.arg("-p").arg(profile.port.to_string());
+
+        match &profile.auth_type {
+            SshAuthType::KeyFile(path) => {
+                if !path.trim().is_empty() {
+                    SshStore::ensure_secure_permissions(path);
+                    cmd.arg("-i").arg(path.trim());
+                }
+            }
+            SshAuthType::PastedKey { key_id } => {
+                let key_path = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                if key_path.exists() {
+                    SshStore::ensure_secure_permissions(&key_path.to_string_lossy());
+                    cmd.arg("-i").arg(key_path.to_string_lossy().to_string());
+                }
+            }
+            SshAuthType::PasswordOrAgent => {}
+        }
+
+        cmd.arg(format!("{}@{}", profile.username, profile.host));
+        cmd.arg(remote_cmd);
+
+        let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub fn create_directory(&mut self, dir_name: String) {
+        let clean_name = dir_name.trim().to_string();
+        if clean_name.is_empty() {
+            return;
+        }
+
+        match &self.target {
+            SftpTarget::Local => {
+                let target_path = PathBuf::from(&self.current_path).join(&clean_name);
+                if let Err(e) = fs::create_dir_all(&target_path) {
+                    self.error_message = Some(format!("Failed to create folder: {}", e));
+                }
+                self.refresh();
+            }
+            SftpTarget::RemoteSsh(profile) => {
+                let target_dir = if self.current_path.ends_with('/') {
+                    format!("{}{}", self.current_path, clean_name)
+                } else {
+                    format!("{}/{}", self.current_path, clean_name)
+                };
+                let profile_clone = profile.clone();
+                let escaped = target_dir.replace('\'', "'\\''");
+                let remote_cmd = format!("mkdir -p '{}'", escaped);
+
+                self.is_loading = true;
+                let (tx, rx): (Sender<Result<Vec<FileEntry>, String>>, Receiver<Result<Vec<FileEntry>, String>>) = channel();
+                self.rx = Some(rx);
+                let path_clone = self.current_path.clone();
+
+                thread::spawn(move || {
+                    let _ = Self::run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
+                    let _ = tx.send(res);
+                });
+            }
+        }
+    }
+
+    pub fn delete_items(&mut self, items: Vec<String>) {
+        if items.is_empty() {
+            return;
+        }
+
+        match &self.target {
+            SftpTarget::Local => {
+                let current_dir = self.current_path.clone();
+                for name in &items {
+                    let p = PathBuf::from(&current_dir).join(name);
+                    if p.is_dir() {
+                        let _ = fs::remove_dir_all(&p);
+                    } else {
+                        let _ = fs::remove_file(&p);
+                    }
+                }
+                self.refresh();
+            }
+            SftpTarget::RemoteSsh(profile) => {
+                let current_dir = self.current_path.clone();
+                let profile_clone = profile.clone();
+
+                self.is_loading = true;
+                let (tx, rx): (Sender<Result<Vec<FileEntry>, String>>, Receiver<Result<Vec<FileEntry>, String>>) = channel();
+                self.rx = Some(rx);
+                let path_clone = self.current_path.clone();
+
+                thread::spawn(move || {
+                    for name in items {
+                        let full_path = if current_dir.ends_with('/') {
+                            format!("{}{}", current_dir, name)
+                        } else {
+                            format!("{}/{}", current_dir, name)
+                        };
+                        let escaped = full_path.replace('\'', "'\\''");
+                        let remote_cmd = format!("rm -rf '{}'", escaped);
+                        let _ = Self::run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    }
+                    let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
+                    let _ = tx.send(res);
+                });
+            }
+        }
+    }
+
     pub fn refresh(&mut self) {
         if self.is_loading {
             return;
@@ -213,7 +418,6 @@ impl PaneBrowser {
                 });
             }
         }
-        list.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         Ok(list)
     }
 
@@ -294,7 +498,6 @@ impl PaneBrowser {
                 });
             }
         }
-        list.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         Ok(list)
     }
 
@@ -317,6 +520,7 @@ impl PaneBrowser {
                 match res {
                     Ok(entries) => {
                         self.entries = entries;
+                        self.apply_sorting();
                         self.error_message = None;
                     }
                     Err(err) => {
@@ -371,11 +575,169 @@ impl PaneBrowser {
         }
     }
 
+    pub fn render_modals(&mut self, ctx: &egui::Context, theme: &ThemeConfig) {
+        if self.show_create_dir_modal {
+            let mut close_modal = false;
+            let mut create_dir_target: Option<String> = None;
+
+            egui::Window::new(format!("New Directory - {}", self.id))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(320.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("Enter folder name:").strong());
+                        ui.add_space(4.0);
+                        let resp = ui.text_edit_singleline(&mut self.new_dir_name);
+                        if !resp.has_focus() {
+                            resp.request_focus();
+                        }
+
+                        let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Create").clicked() || enter {
+                                let name = self.new_dir_name.trim().to_string();
+                                if !name.is_empty() {
+                                    create_dir_target = Some(name);
+                                }
+                                close_modal = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_modal = true;
+                            }
+                        });
+                    });
+                });
+
+            if let Some(name) = create_dir_target {
+                self.create_directory(name);
+                self.new_dir_name = "new_folder".to_string();
+            }
+            if close_modal {
+                self.show_create_dir_modal = false;
+            }
+        }
+
+        if self.show_delete_confirm_modal {
+            let mut close_modal = false;
+            let mut execute_delete = false;
+
+            egui::Window::new(format!("Confirm Deletion - {}", self.id))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(380.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Are you sure you want to permanently delete {} selected item(s)?",
+                                self.items_to_delete.len()
+                            ))
+                            .strong()
+                            .color(theme.danger_color()),
+                        );
+                        ui.add_space(6.0);
+
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                for item in &self.items_to_delete {
+                                    ui.label(egui::RichText::new(format!("- {}", item)).monospace().small());
+                                }
+                            });
+
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("This action cannot be undone.").small().color(theme.text_muted_color()));
+                        ui.add_space(10.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("Delete Permanently").strong().color(theme.danger_color())).clicked() {
+                                execute_delete = true;
+                                close_modal = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_modal = true;
+                            }
+                        });
+                    });
+                });
+
+            if execute_delete {
+                let items = self.items_to_delete.clone();
+                self.delete_items(items);
+                self.selected_items.clear();
+            }
+            if close_modal {
+                self.show_delete_confirm_modal = false;
+                self.items_to_delete.clear();
+            }
+        }
+    }
+
     pub fn render_file_list(&mut self, ui: &mut egui::Ui, theme: &ThemeConfig) -> Option<(SshProfile, String)> {
         self.poll();
+        self.render_modals(ui.ctx(), theme);
 
         let mut auth_request = None;
         let pane_id = self.id.clone();
+
+        // Keyboard navigation and quick search
+        let is_typing_in_input = ui.memory(|m| m.focused().is_some());
+        let mut pressed_char: Option<char> = None;
+        let mut delete_pressed = false;
+
+        if !is_typing_in_input {
+            ui.input(|i| {
+                if i.key_pressed(egui::Key::Delete) && !self.selected_items.is_empty() {
+                    delete_pressed = true;
+                }
+
+                if !i.modifiers.ctrl && !i.modifiers.alt && !i.modifiers.command {
+                    for event in &i.events {
+                        if let egui::Event::Text(t) = event {
+                            if let Some(c) = t.chars().next() {
+                                if c.is_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                                    pressed_char = Some(c.to_ascii_lowercase());
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        if delete_pressed {
+            self.items_to_delete = self.selected_items.clone();
+            self.show_delete_confirm_modal = true;
+        }
+
+        if let Some(c) = pressed_char {
+            let matching_indices: Vec<usize> = self.entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.name.to_lowercase().starts_with(c))
+                .map(|(idx, _)| idx)
+                .collect();
+
+            if !matching_indices.is_empty() {
+                let next_match_idx = if self.last_search_char == Some(c) {
+                    (self.last_search_match_idx + 1) % matching_indices.len()
+                } else {
+                    0
+                };
+
+                self.last_search_char = Some(c);
+                self.last_search_match_idx = next_match_idx;
+
+                let target_idx = matching_indices[next_match_idx];
+                self.selected_items = vec![self.entries[target_idx].name.clone()];
+                self.scroll_to_selected = true;
+            }
+        }
 
         ui.push_id(pane_id, |ui| {
             ui.vertical(|ui| {
@@ -425,22 +787,50 @@ impl PaneBrowser {
                     ui.add_space(2.0);
                 }
 
-                // Table Header Row
+                // Interactive sortable Table Header Row
                 ui.horizontal(|ui| {
-                    let right_space = 155.0_f32;
+                    let right_space = 165.0_f32;
                     let name_w = (ui.available_width() - right_space).max(60.0);
 
-                    ui.add_sized(egui::vec2(name_w, 18.0), egui::Label::new(
-                        egui::RichText::new("Name").strong().color(theme.text_muted_color())
-                    ));
+                    let name_indicator = if self.sort_column == SortColumn::Name {
+                        if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
+                    } else { "" };
+                    let name_btn = egui::Button::new(
+                        egui::RichText::new(format!("Name{}", name_indicator))
+                            .strong()
+                            .color(if self.sort_column == SortColumn::Name { theme.accent_color() } else { theme.text_muted_color() })
+                    ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(name_w, 18.0));
+
+                    if ui.add(name_btn).on_hover_text("Sort by name").clicked() {
+                        self.toggle_sort(SortColumn::Name);
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_sized(egui::vec2(65.0, 18.0), egui::Label::new(
-                            egui::RichText::new("Size").strong().color(theme.text_muted_color())
-                        ));
-                        ui.add_sized(egui::vec2(80.0, 18.0), egui::Label::new(
-                            egui::RichText::new("Permissions").strong().color(theme.text_muted_color())
-                        ));
+                        let perm_indicator = if self.sort_column == SortColumn::Permissions {
+                            if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
+                        } else { "" };
+                        let perm_btn = egui::Button::new(
+                            egui::RichText::new(format!("Permissions{}", perm_indicator))
+                                .strong()
+                                .color(if self.sort_column == SortColumn::Permissions { theme.accent_color() } else { theme.text_muted_color() })
+                        ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(80.0, 18.0));
+
+                        if ui.add(perm_btn).on_hover_text("Sort by permissions").clicked() {
+                            self.toggle_sort(SortColumn::Permissions);
+                        }
+
+                        let size_indicator = if self.sort_column == SortColumn::Size {
+                            if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
+                        } else { "" };
+                        let size_btn = egui::Button::new(
+                            egui::RichText::new(format!("Size{}", size_indicator))
+                                .strong()
+                                .color(if self.sort_column == SortColumn::Size { theme.accent_color() } else { theme.text_muted_color() })
+                        ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(70.0, 18.0));
+
+                        if ui.add(size_btn).on_hover_text("Sort by file size").clicked() {
+                            self.toggle_sort(SortColumn::Size);
+                        }
                     });
                 });
 
@@ -460,13 +850,17 @@ impl PaneBrowser {
                             let full_label = format!("{}{}", prefix, entry.name);
 
                             ui.horizontal(|ui| {
-                                let right_space = 155.0_f32;
+                                let right_space = 165.0_f32;
                                 let name_w = (ui.available_width() - right_space).max(60.0);
 
                                 let resp = ui.add_sized(
                                     egui::vec2(name_w, 19.0),
                                     egui::SelectableLabel::new(is_selected, &full_label),
                                 );
+
+                                if self.scroll_to_selected && is_selected {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                }
 
                                 if resp.clicked() {
                                     toggled_item = Some((entry.name.clone(), is_ctrl));
@@ -490,7 +884,7 @@ impl PaneBrowser {
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.add_sized(
-                                        egui::vec2(65.0, 19.0),
+                                        egui::vec2(70.0, 19.0),
                                         egui::Label::new(
                                             egui::RichText::new(if entry.is_dir { "-".to_string() } else { Self::format_size(entry.size) })
                                                 .small()
@@ -508,6 +902,8 @@ impl PaneBrowser {
                             });
                         }
                     });
+
+                self.scroll_to_selected = false;
 
                 if let Some((item, multi)) = toggled_item {
                     if multi {
@@ -542,6 +938,22 @@ impl PaneBrowser {
             }
             if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                 self.refresh();
+            }
+            if ui.small_button("+ Folder").on_hover_text("Create new directory").clicked() {
+                self.show_create_dir_modal = true;
+                self.new_dir_name = "new_folder".to_string();
+            }
+
+            if !self.selected_items.is_empty() {
+                let del_label = if self.selected_items.len() > 1 {
+                    format!("Delete ({})", self.selected_items.len())
+                } else {
+                    "Delete".to_string()
+                };
+                if ui.small_button(egui::RichText::new(del_label).color(theme.danger_color())).on_hover_text("Delete selected item(s)").clicked() {
+                    self.items_to_delete = self.selected_items.clone();
+                    self.show_delete_confirm_modal = true;
+                }
             }
 
             let path_w = ui.available_width().max(40.0);
@@ -666,7 +1078,6 @@ impl SftpManager {
                     let mut upload_success = false;
                     let mut error_msg = String::new();
 
-                    // If it is a regular file, stream via SSH stdin for exact byte tracking & live ETA
                     if local_path.is_file() {
                         if let Ok(mut file) = fs::File::open(&local_path) {
                             let mut cmd = Command::new("ssh");
@@ -753,7 +1164,6 @@ impl SftpManager {
                         }
                     }
 
-                    // Fallback to scp for directories or if stream failed
                     if !upload_success {
                         let mut cmd = Command::new("scp");
                         cmd.arg("-o").arg("BatchMode=yes");
