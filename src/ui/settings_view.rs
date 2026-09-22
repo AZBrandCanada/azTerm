@@ -369,10 +369,11 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                             changed |= setting_row_toggle(ui, "Open Default Tab on Startup", "Spawn a fresh local shell if no previous session was restored.", &mut app.settings.open_default_tab, &app.theme);
 
-                            if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub once daily.", &mut app.settings.check_updates, &app.theme) {
+                            if setting_row_toggle(ui, "Check for Updates on Startup", "Check for newer releases on GitHub.", &mut app.settings.check_updates, &app.theme) {
                                 changed = true;
                                 if !app.settings.check_updates {
                                     app.available_update = None;
+                                    app.settings.pending_update = None;
                                     app.show_update_modal = false;
                                 }
                             }

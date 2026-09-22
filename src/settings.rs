@@ -53,6 +53,9 @@ pub struct AppSettings {
 
     #[serde(default = "default_zoom_factor")]
     pub zoom_factor: f32,
+
+    #[serde(default)]
+    pub pending_update: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -89,13 +92,14 @@ impl Default for AppSettings {
             paste_on_right_click: true,
             copy_on_select: true,
             must_hold_ctrl_for_links: false,
-            sftp_path_sync: true, // Enabled by default
+            sftp_path_sync: true,
             show_sftp_split_view: false,
             show_command_suggestions: true,
             auto_reconnect_terminal: false,
             backspace_sequence: BackspaceSequence::Delete127,
             scrollback_lines: 10000,
             zoom_factor: 1.0,
+            pending_update: None,
         }
     }
 }

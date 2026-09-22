@@ -165,7 +165,7 @@ fn parse_cli_arguments() -> CliLaunchOptions {
     opts
 }
 
-fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
+pub fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
     let parse_v = |v: &str| -> Vec<u64> {
         v.trim_start_matches('v')
             .split('.')
@@ -175,6 +175,13 @@ fn is_newer_version(latest_tag: &str, current_ver: &str) -> bool {
     let l_parts = parse_v(latest_tag);
     let c_parts = parse_v(current_ver);
     l_parts > c_parts
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdateCheckResult {
+    NewVersion(String),
+    AlreadyUpToDate,
+    CheckFailed,
 }
 
 fn handle_window_resize_borders(ctx: &egui::Context, is_maximized: bool) {
@@ -278,7 +285,7 @@ pub struct AppState {
     pub toast_message: Option<(String, std::time::Instant)>,
 
     pub available_update: Option<String>,
-    pub update_rx: Option<Receiver<Option<String>>>,
+    pub update_rx: Option<Receiver<UpdateCheckResult>>,
     pub is_checking_update: bool,
     pub show_update_modal: bool,
     pub install_method: InstallMethod,
@@ -304,7 +311,7 @@ pub struct AppState {
 
 impl AppState {
     fn new(cc: &eframe::CreationContext<'_>, cli: CliLaunchOptions) -> Self {
-        let settings = AppSettings::load();
+        let mut settings = AppSettings::load();
         let ssh_store = SshStore::load();
         let install_method = InstallMethod::detect();
         let custom_themes = Database::load_custom_themes();
@@ -344,6 +351,21 @@ impl AppState {
         }
         cc.egui_ctx.set_fonts(fonts);
 
+        // Load cached pending update from SQLite database immediately
+        let current_version = env!("CARGO_PKG_VERSION");
+        let initial_available_update = if let Some(ref tag) = settings.pending_update {
+            if is_newer_version(tag, current_version) {
+                Some(tag.clone())
+            } else {
+                // User has already updated to this version or newer: clear database cache
+                settings.pending_update = None;
+                settings.save();
+                None
+            }
+        } else {
+            None
+        };
+
         let mut app = Self {
             settings,
             ssh_store,
@@ -369,7 +391,7 @@ impl AppState {
 
             toast_message: None,
 
-            available_update: None,
+            available_update: initial_available_update,
             update_rx: None,
             is_checking_update: false,
             show_update_modal: false,
@@ -394,7 +416,8 @@ impl AppState {
             ssh_auth_modal: None,
         };
 
-        app.trigger_update_check(false, cc.egui_ctx.clone());
+        // Schedule delayed boot check after ~30 seconds if not already cached
+        app.schedule_boot_update_check(cc.egui_ctx.clone());
 
         if let Some(dir) = cli.working_directory {
             app.spawn_local_terminal(cc.egui_ctx.clone(), Some(dir));
@@ -405,6 +428,83 @@ impl AppState {
         }
 
         app
+    }
+
+    pub fn perform_github_update_check(current_version: &str) -> UpdateCheckResult {
+        let output = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "--max-time", "10",
+                "-H", "User-Agent: AZTerm-App",
+                "https://api.github.com/repos/AZBrandCanada/azTerm/releases/latest",
+            ])
+            .output();
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                    if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                        if is_newer_version(tag, current_version) {
+                            return UpdateCheckResult::NewVersion(tag.to_string());
+                        } else {
+                            return UpdateCheckResult::AlreadyUpToDate;
+                        }
+                    }
+                }
+            }
+        }
+        UpdateCheckResult::CheckFailed
+    }
+
+    pub fn schedule_boot_update_check(&mut self, ctx: egui::Context) {
+        if !self.settings.check_updates {
+            return;
+        }
+
+        // If an update is already known and saved in local DB, no need to hammer the API immediately
+        if self.available_update.is_some() {
+            return;
+        }
+
+        let (tx, rx) = channel::<UpdateCheckResult>();
+        self.update_rx = Some(rx);
+
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+        thread::spawn(move || {
+            // Wait 30 seconds after app boots up before background check
+            thread::sleep(std::time::Duration::from_secs(10));
+
+            let res = Self::perform_github_update_check(&current_version);
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn trigger_update_check(&mut self, force: bool, ctx: egui::Context) {
+        if !self.settings.check_updates && !force {
+            return;
+        }
+
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if !force && self.settings.last_update_check_date == today && self.available_update.is_some() {
+            return;
+        }
+
+        self.settings.last_update_check_date = today;
+        self.settings.save();
+
+        self.is_checking_update = true;
+        let (tx, rx) = channel::<UpdateCheckResult>();
+        self.update_rx = Some(rx);
+
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+        thread::spawn(move || {
+            let res = Self::perform_github_update_check(&current_version);
+            let _ = tx.send(res);
+            ctx.request_repaint();
+        });
     }
 
     pub fn open_ssh_auth_modal(&mut self, profile: SshProfile, target_pane_id: String, ctx: egui::Context) {
@@ -484,53 +584,6 @@ impl AppState {
             show_plain: false,
             is_connected: false,
             target_pane_id,
-        });
-    }
-
-    pub fn trigger_update_check(&mut self, force: bool, ctx: egui::Context) {
-        if !self.settings.check_updates && !force {
-            return;
-        }
-
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        if !force && self.settings.last_update_check_date == today {
-            return;
-        }
-
-        self.settings.last_update_check_date = today;
-        self.settings.save();
-
-        self.is_checking_update = true;
-        let (tx, rx) = channel::<Option<String>>();
-        self.update_rx = Some(rx);
-
-        let current_version = env!("CARGO_PKG_VERSION").to_string();
-
-        thread::spawn(move || {
-            let output = std::process::Command::new("curl")
-                .args([
-                    "-s",
-                    "-H", "User-Agent: AZTerm-App",
-                    "https://api.github.com/repos/AZBrandCanada/azTerm/releases/latest",
-                ])
-                .output();
-
-            let mut update_found: Option<String> = None;
-
-            if let Ok(out) = output {
-                if out.status.success() {
-                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
-                            if is_newer_version(tag, &current_version) {
-                                update_found = Some(tag.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = tx.send(update_found);
-            ctx.request_repaint();
         });
     }
 
@@ -897,16 +950,17 @@ impl AppState {
     }
 
     fn sync_sftp_with_active_session(&mut self) {
-        // Follow the active terminal's directory ONLY when a genuine new directory change occurs in the shell
         if self.settings.sftp_path_sync {
             if let Some(session) = self.sessions.iter_mut().find(|s| s.id == self.active_session_id) {
                 match &session.session_type {
                     SessionType::Local { .. } => {
-                        if let Some(detected_dir) = session.detect_current_working_dir(None) {
-                            if session.last_detected_dir.as_deref() != Some(&detected_dir) {
-                                session.last_detected_dir = Some(detected_dir.clone());
-                                if self.sftp.left_pane.target == SftpTarget::Local && !self.sftp.left_pane.is_loading {
-                                    self.sftp.left_pane.set_path(detected_dir);
+                        if self.sftp.left_pane.target == SftpTarget::Local {
+                            if let Some(detected_dir) = session.detect_current_working_dir(None) {
+                                if session.last_detected_dir.as_deref() != Some(&detected_dir) {
+                                    session.last_detected_dir = Some(detected_dir.clone());
+                                    if !self.sftp.left_pane.is_loading {
+                                        self.sftp.left_pane.set_path(detected_dir);
+                                    }
                                 }
                             }
                         }
@@ -918,7 +972,6 @@ impl AppState {
                             if let Some(detected_dir) = session.detect_current_working_dir(Some(&prof.username)) {
                                 if session.last_detected_dir.as_deref() != Some(&detected_dir) {
                                     session.last_detected_dir = Some(detected_dir.clone());
-                                    // Strictly isolate to the pane connected to THIS EXACT remote host
                                     if let SftpTarget::RemoteSsh(ref current_sftp_prof) = self.sftp.right_pane.target {
                                         if current_sftp_prof.id == prof.id && !self.sftp.right_pane.is_loading {
                                             self.sftp.right_pane.set_path(detected_dir);
@@ -932,7 +985,6 @@ impl AppState {
             }
         }
 
-        // Only switch the remote SFTP profile target when the user switches terminal tabs
         if self.active_view != ActiveView::Terminal {
             return;
         }
@@ -1166,8 +1218,18 @@ impl eframe::App for AppState {
         if let Some(ref rx) = self.update_rx {
             if let Ok(res) = rx.try_recv() {
                 self.is_checking_update = false;
-                if self.settings.check_updates {
-                    self.available_update = res;
+                match res {
+                    UpdateCheckResult::NewVersion(tag) => {
+                        self.available_update = Some(tag.clone());
+                        self.settings.pending_update = Some(tag);
+                        self.settings.save();
+                    }
+                    UpdateCheckResult::AlreadyUpToDate => {
+                        self.available_update = None;
+                        self.settings.pending_update = None;
+                        self.settings.save();
+                    }
+                    UpdateCheckResult::CheckFailed => {}
                 }
             }
         }
