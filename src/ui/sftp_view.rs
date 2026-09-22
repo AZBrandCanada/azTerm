@@ -128,10 +128,12 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         }
 
                         let path_w = ui.available_width().max(40.0);
-                        if ui.add(
+                        let p_edit = ui.add(
                             egui::TextEdit::singleline(&mut app.sftp.left_pane.current_path)
                                 .desired_width(path_w)
-                        ).lost_focus() {
+                        );
+                        // Only trigger path navigation when Enter is explicitly pressed
+                        if p_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             app.sftp.left_pane.set_path(app.sftp.left_pane.current_path.clone());
                         }
                     });
@@ -215,10 +217,12 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         }
 
                         let path_w = ui.available_width().max(40.0);
-                        if ui.add(
+                        let p_edit = ui.add(
                             egui::TextEdit::singleline(&mut app.sftp.right_pane.current_path)
                                 .desired_width(path_w)
-                        ).lost_focus() {
+                        );
+                        // Only trigger path navigation when Enter is explicitly pressed
+                        if p_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             app.sftp.right_pane.set_path(app.sftp.right_pane.current_path.clone());
                         }
                     });

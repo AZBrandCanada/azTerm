@@ -235,7 +235,7 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
 }
 
 pub fn render_status_bar(app: &mut AppState, ctx: &egui::Context) {
-    app.sftp.poll_transfers();
+    app.sftp.poll_transfers(ctx);
 
     egui::TopBottomPanel::bottom("bottom_status_bar")
         .frame(egui::Frame::none().fill(app.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 4.0)))

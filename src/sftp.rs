@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SftpTarget {
@@ -108,7 +108,6 @@ pub fn fit_filename_to_width(
         return full;
     }
 
-    // Preserve the file extension (e.g. .tar.gz, .zip, .mp4) during truncation
     let (stem, ext) = if let Some(dot_pos) = name.rfind('.') {
         if dot_pos > 0 && dot_pos < name.len() - 1 && (name.len() - dot_pos) <= 10 {
             (&name[..dot_pos], &name[dot_pos..])
@@ -211,9 +210,13 @@ impl PaneBrowser {
     }
 
     pub fn set_path(&mut self, path: String) {
-        self.current_path = path.clone();
+        let clean = path.trim().to_string();
+        if clean.is_empty() {
+            return;
+        }
+        self.current_path = clean.clone();
         if let SftpTarget::RemoteSsh(ref p) = self.target {
-            Database::save_ssh_last_path(&p.id, &path);
+            Database::save_ssh_last_path(&p.id, &clean);
         }
         self.selected_items.clear();
         self.refresh();
@@ -245,16 +248,17 @@ impl PaneBrowser {
                 }
             }
             SftpTarget::RemoteSsh(_) => {
-                if self.current_path == "." || self.current_path == "/" {
+                let clean = self.current_path.trim_end_matches('/');
+                if clean.is_empty() || clean == "." || clean == "/" {
                     self.set_path("/".to_string());
-                } else if let Some(idx) = self.current_path.rfind('/') {
+                } else if let Some(idx) = clean.rfind('/') {
                     if idx == 0 {
                         self.set_path("/".to_string());
                     } else {
-                        self.set_path(self.current_path[..idx].to_string());
+                        self.set_path(clean[..idx].to_string());
                     }
                 } else {
-                    self.set_path("..".to_string());
+                    self.set_path("/".to_string());
                 }
             }
         }
@@ -386,9 +390,12 @@ impl PaneBrowser {
             return;
         }
 
+        // Lock onto the exact current directory so deleting never switches folders
+        let active_dir = self.current_path.clone();
+
         match &self.target {
             SftpTarget::Local => {
-                let current_dir = self.current_path.clone();
+                let current_dir = active_dir.clone();
                 for name in &items {
                     let p = PathBuf::from(&current_dir).join(name);
                     if p.is_dir() {
@@ -397,16 +404,21 @@ impl PaneBrowser {
                         let _ = fs::remove_file(&p);
                     }
                 }
+                self.current_path = active_dir;
                 self.refresh();
             }
             SftpTarget::RemoteSsh(profile) => {
-                let current_dir = self.current_path.clone();
+                let current_dir = active_dir.clone();
                 let profile_clone = profile.clone();
+
+                if let SftpTarget::RemoteSsh(ref p) = self.target {
+                    Database::save_ssh_last_path(&p.id, &active_dir);
+                }
 
                 self.is_loading = true;
                 let (tx, rx): (Sender<Result<Vec<FileEntry>, String>>, Receiver<Result<Vec<FileEntry>, String>>) = channel();
                 self.rx = Some(rx);
-                let path_clone = self.current_path.clone();
+                let path_clone = active_dir.clone();
 
                 thread::spawn(move || {
                     for name in items {
@@ -422,6 +434,8 @@ impl PaneBrowser {
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
                 });
+
+                self.current_path = active_dir;
             }
         }
     }
@@ -865,6 +879,7 @@ impl PaneBrowser {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 1. Rightmost header: Permissions
                         let perm_indicator = if self.sort_column == SortColumn::Permissions {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -878,6 +893,7 @@ impl PaneBrowser {
                             self.toggle_sort(SortColumn::Permissions);
                         }
 
+                        // 2. Middle header: Size
                         let size_indicator = if self.sort_column == SortColumn::Size {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -929,7 +945,6 @@ impl PaneBrowser {
                                         theme.text_primary_color()
                                     };
 
-                                    // Single-line extension-preserving truncation (no multi-line overlap)
                                     let display_text = fit_filename_to_width(
                                         ui.painter(),
                                         &entry.name,
@@ -1053,10 +1068,11 @@ impl PaneBrowser {
             }
 
             let path_w = ui.available_width().max(40.0);
-            if ui.add(
+            let p_edit = ui.add(
                 egui::TextEdit::singleline(&mut self.current_path)
                     .desired_width(path_w)
-            ).lost_focus() {
+            );
+            if p_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.set_path(self.current_path.clone());
             }
         });
@@ -1212,11 +1228,12 @@ impl SftpManager {
 
                             if let Ok(mut child) = cmd.spawn() {
                                 if let Some(mut stdin) = child.stdin.take() {
-                                    let mut buf = [0u8; 65536];
+                                    let mut buf = [0u8; 32768];
                                     let mut total_sent = 0u64;
                                     let mut last_sample_t = Instant::now();
                                     let mut last_sample_bytes = 0u64;
                                     let mut stream_err = false;
+                                    let mut filtered_speed = 0.0f64;
 
                                     while let Ok(n) = file.read(&mut buf) {
                                         if n == 0 {
@@ -1226,19 +1243,26 @@ impl SftpManager {
                                             stream_err = true;
                                             break;
                                         }
+                                        let _ = stdin.flush();
                                         total_sent += n as u64;
 
                                         let now = Instant::now();
                                         let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
-                                        if sample_dt >= 0.25 {
-                                            let speed = ((total_sent.saturating_sub(last_sample_bytes)) as f64 / sample_dt).round() as u64;
+                                        if sample_dt >= 0.10 {
+                                            let raw_speed = (total_sent.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                            filtered_speed = if filtered_speed == 0.0 {
+                                                raw_speed
+                                            } else {
+                                                0.35 * raw_speed + 0.65 * filtered_speed
+                                            };
+
                                             last_sample_t = now;
                                             last_sample_bytes = total_sent;
 
                                             if let Ok(mut list) = transfers_clone.lock() {
                                                 if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
                                                     item.transferred_bytes = total_sent;
-                                                    item.speed_bytes_sec = speed;
+                                                    item.speed_bytes_sec = filtered_speed.round() as u64;
                                                 }
                                             }
                                         }
@@ -1476,35 +1500,22 @@ impl SftpManager {
                     let elapsed_sec = start_t.elapsed().as_secs_f64().max(0.001);
                     let avg_speed = (final_bytes as f64 / elapsed_sec).round() as u64;
 
-                    let success = match output_res {
-                        Ok(ref out) if out.status.success() => true,
-                        _ => false,
-                    };
-
-                    let error_msg = match output_res {
-                        Ok(out) if !out.status.success() => {
-                            let err = String::from_utf8_lossy(&out.stderr).to_string();
-                            if socket_path.exists() {
-                                SshStore::cleanup_stale_socket(&profile_clone.id);
-                            }
-                            if err.trim().is_empty() {
-                                format!("SCP exited with code {:?}", out.status.code())
-                            } else {
-                                err
-                            }
-                        }
-                        Err(e) => format!("Failed to run scp: {}", e),
-                        _ => String::new(),
-                    };
-
                     if let Ok(mut list) = transfers_clone.lock() {
                         if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
                             item.speed_bytes_sec = avg_speed;
                             item.transferred_bytes = final_bytes;
-                            if success {
-                                item.status = TransferStatus::Completed;
+                            if let Ok(ref out) = output_res {
+                                if out.status.success() {
+                                    item.status = TransferStatus::Completed;
+                                } else {
+                                    let err = String::from_utf8_lossy(&out.stderr).to_string();
+                                    if socket_path.exists() {
+                                        SshStore::cleanup_stale_socket(&profile_clone.id);
+                                    }
+                                    item.status = TransferStatus::Failed(err);
+                                }
                             } else {
-                                item.status = TransferStatus::Failed(error_msg);
+                                item.status = TransferStatus::Failed("Failed to execute SCP".to_string());
                             }
                         }
                     }
@@ -1513,9 +1524,12 @@ impl SftpManager {
         }
     }
 
-    pub fn poll_transfers(&mut self) {
+    pub fn poll_transfers(&mut self, ctx: &egui::Context) {
         if let Ok(list) = self.transfers.lock() {
             if let Some(in_progress) = list.iter().find(|t| t.status == TransferStatus::InProgress) {
+                // Request active UI repainting during transfers for smooth 20+ FPS updates
+                ctx.request_repaint_after(Duration::from_millis(50));
+
                 let speed_str = PaneBrowser::format_speed(in_progress.speed_bytes_sec);
                 let remaining_bytes = in_progress.file_size.saturating_sub(in_progress.transferred_bytes);
                 let remaining_str = PaneBrowser::format_size(remaining_bytes);
