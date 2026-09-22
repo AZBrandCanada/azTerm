@@ -787,25 +787,41 @@ impl PaneBrowser {
                     ui.add_space(2.0);
                 }
 
-                // Interactive sortable Table Header Row
-                ui.horizontal(|ui| {
-                    let right_space = 165.0_f32;
-                    let name_w = (ui.available_width() - right_space).max(60.0);
+                // Explicit column widths matching between Header and Rows:
+                // Left: Name (expands)
+                // Middle: Size (75px)
+                // Right: Permissions (85px)
+                let size_col_w = 75.0_f32;
+                let perm_col_w = 85.0_f32;
+                let right_reserved = size_col_w + perm_col_w + 14.0_f32;
+                let name_col_w = (ui.available_width() - right_reserved).max(60.0);
 
+                // Sortable Table Header Row
+                ui.horizontal(|ui| {
                     let name_indicator = if self.sort_column == SortColumn::Name {
                         if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                     } else { "" };
-                    let name_btn = egui::Button::new(
-                        egui::RichText::new(format!("Name{}", name_indicator))
-                            .strong()
-                            .color(if self.sort_column == SortColumn::Name { theme.accent_color() } else { theme.text_muted_color() })
-                    ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(name_w, 18.0));
 
-                    if ui.add(name_btn).on_hover_text("Sort by name").clicked() {
+                    let (name_hdr_rect, name_hdr_resp) = ui.allocate_exact_size(egui::vec2(name_col_w, 18.0), egui::Sense::click());
+                    if ui.is_rect_visible(name_hdr_rect) {
+                        if name_hdr_resp.hovered() {
+                            ui.painter().rect_filled(name_hdr_rect, 2.0, theme.bg_card_color().linear_multiply(0.4));
+                        }
+                        let name_col = if self.sort_column == SortColumn::Name { theme.accent_color() } else { theme.text_muted_color() };
+                        ui.painter().text(
+                            egui::pos2(name_hdr_rect.min.x + 4.0, name_hdr_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            format!("Name{}", name_indicator),
+                            egui::FontId::proportional(12.0),
+                            name_col,
+                        );
+                    }
+                    if name_hdr_resp.clicked() {
                         self.toggle_sort(SortColumn::Name);
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 1. Rightmost header: Permissions
                         let perm_indicator = if self.sort_column == SortColumn::Permissions {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -813,12 +829,13 @@ impl PaneBrowser {
                             egui::RichText::new(format!("Permissions{}", perm_indicator))
                                 .strong()
                                 .color(if self.sort_column == SortColumn::Permissions { theme.accent_color() } else { theme.text_muted_color() })
-                        ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(80.0, 18.0));
+                        ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(perm_col_w, 18.0));
 
                         if ui.add(perm_btn).on_hover_text("Sort by permissions").clicked() {
                             self.toggle_sort(SortColumn::Permissions);
                         }
 
+                        // 2. Middle header: Size
                         let size_indicator = if self.sort_column == SortColumn::Size {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -826,7 +843,7 @@ impl PaneBrowser {
                             egui::RichText::new(format!("Size{}", size_indicator))
                                 .strong()
                                 .color(if self.sort_column == SortColumn::Size { theme.accent_color() } else { theme.text_muted_color() })
-                        ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(70.0, 18.0));
+                        ).fill(egui::Color32::TRANSPARENT).min_size(egui::vec2(size_col_w, 18.0));
 
                         if ui.add(size_btn).on_hover_text("Sort by file size").clicked() {
                             self.toggle_sort(SortColumn::Size);
@@ -850,23 +867,47 @@ impl PaneBrowser {
                             let full_label = format!("{}{}", prefix, entry.name);
 
                             ui.horizontal(|ui| {
-                                let right_space = 165.0_f32;
-                                let name_w = (ui.available_width() - right_space).max(60.0);
+                                // Left column: Left-aligned File Name
+                                let (row_rect, row_resp) = ui.allocate_exact_size(egui::vec2(name_col_w, 19.0), egui::Sense::click());
+                                if ui.is_rect_visible(row_rect) {
+                                    let bg = if is_selected {
+                                        theme.bg_card_color()
+                                    } else if row_resp.hovered() {
+                                        theme.bg_card_color().linear_multiply(0.4)
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    };
 
-                                let resp = ui.add_sized(
-                                    egui::vec2(name_w, 19.0),
-                                    egui::SelectableLabel::new(is_selected, &full_label),
-                                );
+                                    if bg != egui::Color32::TRANSPARENT {
+                                        ui.painter().rect_filled(row_rect, 2.0, bg);
+                                    }
 
-                                if self.scroll_to_selected && is_selected {
-                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                    let text_color = if is_selected {
+                                        theme.accent_color()
+                                    } else {
+                                        theme.text_primary_color()
+                                    };
+
+                                    let font_id = egui::TextStyle::Body.resolve(ui.style());
+                                    let galley = ui.painter().layout(
+                                        full_label.clone(),
+                                        font_id,
+                                        text_color,
+                                        name_col_w - 6.0,
+                                    );
+                                    let text_pos = egui::pos2(row_rect.min.x + 4.0, row_rect.center().y - galley.size().y / 2.0);
+                                    ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
                                 }
 
-                                if resp.clicked() {
+                                if self.scroll_to_selected && is_selected {
+                                    row_resp.scroll_to_me(Some(egui::Align::Center));
+                                }
+
+                                if row_resp.clicked() {
                                     toggled_item = Some((entry.name.clone(), is_ctrl));
                                 }
 
-                                if resp.double_clicked() && entry.is_dir {
+                                if row_resp.double_clicked() && entry.is_dir {
                                     let next_path = match &self.target {
                                         SftpTarget::Local => {
                                             PathBuf::from(&self.current_path).join(&entry.name).to_string_lossy().to_string()
@@ -883,19 +924,21 @@ impl PaneBrowser {
                                 }
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // 1. Rightmost row cell: Permissions (matches rightmost header: Permissions)
                                     ui.add_sized(
-                                        egui::vec2(70.0, 19.0),
+                                        egui::vec2(perm_col_w, 19.0),
+                                        egui::Label::new(
+                                            egui::RichText::new(&entry.permissions).small().color(theme.text_muted_color())
+                                        ).truncate()
+                                    );
+
+                                    // 2. Middle row cell: Size (matches middle header: Size)
+                                    ui.add_sized(
+                                        egui::vec2(size_col_w, 19.0),
                                         egui::Label::new(
                                             egui::RichText::new(if entry.is_dir { "-".to_string() } else { Self::format_size(entry.size) })
                                                 .small()
                                                 .color(theme.text_muted_color())
-                                        ).truncate()
-                                    );
-
-                                    ui.add_sized(
-                                        egui::vec2(80.0, 19.0),
-                                        egui::Label::new(
-                                            egui::RichText::new(&entry.permissions).small().color(theme.text_muted_color())
                                         ).truncate()
                                     );
                                 });
