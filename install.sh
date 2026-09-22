@@ -38,14 +38,14 @@ if [ -d "$BUILD_DIR/.git" ]; then
 else
     echo "Cloning repository..."
     rm -rf "$BUILD_DIR"
-    git clone "$REPO_URL" "$BUILD_DIR"
+    git clone --depth 1 "$REPO_URL" "$BUILD_DIR"
     cd "$BUILD_DIR"
 fi
 
 if [ ! -f "$BUILD_DIR/Cargo.toml" ]; then
     echo "Refreshing build repository..."
     rm -rf "$BUILD_DIR"
-    git clone "$REPO_URL" "$BUILD_DIR"
+    git clone --depth 1 "$REPO_URL" "$BUILD_DIR"
     cd "$BUILD_DIR"
 fi
 
