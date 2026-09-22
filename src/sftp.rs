@@ -94,6 +94,10 @@ impl PaneBrowser {
         };
         self.selected_item = None;
         self.last_socket_state = false;
+        if let SftpTarget::RemoteSsh(ref p) = self.target {
+            let socket_path = SshStore::sockets_dir().join(format!("{}.sock", p.id));
+            self.last_socket_state = socket_path.exists();
+        }
         self.refresh();
     }
 
@@ -128,6 +132,11 @@ impl PaneBrowser {
     }
 
     pub fn refresh(&mut self) {
+        // Prevent concurrent thread piling when network is slow
+        if self.is_loading {
+            return;
+        }
+
         self.is_loading = true;
         self.error_message = None;
         let (tx, rx): (Sender<Result<Vec<FileEntry>, String>>, Receiver<Result<Vec<FileEntry>, String>>) = channel();
@@ -174,14 +183,18 @@ impl PaneBrowser {
 
         let mut cmd = Command::new("ssh");
 
+        // Fail-fast timeout parameters so remote listing never blocks
+        cmd.arg("-o").arg("BatchMode=yes");
+        cmd.arg("-o").arg("ConnectTimeout=5");
+        cmd.arg("-o").arg("ServerAliveInterval=10");
+        cmd.arg("-o").arg("ServerAliveCountMax=2");
+
         if socket_path.exists() {
             cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
         } else {
             cmd.arg("-o").arg("ControlMaster=auto");
             cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
-            cmd.arg("-o").arg("ControlPersist=10m");
-            cmd.arg("-o").arg("BatchMode=yes");
-            cmd.arg("-o").arg("ConnectTimeout=3");
+            cmd.arg("-o").arg("ControlPersist=5m");
         }
 
         cmd.arg("-p").arg(profile.port.to_string());
@@ -210,6 +223,10 @@ impl PaneBrowser {
         let output = cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            // Automatically clean up stale or hung sockets
+            if socket_path.exists() {
+                SshStore::cleanup_stale_socket(&profile.id);
+            }
             if !socket_path.exists() {
                 return Err("Authentication required".to_string());
             }
@@ -248,11 +265,12 @@ impl PaneBrowser {
             let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
             let is_connected = socket_path.exists();
 
-            if is_connected && (!self.last_socket_state || (self.entries.is_empty() && !self.is_loading)) {
-                self.last_socket_state = true;
-                self.refresh();
-            } else if !is_connected && self.last_socket_state {
-                self.last_socket_state = false;
+            // Refresh ONLY on connection edge transitions to prevent 60fps thread-fork loops
+            if is_connected != self.last_socket_state {
+                self.last_socket_state = is_connected;
+                if is_connected && !self.is_loading {
+                    self.refresh();
+                }
             }
         }
 
@@ -302,9 +320,9 @@ impl PaneBrowser {
                         ui.vertical_centered(|ui| {
                             ui.add_space(24.0);
                             ui.label(
-                                egui::RichText::new("🔒 SSH Session Not Connected")
+                                egui::RichText::new("[SSH Session Not Connected]")
                                     .strong()
-                                    .size(15.0)
+                                    .size(14.0)
                                     .color(theme.accent_color()),
                             );
                             ui.add_space(4.0);
@@ -314,7 +332,7 @@ impl PaneBrowser {
                                     .color(theme.text_muted_color()),
                             );
                             ui.add_space(12.0);
-                            if ui.button(egui::RichText::new("⚡ Connect & Authenticate").strong().size(13.0)).clicked() {
+                            if ui.button(egui::RichText::new("Connect & Authenticate").strong().size(13.0)).clicked() {
                                 auth_request = Some((profile.clone(), self.id.clone()));
                             }
                             ui.add_space(16.0);
@@ -360,7 +378,6 @@ impl PaneBrowser {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for entry in &self.entries {
-                            // Clean text prefix instead of broken emoji glyphs
                             let prefix = if entry.is_dir { "[DIR] " } else { "[FILE] " };
                             let is_selected = self.selected_item.as_deref() == Some(&entry.name);
                             let full_label = format!("{}{}", prefix, entry.name);
@@ -435,7 +452,7 @@ impl PaneBrowser {
             if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
                 self.go_up();
             }
-            if ui.small_button("⟳").on_hover_text("Reload directory").clicked() {
+            if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                 self.refresh();
             }
 
@@ -465,6 +482,7 @@ pub struct SftpManager {
     pub transfers: Arc<Mutex<Vec<FileTransferRecord>>>,
     pub show_transfer_history: bool,
     pub transfer_status: Option<(String, bool, std::time::Instant)>,
+    last_notified_transfer_id: Option<usize>,
     next_transfer_id: usize,
 }
 
@@ -476,6 +494,7 @@ impl SftpManager {
             transfers: Arc::new(Mutex::new(Vec::new())),
             show_transfer_history: false,
             transfer_status: None,
+            last_notified_transfer_id: None,
             next_transfer_id: 1,
         }
     }
@@ -512,7 +531,7 @@ impl SftpManager {
             }
 
             self.transfer_status = Some((
-                format!("⏳ Uploading {} ({})...", selected_name, PaneBrowser::format_size(file_size)),
+                format!("Uploading {} ({})...", selected_name, PaneBrowser::format_size(file_size)),
                 false,
                 std::time::Instant::now(),
             ));
@@ -521,6 +540,11 @@ impl SftpManager {
 
             thread::spawn(move || {
                 let mut cmd = Command::new("scp");
+                cmd.arg("-o").arg("BatchMode=yes");
+                cmd.arg("-o").arg("ConnectTimeout=10");
+                cmd.arg("-o").arg("ServerAliveInterval=10");
+                cmd.arg("-o").arg("ServerAliveCountMax=2");
+
                 if socket_path.exists() {
                     cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
                 }
@@ -561,6 +585,9 @@ impl SftpManager {
                 let error_msg = match output_res {
                     Ok(out) if !out.status.success() => {
                         let err = String::from_utf8_lossy(&out.stderr).to_string();
+                        if socket_path.exists() {
+                            SshStore::cleanup_stale_socket(&profile_clone.id);
+                        }
                         if err.trim().is_empty() {
                             format!("SCP exited with code {:?}", out.status.code())
                         } else {
@@ -619,7 +646,7 @@ impl SftpManager {
             }
 
             self.transfer_status = Some((
-                format!("⏳ Downloading {}...", selected_name),
+                format!("Downloading {}...", selected_name),
                 false,
                 std::time::Instant::now(),
             ));
@@ -628,6 +655,11 @@ impl SftpManager {
 
             thread::spawn(move || {
                 let mut cmd = Command::new("scp");
+                cmd.arg("-o").arg("BatchMode=yes");
+                cmd.arg("-o").arg("ConnectTimeout=10");
+                cmd.arg("-o").arg("ServerAliveInterval=10");
+                cmd.arg("-o").arg("ServerAliveCountMax=2");
+
                 if socket_path.exists() {
                     cmd.arg("-o").arg(format!("ControlPath={}", socket_path.to_string_lossy()));
                 }
@@ -663,6 +695,9 @@ impl SftpManager {
                 let error_msg = match output_res {
                     Ok(out) if !out.status.success() => {
                         let err = String::from_utf8_lossy(&out.stderr).to_string();
+                        if socket_path.exists() {
+                            SshStore::cleanup_stale_socket(&profile_clone.id);
+                        }
                         if err.trim().is_empty() {
                             format!("SCP exited with code {:?}", out.status.code())
                         } else {
@@ -692,25 +727,27 @@ impl SftpManager {
                 match &first.status {
                     TransferStatus::InProgress => {}
                     TransferStatus::Completed => {
-                        if let Some((_, _, time)) = &self.transfer_status {
-                            if time.elapsed().as_secs() > 6 {
-                                self.transfer_status = None;
-                            }
-                        } else {
+                        if self.last_notified_transfer_id != Some(first.id) {
+                            self.last_notified_transfer_id = Some(first.id);
                             self.transfer_status = Some((
-                                format!("✓ Transfer completed: {}", first.file_name),
+                                format!("[Done] Transfer completed: {}", first.file_name),
                                 false,
                                 std::time::Instant::now(),
                             ));
                             self.left_pane.refresh();
                             self.right_pane.refresh();
+                        } else if let Some((_, _, time)) = &self.transfer_status {
+                            if time.elapsed().as_secs() > 6 {
+                                self.transfer_status = None;
+                            }
                         }
                     }
                     TransferStatus::Failed(err) => {
-                        if self.transfer_status.as_ref().map(|(_, is_err, _)| !*is_err).unwrap_or(true) {
+                        if self.last_notified_transfer_id != Some(first.id) {
+                            self.last_notified_transfer_id = Some(first.id);
                             let err_preview = if err.len() > 40 { format!("{}...", &err[..37]) } else { err.clone() };
                             self.transfer_status = Some((
-                                format!("✕ Failed: {}", err_preview.trim()),
+                                format!("[Failed] {}", err_preview.trim()),
                                 true,
                                 std::time::Instant::now(),
                             ));
@@ -767,8 +804,8 @@ impl SftpManager {
                                 theme.card_frame().show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         let (dir_icon, dir_color) = match t.direction {
-                                            TransferDirection::Upload => ("↑ Upload", theme.success_color()),
-                                            TransferDirection::Download => ("↓ Download", theme.accent_color()),
+                                            TransferDirection::Upload => ("[Upload]", theme.success_color()),
+                                            TransferDirection::Download => ("[Download]", theme.accent_color()),
                                         };
 
                                         ui.label(egui::RichText::new(dir_icon).strong().color(dir_color));
@@ -781,13 +818,13 @@ impl SftpManager {
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                             match &t.status {
                                                 TransferStatus::Completed => {
-                                                    ui.label(egui::RichText::new("● Completed").strong().color(theme.success_color()));
+                                                    ui.label(egui::RichText::new("[Completed]").strong().color(theme.success_color()));
                                                 }
                                                 TransferStatus::InProgress => {
-                                                    ui.label(egui::RichText::new("⏳ In Progress...").strong().color(theme.accent_color()));
+                                                    ui.label(egui::RichText::new("[In Progress]").strong().color(theme.accent_color()));
                                                 }
                                                 TransferStatus::Failed(err) => {
-                                                    ui.label(egui::RichText::new("✕ Failed").strong().color(theme.danger_color())).on_hover_text(err);
+                                                    ui.label(egui::RichText::new("[Failed]").strong().color(theme.danger_color())).on_hover_text(err);
                                                 }
                                             }
                                             ui.label(egui::RichText::new(t.time.format("%H:%M:%S").to_string()).small().color(theme.text_muted_color()));
@@ -796,7 +833,7 @@ impl SftpManager {
 
                                     ui.add_space(2.0);
                                     ui.label(
-                                        egui::RichText::new(format!("{}  ➜  {}", t.from, t.to))
+                                        egui::RichText::new(format!("{}  ->  {}", t.from, t.to))
                                             .small()
                                             .monospace()
                                             .color(theme.text_muted_color()),

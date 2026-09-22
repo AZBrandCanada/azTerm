@@ -14,7 +14,7 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new(format!("A new version ({}) of AZTerm is ready!", new_tag))
+                        egui::RichText::new(format!("A new version ({}) of AZTerm is ready", new_tag))
                             .strong()
                             .size(15.0)
                             .color(app.theme.accent_color()),
@@ -127,7 +127,7 @@ pub fn render_keygen_modal(app: &mut AppState, ctx: &egui::Context) {
 
                         ui.add_space(10.0);
 
-                        if ui.button(egui::RichText::new("⚡ Generate Keypair").strong()).clicked() {
+                        if ui.button(egui::RichText::new("Generate Keypair").strong()).clicked() {
                             let algo = match app.keygen_algo {
                                 1 => SshKeyAlgorithm::Rsa4096,
                                 2 => SshKeyAlgorithm::Ecdsa384,
@@ -344,7 +344,7 @@ pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
                     if modal.is_connected {
                         ui.add_space(10.0);
                         ui.label(
-                            egui::RichText::new("✓ Successfully Authenticated!")
+                            egui::RichText::new("[Success] Authenticated")
                                 .strong()
                                 .size(16.0)
                                 .color(app.theme.success_color()),
@@ -402,7 +402,7 @@ pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
                         }
 
                         let enter_pressed = edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if enter_pressed || ui.button(egui::RichText::new("Send ↵").strong()).clicked() {
+                        if enter_pressed || ui.button(egui::RichText::new("Send").strong()).clicked() {
                             let to_send = format!("{}\r", modal.input_text);
                             if let Ok(mut w) = modal.writer.lock() {
                                 let _ = w.write_all(to_send.as_bytes());

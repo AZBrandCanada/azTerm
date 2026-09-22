@@ -408,6 +408,9 @@ impl AppState {
     pub fn open_ssh_auth_modal(&mut self, profile: SshProfile, target_pane_id: String, ctx: egui::Context) {
         let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
         if socket_path.exists() {
+            SshStore::cleanup_stale_socket(&profile.id);
+        }
+        if socket_path.exists() {
             if target_pane_id == "sftp_left" {
                 self.sftp.left_pane.refresh();
             } else {
@@ -627,8 +630,6 @@ impl AppState {
         let mut c = CommandBuilder::new(shell);
         c.env("TERM", "xterm-256color");
         c.env("COLORTERM", "truecolor");
-
-        // Strip inherited terminal row/col limits so btop and TUIs calculate size from actual PTY winsize
         c.env_remove("LINES");
         c.env_remove("COLUMNS");
 
@@ -665,6 +666,8 @@ impl AppState {
     }
 
     pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
+        SshStore::cleanup_stale_socket(&profile.id);
+
         let mut cmd = profile.to_command();
         cmd.env("COLORTERM", "truecolor");
         cmd.env_remove("LINES");
@@ -730,6 +733,17 @@ impl AppState {
     }
 
     pub fn close_session(&mut self, session_id: usize, ctx: egui::Context) {
+        if let Some(s) = self.sessions.iter().find(|s| s.id == session_id) {
+            if let SessionType::Ssh { profile_id } = &s.session_type {
+                let remaining_ssh_count = self.sessions.iter()
+                    .filter(|other| other.id != session_id && matches!(&other.session_type, SessionType::Ssh { profile_id: p } if p == profile_id))
+                    .count();
+                if remaining_ssh_count == 0 {
+                    SshStore::cleanup_stale_socket(profile_id);
+                }
+            }
+        }
+
         self.sessions.retain(|s| s.id != session_id);
 
         let mut ws_idx_to_remove: Option<usize> = None;

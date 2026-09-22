@@ -73,13 +73,22 @@ impl SshProfile {
 
         let mut cmd = CommandBuilder::new("ssh");
 
-        // Enable SSH Connection Multiplexing so SFTP shares this authenticated session
+        // Resilient SSH keepalive & connection management
         cmd.arg("-o");
         cmd.arg("ControlMaster=auto");
         cmd.arg("-o");
         cmd.arg(format!("ControlPath={}", socket_path.to_string_lossy()));
         cmd.arg("-o");
-        cmd.arg("ControlPersist=10m");
+        cmd.arg("ControlPersist=5m");
+        cmd.arg("-o");
+        cmd.arg("ServerAliveInterval=15");
+        cmd.arg("-o");
+        cmd.arg("ServerAliveCountMax=3");
+        cmd.arg("-o");
+        cmd.arg("ConnectTimeout=10");
+        cmd.arg("-o");
+        cmd.arg("TCPKeepAlive=yes");
+
         cmd.arg("-p");
         cmd.arg(self.port.to_string());
 
@@ -136,6 +145,29 @@ impl SshStore {
         let dir = Self::base_dir().join("sockets");
         let _ = fs::create_dir_all(&dir);
         dir
+    }
+
+    pub fn cleanup_stale_socket(profile_id: &str) {
+        let socket_path = Self::sockets_dir().join(format!("{}.sock", profile_id));
+        if socket_path.exists() {
+            let output = Command::new("ssh")
+                .args([
+                    "-O", "check",
+                    "-o", &format!("ControlPath={}", socket_path.to_string_lossy()),
+                    "dummy_check_target",
+                ])
+                .output();
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    // Socket is healthy and actively serving
+                }
+                _ => {
+                    // Master process terminated or socket is dead; remove file
+                    let _ = fs::remove_file(&socket_path);
+                }
+            }
+        }
     }
 
     pub fn ensure_secure_permissions(path_str: &str) {
@@ -268,9 +300,5 @@ impl SshStore {
         let priv_key_path = key_path.to_string_lossy().to_string();
 
         Ok((priv_key_path, pub_key))
-    }
-
-    pub fn generate_ed25519_keypair(name: &str) -> Result<(String, String), String> {
-        Self::generate_keypair(name, SshKeyAlgorithm::Ed25519)
     }
 }

@@ -28,9 +28,9 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                     let transfer_count = app.sftp.transfers.lock().map(|t| t.len()).unwrap_or(0);
                     let badge = if transfer_count > 0 {
-                        format!("⇅ Queue & History ({})", transfer_count)
+                        format!("Transfers ({})", transfer_count)
                     } else {
-                        "⇅ Transfers".to_string()
+                        "Transfers".to_string()
                     };
                     if ui.button(badge).on_hover_text("View active file transfers and status log").clicked() {
                         app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
@@ -48,7 +48,6 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                 app.theme.card_frame().show(ui, |ui| {
                     let mut connect_profile = None;
 
-                    // Single Compact Line: Target + Connect + Up + Refresh + Path
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Left:").strong());
 
@@ -76,7 +75,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if let SftpTarget::RemoteSsh(ref p) = app.sftp.left_pane.target {
                             let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
                             if !sock.exists() {
-                                if ui.small_button(egui::RichText::new("⚡ Connect").strong().color(app.theme.accent_color())).clicked() {
+                                if ui.small_button(egui::RichText::new("Connect").strong().color(app.theme.accent_color())).clicked() {
                                     connect_profile = Some(p.clone());
                                 }
                             }
@@ -85,7 +84,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
                             app.sftp.left_pane.go_up();
                         }
-                        if ui.small_button("⟳").on_hover_text("Reload directory").clicked() {
+                        if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                             app.sftp.left_pane.refresh();
                         }
 
@@ -117,7 +116,6 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                 app.theme.card_frame().show(ui, |ui| {
                     let mut connect_profile = None;
 
-                    // Single Compact Line: Target + Connect + Up + Refresh + Path
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Right:").strong());
 
@@ -145,7 +143,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if let SftpTarget::RemoteSsh(ref p) = app.sftp.right_pane.target {
                             let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
                             if !sock.exists() {
-                                if ui.small_button(egui::RichText::new("⚡ Connect").strong().color(app.theme.accent_color())).clicked() {
+                                if ui.small_button(egui::RichText::new("Connect").strong().color(app.theme.accent_color())).clicked() {
                                     connect_profile = Some(p.clone());
                                 }
                             }
@@ -154,7 +152,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                         if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
                             app.sftp.right_pane.go_up();
                         }
-                        if ui.small_button("⟳").on_hover_text("Reload directory").clicked() {
+                        if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
                             app.sftp.right_pane.refresh();
                         }
 
