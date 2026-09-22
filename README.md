@@ -31,7 +31,7 @@ wget -qO- https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh
 Pre-compiled standalone release binaries:
 
 * **Universal Linux AppImage:** [Download AZTerm-x86_64.AppImage](https://github.com/AZBrandCanada/azTerm/releases/latest/download/AZTerm-x86_64.AppImage)
-* **Debian / Ubuntu Package:** [Download azterm_0.2.3_amd64.deb](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm_0.2.3_amd64.deb)
+* **Debian / Ubuntu Package:** [Download azterm_0.1.0_amd64.deb](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm_0.1.0_amd64.deb)
 * **Generic Linux Tarball:** [Download azterm-linux-x86_64.tar.gz](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-linux-x86_64.tar.gz)
 * **Windows 64-bit Archive:** [Download azterm-windows-x86_64.zip](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-windows-x86_64.zip)
 * **macOS Universal Package:** [Download azterm-macos-universal.tar.gz](https://github.com/AZBrandCanada/azTerm/releases/latest/download/azterm-macos-universal.tar.gz)
@@ -205,8 +205,8 @@ To generate all distribution packages into the `dist/` directory:
 
 Outputs generated:
 * `dist/AZTerm-x86_64.AppImage` (Universal Linux standalone binary)
-* `dist/azterm-0.2.3-1-x86_64.pkg.tar.zst` (Arch Linux native package)
-* `dist/azterm_0.2.3_amd64.deb` (Debian / Ubuntu package)
+* `dist/azterm-linux-x86_64.tar.gz` (Arch Linux native package)
+* `dist/azterm_0.1.0_amd64.deb` (Debian / Ubuntu package)
 * `dist/azterm-linux-x86_64.tar.gz` (Generic Linux archive)
 * `dist/azterm-windows-x86_64.zip` (Windows 64-bit executable archive)
 
