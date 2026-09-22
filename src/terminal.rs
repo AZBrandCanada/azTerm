@@ -586,6 +586,7 @@ impl TerminalSession {
     }
 
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+        // Do not intercept keystrokes when any text box or modal is actively focused
         if ctx.wants_keyboard_input() {
             return;
         }
@@ -867,15 +868,14 @@ impl TerminalSession {
             response.request_focus();
         }
 
-        // Never steal focus or read keystrokes when any text box or dialog wants keyboard input
-        let wants_kb = ui.ctx().wants_keyboard_input();
-        let active_focus = (has_focus || user_clicked_pane) && !wants_kb;
+        let active_focus = has_focus || user_clicked_pane;
 
-        if active_focus && !response.has_focus() && !wants_kb {
+        if active_focus && !response.has_focus() {
             response.request_focus();
         }
 
-        if active_focus && !wants_kb {
+        let is_typing_elsewhere = ui.ctx().wants_keyboard_input();
+        if active_focus && !is_typing_elsewhere {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 

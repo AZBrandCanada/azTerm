@@ -417,8 +417,8 @@ pub fn render_single_pane(
         return;
     }
 
-    let is_focused = *active_session_id == session.id && !ui.ctx().wants_keyboard_input();
-    let border_color = if *active_session_id == session.id { theme.accent_color() } else { theme.border_color() };
+    let is_focused = *active_session_id == session.id;
+    let border_color = if is_focused { theme.accent_color() } else { theme.border_color() };
 
     let header_height = if show_header && rect.height() > 34.0 { 24.0_f32 } else { 0.0_f32 };
     let body_rect = egui::Rect::from_min_max(
@@ -430,7 +430,7 @@ pub fn render_single_pane(
 
     if header_height > 0.0 {
         let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
-        let header_bg = if *active_session_id == session.id { theme.bg_card_color() } else { theme.bg_panel_color() };
+        let header_bg = if is_focused { theme.bg_card_color() } else { theme.bg_panel_color() };
         ui.painter().rect_filled(header_rect, egui::Rounding { nw: 4.0, ne: 4.0, sw: 0.0, se: 0.0 }, header_bg);
 
         let drag_area_w = (header_rect.width() - 140.0).max(10.0);
@@ -448,7 +448,7 @@ pub fn render_single_pane(
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("::").weak().color(theme.text_muted_color()));
-                let title_color = if *active_session_id == session.id { theme.accent_color() } else { theme.text_muted_color() };
+                let title_color = if is_focused { theme.accent_color() } else { theme.text_muted_color() };
                 let max_title_chars = ((drag_area_w - 20.0) / 7.2).max(1.0) as usize;
                 let title_disp = if session.title.len() > max_title_chars {
                     format!("{}...", &session.title[..max_title_chars.saturating_sub(3)])
@@ -457,7 +457,7 @@ pub fn render_single_pane(
                 };
                 ui.label(egui::RichText::new(title_disp).strong().small().color(title_color));
 
-                if *active_session_id == session.id {
+                if is_focused {
                     ui.label(egui::RichText::new("*").small().color(theme.accent_color()));
                 }
 
