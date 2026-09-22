@@ -95,6 +95,55 @@ pub struct PaneBrowser {
     rx: Option<Receiver<Result<Vec<FileEntry>, String>>>,
 }
 
+pub fn fit_filename_to_width(
+    painter: &egui::Painter,
+    name: &str,
+    prefix: &str,
+    font_id: &egui::FontId,
+    max_width: f32,
+) -> String {
+    let full = format!("{}{}", prefix, name);
+    let probe = painter.layout_no_wrap(full.clone(), font_id.clone(), egui::Color32::WHITE);
+    if probe.size().x <= max_width {
+        return full;
+    }
+
+    // Preserve the file extension (e.g. .tar.gz, .zip, .mp4) during truncation
+    let (stem, ext) = if let Some(dot_pos) = name.rfind('.') {
+        if dot_pos > 0 && dot_pos < name.len() - 1 && (name.len() - dot_pos) <= 10 {
+            (&name[..dot_pos], &name[dot_pos..])
+        } else {
+            (name, "")
+        }
+    } else {
+        (name, "")
+    };
+
+    let stem_chars: Vec<char> = stem.chars().collect();
+    let mut low = 1;
+    let mut high = stem_chars.len();
+    let mut best = format!("{}...{}", prefix, ext);
+
+    while low <= high {
+        let mid = (low + high) / 2;
+        let candidate_stem: String = stem_chars[..mid].iter().collect();
+        let candidate = format!("{}{}...{}", prefix, candidate_stem, ext);
+        let size_x = painter.layout_no_wrap(candidate.clone(), font_id.clone(), egui::Color32::WHITE).size().x;
+
+        if size_x <= max_width {
+            best = candidate;
+            low = mid + 1;
+        } else {
+            if mid == 0 {
+                break;
+            }
+            high = mid - 1;
+        }
+    }
+
+    best
+}
+
 impl PaneBrowser {
     pub fn new(id: impl Into<String>, target: SftpTarget) -> Self {
         let id = id.into();
@@ -685,7 +734,6 @@ impl PaneBrowser {
         let mut auth_request = None;
         let pane_id = self.id.clone();
 
-        // Keyboard navigation and quick search
         let is_typing_in_input = ui.memory(|m| m.focused().is_some());
         let mut pressed_char: Option<char> = None;
         let mut delete_pressed = false;
@@ -787,10 +835,6 @@ impl PaneBrowser {
                     ui.add_space(2.0);
                 }
 
-                // Explicit column widths matching between Header and Rows:
-                // Left: Name (expands)
-                // Middle: Size (75px)
-                // Right: Permissions (85px)
                 let size_col_w = 75.0_f32;
                 let perm_col_w = 85.0_f32;
                 let right_reserved = size_col_w + perm_col_w + 14.0_f32;
@@ -821,7 +865,6 @@ impl PaneBrowser {
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // 1. Rightmost header: Permissions
                         let perm_indicator = if self.sort_column == SortColumn::Permissions {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -835,7 +878,6 @@ impl PaneBrowser {
                             self.toggle_sort(SortColumn::Permissions);
                         }
 
-                        // 2. Middle header: Size
                         let size_indicator = if self.sort_column == SortColumn::Size {
                             if self.sort_direction == SortDirection::Ascending { " [^]" } else { " [v]" }
                         } else { "" };
@@ -856,6 +898,7 @@ impl PaneBrowser {
                 let mut toggled_item: Option<(String, bool)> = None;
                 let mut nav_to: Option<String> = None;
                 let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift);
+                let font_id = egui::TextStyle::Body.resolve(ui.style());
 
                 egui::ScrollArea::vertical()
                     .id_source(format!("{}_file_scroll", self.id))
@@ -864,11 +907,9 @@ impl PaneBrowser {
                         for entry in &self.entries {
                             let prefix = if entry.is_dir { "[DIR] " } else { "[FILE] " };
                             let is_selected = self.selected_items.contains(&entry.name);
-                            let full_label = format!("{}{}", prefix, entry.name);
 
                             ui.horizontal(|ui| {
-                                // Left column: Left-aligned File Name
-                                let (row_rect, row_resp) = ui.allocate_exact_size(egui::vec2(name_col_w, 19.0), egui::Sense::click());
+                                let (row_rect, mut row_resp) = ui.allocate_exact_size(egui::vec2(name_col_w, 19.0), egui::Sense::click());
                                 if ui.is_rect_visible(row_rect) {
                                     let bg = if is_selected {
                                         theme.bg_card_color()
@@ -888,16 +929,30 @@ impl PaneBrowser {
                                         theme.text_primary_color()
                                     };
 
-                                    let font_id = egui::TextStyle::Body.resolve(ui.style());
-                                    let galley = ui.painter().layout(
-                                        full_label.clone(),
-                                        font_id,
+                                    // Single-line extension-preserving truncation (no multi-line overlap)
+                                    let display_text = fit_filename_to_width(
+                                        ui.painter(),
+                                        &entry.name,
+                                        prefix,
+                                        &font_id,
+                                        name_col_w - 8.0,
+                                    );
+
+                                    let galley = ui.painter().layout_no_wrap(
+                                        display_text,
+                                        font_id.clone(),
                                         text_color,
-                                        name_col_w - 6.0,
                                     );
                                     let text_pos = egui::pos2(row_rect.min.x + 4.0, row_rect.center().y - galley.size().y / 2.0);
                                     ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
                                 }
+
+                                row_resp = row_resp.on_hover_text(format!(
+                                    "{}\nSize: {}\nPermissions: {}",
+                                    entry.name,
+                                    if entry.is_dir { "Directory".to_string() } else { Self::format_size(entry.size) },
+                                    entry.permissions
+                                ));
 
                                 if self.scroll_to_selected && is_selected {
                                     row_resp.scroll_to_me(Some(egui::Align::Center));
@@ -924,7 +979,6 @@ impl PaneBrowser {
                                 }
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    // 1. Rightmost row cell: Permissions (matches rightmost header: Permissions)
                                     ui.add_sized(
                                         egui::vec2(perm_col_w, 19.0),
                                         egui::Label::new(
@@ -932,7 +986,6 @@ impl PaneBrowser {
                                         ).truncate()
                                     );
 
-                                    // 2. Middle row cell: Size (matches middle header: Size)
                                     ui.add_sized(
                                         egui::vec2(size_col_w, 19.0),
                                         egui::Label::new(
