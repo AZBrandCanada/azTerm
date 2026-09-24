@@ -126,6 +126,47 @@ pub struct TerminalSession {
     /// an alt-screen program (nano, less, vim, htop, ...). Prevents
     /// flooding the PTY with dozens of PageUp/PageDown per second.
     pub alt_drag_page_cooldown: Option<std::time::Instant>,
+    /// Screens snapshotted during a TUI drag where the user paged the app
+    /// (by edge-drag OR wheel-while-holding). At release, these frames are
+    /// stitched together so a single drag can copy multiple screens.
+    pub tui_drag_frames: Vec<Vec<String>>,
+    /// Last snapshot; used to detect when the app actually redrew.
+    pub tui_drag_last_snapshot: Vec<String>,
+    /// None until the user pages; true = paged up (older content), false = down.
+    pub tui_drag_direction: Option<bool>,
+}
+
+/// Stitch captured TUI frames into a single string. Adjacent frames
+/// overlap (nano pages ~half-screen), so we find the longest suffix/prefix
+/// match between consecutive frames and append only the new tail.
+fn combine_tui_frames(frames: Vec<Vec<String>>, drag_up: bool) -> String {
+    if frames.is_empty() { return String::new(); }
+    if frames.len() == 1 {
+        return frames.into_iter().next().unwrap().join("\n");
+    }
+    let mut ordered = frames;
+    if drag_up {
+        // Frames were captured newest-first (we paged upward); reverse so
+        // older content lands at the top.
+        ordered.reverse();
+    }
+    let mut result: Vec<String> = Vec::new();
+    for frame in ordered {
+        if result.is_empty() {
+            result = frame;
+            continue;
+        }
+        let max_check = result.len().min(frame.len()).min(120);
+        let mut overlap = 0usize;
+        for k in (1..=max_check).rev() {
+            if result[result.len() - k..] == frame[..k] {
+                overlap = k;
+                break;
+            }
+        }
+        result.extend_from_slice(&frame[overlap..]);
+    }
+    result.join("\n")
 }
 
 impl TerminalSession {
@@ -225,6 +266,9 @@ impl TerminalSession {
             selection_end: None,
             is_dragging_selection: false,
             alt_drag_page_cooldown: None,
+            tui_drag_frames: Vec::new(),
+            tui_drag_last_snapshot: Vec::new(),
+            tui_drag_direction: None,
         }
     }
 
@@ -842,6 +886,26 @@ impl TerminalSession {
         });
     }
 
+    /// Snapshot the current visible rows as trimmed strings.
+    /// Used to capture TUI frames while drag-scrolling nano / htop / etc.
+    pub fn snapshot_visible_lines(&self) -> Vec<String> {
+        let screen = self.parser.screen();
+        let (rows, cols) = screen.size();
+        let mut out = Vec::with_capacity(rows as usize);
+        for r in 0..rows {
+            let mut line = String::with_capacity(cols as usize);
+            for c in 0..cols {
+                if let Some(cell) = screen.cell(r, c) {
+                    if cell.is_wide_continuation() { continue; }
+                    let t = cell.contents();
+                    if t.is_empty() { line.push(' '); } else { line.push_str(&t); }
+                }
+            }
+            out.push(line.trim_end().to_string());
+        }
+        out
+    }
+
     /// Heuristic: does this look like a full-screen TUI (nano, htop, mc,
     /// emacs -nw, ...) running in the *primary* screen?
     ///
@@ -913,10 +977,20 @@ impl TerminalSession {
         let new_rows = ((usable_h / row_height).floor() as u16).max(4);
 
         if new_cols != self.cols || new_rows != self.rows {
+            let old_rows = self.rows;
+            let old_cols = self.cols;
             self.cols = new_cols;
             self.rows = new_rows;
 
             self.parser.set_size(new_rows, new_cols);
+
+            // Full-screen TUIs (btop, top, htop, ...) don't always repaint
+            // every cell after SIGWINCH, leaving ghost content from the
+            // previous size. Clear the visible grid on resize so nothing
+            // stale bleeds through.
+            if in_alternate || tui_in_primary {
+                self.parser.process(b"\x1b[2J\x1b[H");
+            }
 
             if let Ok(master) = self.master_pty.lock() {
                 let _ = master.resize(PtySize {
@@ -926,6 +1000,12 @@ impl TerminalSession {
                     pixel_height: 0,
                 });
             }
+
+            crate::dbg_log!(
+                "term_resize id={} old={}x{} new={}x{} alt={} tui_primary={}",
+                self.id, old_rows, old_cols, new_rows, new_cols,
+                in_alternate, tui_in_primary
+            );
         }
 
         let term_grid_size = egui::vec2(
@@ -946,7 +1026,19 @@ impl TerminalSession {
             egui::pos2(full_rect.max.x, grid_rect.max.y),
         );
 
-        let pointer_pos = ui.input(|i| i.pointer.hover_pos().unwrap_or(egui::Pos2::ZERO));
+        // Pointer position during a drag is unreliable on Wayland: hover_pos
+        // returns None while the cursor is outside the widget, and egui's
+        // interact_pos can freeze at the press origin. `latest_pos` gives the
+        // live cursor position each frame; fall back through the others.
+        let pointer_pos = ui
+            .input(|i| {
+                i.pointer
+                    .latest_pos()
+                    .or_else(|| i.pointer.interact_pos())
+                    .or_else(|| i.pointer.hover_pos())
+            })
+            .or_else(|| response.interact_pointer_pos())
+            .unwrap_or(egui::Pos2::ZERO);
         let is_primary_down = ui.input(|i| i.pointer.primary_down());
         let is_primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
         let is_primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
@@ -1019,13 +1111,17 @@ impl TerminalSession {
                     }
                 });
                 if scroll_y != 0.0 {
-                    // One wheel notch (~50px) = one page step. Clamp so a
-                    // flick doesn't send dozens of page-ups.
                     let count = ((scroll_y.abs() / 50.0).round() as usize).clamp(1, 3);
                     let seq = if scroll_y > 0.0 { "\x1b[5~" } else { "\x1b[6~" };
+                    // If the user is holding a drag while wheeling, remember
+                    // the direction so we can stitch frames in the right order.
+                    if self.is_dragging_selection && self.tui_drag_direction.is_none() {
+                        self.tui_drag_direction = Some(scroll_y > 0.0);
+                    }
                     crate::dbg_log!(
-                        "tui_wheel id={} alt={} tui_primary={} delta={:.1} count={} seq={:?}",
-                        self.id, in_alternate, tui_in_primary, scroll_y, count, seq
+                        "tui_wheel id={} alt={} tui_primary={} delta={:.1} count={} seq={:?} drag={}",
+                        self.id, in_alternate, tui_in_primary, scroll_y, count, seq,
+                        self.is_dragging_selection
                     );
                     for _ in 0..count {
                         self.send_input(seq);
@@ -1044,7 +1140,12 @@ impl TerminalSession {
                 });
 
                 if scroll_y != 0.0 {
-                    let lines = ((scroll_y.abs() / 18.0).round() as usize).max(1) * 3;
+                    // Convert egui's pixel delta into whole wheel notches
+                    // (~18 px each) and multiply by the user's preferred
+                    // lines-per-notch setting.
+                    let notches = ((scroll_y.abs() / 18.0).round() as usize).max(1);
+                    let per_notch = settings.mouse_wheel_scroll.lines(self.rows);
+                    let lines = notches * per_notch;
                     if scroll_y > 0.0 {
                         self.set_view_scroll(self.scroll_offset + lines);
                     } else {
@@ -1097,6 +1198,16 @@ impl TerminalSession {
                 self.selection_end = Some((age, cell_c));
                 self.is_dragging_selection = true;
                 self.alt_drag_page_cooldown = None;
+                // Start a TUI frame accumulator. If the user pages the app
+                // (via edge-drag or wheel-while-holding) we'll snapshot each
+                // redraw so the final copy spans multiple screens.
+                self.tui_drag_frames.clear();
+                self.tui_drag_direction = None;
+                if in_alternate || tui_in_primary {
+                    self.tui_drag_last_snapshot = self.snapshot_visible_lines();
+                } else {
+                    self.tui_drag_last_snapshot.clear();
+                }
                 crate::dbg_log!(
                     "sel_start id={} age={} col={} scroll_offset={}",
                     self.id, age, cell_c, self.scroll_offset
@@ -1106,12 +1217,13 @@ impl TerminalSession {
             if self.is_dragging_selection && is_primary_down {
                 let dragging_above = pointer_pos.y < grid_rect.min.y;
                 let dragging_below = pointer_pos.y > grid_rect.max.y;
+                // A full-screen app owns the screen if we're in the alternate
+                // screen OR it's a primary-screen TUI like nano. In that case
+                // there is no terminal scrollback to walk during a drag.
+                let tui_owns_screen = in_alternate || tui_in_primary;
 
-                if dragging_above && !in_alternate {
-                    // Drag past top in the shell: extend selection into the
-                    // terminal's own scrollback buffer. Preserve the mouse's
-                    // X-column so the oldest selected line starts at the
-                    // correct column, not at 0.
+                if dragging_above && !tui_owns_screen {
+                    // Shell scrollback: extend selection into history.
                     let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
                     let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset + auto_scroll_lines);
@@ -1122,8 +1234,7 @@ impl TerminalSession {
                         self.id, self.scroll_offset, age, cell_c
                     );
                     ui.ctx().request_repaint();
-                } else if dragging_below && !in_alternate {
-                    // Drag past bottom in the shell: scroll toward live output.
+                } else if dragging_below && !tui_owns_screen {
                     let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
                     let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset.saturating_sub(auto_scroll_lines));
@@ -1134,12 +1245,10 @@ impl TerminalSession {
                         self.id, self.scroll_offset, age, cell_c
                     );
                     ui.ctx().request_repaint();
-                } else if (dragging_above || dragging_below) && in_alternate {
-                    // Alt-screen (nano, less, vim, htop, ...): there is no
-                    // scrollback to walk, so "autoscroll" means sending page
-                    // keys to the app itself while the user holds the drag
-                    // past the edge. Throttle to ~1 page per 120ms so we
-                    // don't spam the PTY.
+                } else if (dragging_above || dragging_below) && tui_owns_screen {
+                    // Full-screen app (nano, less, vim, htop, emacs -nw):
+                    // page the app itself while the user holds the drag past
+                    // the edge. Throttle to ~8 Hz so we don't flood the PTY.
                     let now = std::time::Instant::now();
                     let ready = match self.alt_drag_page_cooldown {
                         Some(t) => now.duration_since(t).as_millis() >= 120,
@@ -1149,22 +1258,21 @@ impl TerminalSession {
                         let seq = if dragging_above { "\x1b[5~" } else { "\x1b[6~" };
                         self.send_input(seq);
                         self.alt_drag_page_cooldown = Some(now);
+                        if self.tui_drag_direction.is_none() {
+                            self.tui_drag_direction = Some(dragging_above);
+                        }
                         crate::dbg_log!(
-                            "sel_alt_page id={} dir={}",
-                            self.id,
+                            "sel_tui_page id={} alt={} tui_primary={} dir={}",
+                            self.id, in_alternate, tui_in_primary,
                             if dragging_above { "up" } else { "down" }
                         );
                     }
-                    // Selection stays anchored to the visible frame. Alt-screen
-                    // has no scrollback, so we can only ever copy what the app
-                    // renders at the moment of release.
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
                     self.selection_end = Some((age, cell_c));
                     ui.ctx().request_repaint();
                 } else {
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
                     self.selection_end = Some((age, cell_c));
-                    // Reset cooldown once the pointer is back inside the pane.
                     self.alt_drag_page_cooldown = None;
                 }
             }
@@ -1172,7 +1280,49 @@ impl TerminalSession {
             if self.is_dragging_selection && is_primary_released {
                 self.is_dragging_selection = false;
                 self.alt_drag_page_cooldown = None;
-                if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+
+                // TUI multi-frame path: user paged during the drag, so stitch
+                // the captured screens together. Include the final frame.
+                let used_tui_accumulator = (in_alternate || tui_in_primary)
+                    && self.tui_drag_direction.is_some()
+                    && !self.tui_drag_frames.is_empty();
+
+                if used_tui_accumulator {
+                    if settings.copy_on_select {
+                        // Push final frame if it differs from the last captured.
+                        let final_snap = self.snapshot_visible_lines();
+                        if final_snap != self.tui_drag_last_snapshot {
+                            self.tui_drag_frames.push(final_snap);
+                        }
+                        let drag_up = self.tui_drag_direction.unwrap_or(true);
+                        let frames = std::mem::take(&mut self.tui_drag_frames);
+                        let combined = combine_tui_frames(frames, drag_up);
+                        let line_count = combined.lines().count().max(1);
+                        let preview = if combined.len() > 30 {
+                            format!("{}...", &combined[..27].replace('\n', " "))
+                        } else {
+                            combined.replace('\n', " ")
+                        };
+                        crate::dbg_log!(
+                            "tui_copy id={} bytes={} lines={} drag_up={}",
+                            self.id, combined.len(), line_count, drag_up
+                        );
+                        if !combined.trim().is_empty() {
+                            set_system_clipboard_text(Some(ui.ctx()), &combined);
+                            *toast = Some((
+                                format!("Copied {} line(s) (multi-screen): {}", line_count, preview),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                    }
+                    self.tui_drag_last_snapshot.clear();
+                    self.tui_drag_direction = None;
+                    self.selection_start = None;
+                    self.selection_end = None;
+                } else if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
+                    self.tui_drag_frames.clear();
+                    self.tui_drag_last_snapshot.clear();
+                    self.tui_drag_direction = None;
                     if start == end {
                         self.selection_start = None;
                         self.selection_end = None;
@@ -1261,7 +1411,13 @@ impl TerminalSession {
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let screen = self.parser.screen();
-            let (rows, cols) = screen.size();
+            let _screen_size = screen.size();
+            // Use our own rows/cols so the loop always matches term_grid_size.
+            // vt100's set_size should make them identical, but pinning them
+            // here rules out a class of stale-cell rendering bugs where the
+            // parser briefly reports a different size after a resize.
+            let rows = self.rows;
+            let cols = self.cols;
             let (cursor_r, cursor_c) = screen.cursor_position();
             let hide_cursor = screen.hide_cursor();
 
@@ -1326,6 +1482,28 @@ impl TerminalSession {
                 ui.painter().galley(egui::pos2(grid_rect.min.x, row_y), galley, egui::Color32::WHITE);
             }
         }));
+
+        // TUI drag-accumulator: if the user is dragging inside a full-screen
+        // app and the screen content changed (they paged via wheel or edge),
+        // push the pre-change frame so we can stitch at release.
+        if self.is_dragging_selection && (in_alternate || tui_in_primary) {
+            let snap = self.snapshot_visible_lines();
+            if snap != self.tui_drag_last_snapshot {
+                if self.tui_drag_frames.is_empty()
+                    && !self.tui_drag_last_snapshot.is_empty()
+                {
+                    self.tui_drag_frames.push(self.tui_drag_last_snapshot.clone());
+                }
+                if !self.tui_drag_last_snapshot.is_empty() {
+                    self.tui_drag_frames.push(snap.clone());
+                }
+                self.tui_drag_last_snapshot = snap;
+                crate::dbg_log!(
+                    "tui_frame_captured id={} frames={}",
+                    self.id, self.tui_drag_frames.len()
+                );
+            }
+        }
 
         if self.scroll_offset > 0 && !in_alternate {
             let chip_w = 150.0;

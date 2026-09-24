@@ -274,6 +274,29 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new("Mouse Wheel Scroll Amount").strong().color(app.theme.text_primary_color()));
+                                    ui.label(egui::RichText::new("How far each wheel notch scrolls the terminal buffer. Page sizes adapt to window height.").small().color(app.theme.text_muted_color()));
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    egui::ComboBox::from_id_source("wheel_scroll_amount_combo")
+                                        .selected_text(app.settings.mouse_wheel_scroll.display_name())
+                                        .show_ui(ui, |ui| {
+                                            use crate::settings::WheelScrollAmount::*;
+                                            let opts = [Lines1, Lines3, Lines5, Lines10, HalfPage, FullPage];
+                                            for opt in opts {
+                                                if ui.selectable_value(&mut app.settings.mouse_wheel_scroll, opt, opt.display_name()).clicked() {
+                                                    changed = true;
+                                                }
+                                            }
+                                        });
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("Scrollback Buffer Depth").strong().color(app.theme.text_primary_color()));
                                     ui.label(egui::RichText::new("Total lines of output history retained per tab (scroll with mouse wheel).").small().color(app.theme.text_muted_color()));
                                 });
