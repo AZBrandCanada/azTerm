@@ -122,6 +122,10 @@ pub struct TerminalSession {
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
+    /// Throttles page-key emission when drag-selecting past the edge of
+    /// an alt-screen program (nano, less, vim, htop, ...). Prevents
+    /// flooding the PTY with dozens of PageUp/PageDown per second.
+    pub alt_drag_page_cooldown: Option<std::time::Instant>,
 }
 
 impl TerminalSession {
@@ -220,6 +224,7 @@ impl TerminalSession {
             selection_start: None,
             selection_end: None,
             is_dragging_selection: false,
+            alt_drag_page_cooldown: None,
         }
     }
 
@@ -837,6 +842,38 @@ impl TerminalSession {
         });
     }
 
+    /// Heuristic: does this look like a full-screen TUI (nano, htop, mc,
+    /// emacs -nw, ...) running in the *primary* screen?
+    ///
+    /// Signal: does the app write content BELOW the cursor? Shells write
+    /// sequentially, so the cursor is always at the last written cell and
+    /// everything below is blank. TUIs position the cursor and draw status
+    /// bars / panels below it, so there's usually non-blank content further
+    /// down the screen. We use this to decide whether the mouse wheel should
+    /// scroll terminal scrollback or be translated into PageUp/PageDown.
+    fn looks_like_primary_screen_tui(&self) -> bool {
+        let screen = self.parser.screen();
+        if screen.alternate_screen() {
+            return false;
+        }
+        let (cursor_r, _) = screen.cursor_position();
+        let (rows, cols) = screen.size();
+        if cursor_r >= rows.saturating_sub(1) {
+            return false;
+        }
+        for r in (cursor_r + 1)..rows {
+            for c in 0..cols {
+                if let Some(cell) = screen.cell(r, c) {
+                    let contents = cell.contents();
+                    if !contents.is_empty() && contents != " " {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
@@ -857,8 +894,17 @@ impl TerminalSession {
         let row_height = (probe.size().y * 1.05).max(1.0);
 
         let in_alternate = self.parser.screen().alternate_screen();
-        let app_wants_mouse = in_alternate && (self.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None);
-        let scrollbar_width = if in_alternate || app_wants_mouse { 0.0 } else { 12.0 };
+        let has_mouse = self.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+        // Do NOT require alternate screen: nano, htop and emacs -nw sometimes
+        // run in the primary screen but still enable xterm mouse reporting.
+        let app_wants_mouse = has_mouse;
+        // Detect full-screen TUIs in the primary screen (no mouse mode, not
+        // in alternate screen) so we can route the wheel to the app instead
+        // of the terminal scrollback.
+        let tui_in_primary = !has_mouse && !in_alternate && self.looks_like_primary_screen_tui();
+        // Scrollback bar is only shown when we actually own the wheel.
+        let show_scrollback_bar = !app_wants_mouse && !in_alternate && !tui_in_primary;
+        let scrollbar_width = if show_scrollback_bar { 12.0 } else { 0.0 };
 
         let avail = ui.available_size();
         let usable_w = (avail.x - scrollbar_width).max(80.0);
@@ -960,11 +1006,11 @@ impl TerminalSession {
                 self.send_mouse_event(2, true, cell_c, cell_r, ui.input(|i| i.modifiers));
             }
         } else {
-            // Alt-screen program with no mouse mode (nano, less, vim...):
-            // translate wheel into PageUp/PageDown. Arrow keys would move the
-            // cursor within the visible buffer without scrolling — PageUp/
+            // Full-screen program with no mouse mode (nano, less, vim, htop,
+            // emacs -nw, mc, ...): translate wheel into PageUp/PageDown. Arrow
+            // keys would just move the cursor within the visible buffer; PageUp/
             // PageDown scroll the view, which is what users expect from a wheel.
-            if grid_rect.contains(pointer_pos) && !is_ctrl && in_alternate {
+            if grid_rect.contains(pointer_pos) && !is_ctrl && (in_alternate || tui_in_primary) {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {
                         i.raw_scroll_delta.y
@@ -978,8 +1024,8 @@ impl TerminalSession {
                     let count = ((scroll_y.abs() / 50.0).round() as usize).clamp(1, 3);
                     let seq = if scroll_y > 0.0 { "\x1b[5~" } else { "\x1b[6~" };
                     crate::dbg_log!(
-                        "altscreen_wheel id={} delta={:.1} count={} seq={:?}",
-                        self.id, scroll_y, count, seq
+                        "tui_wheel id={} alt={} tui_primary={} delta={:.1} count={} seq={:?}",
+                        self.id, in_alternate, tui_in_primary, scroll_y, count, seq
                     );
                     for _ in 0..count {
                         self.send_input(seq);
@@ -988,7 +1034,7 @@ impl TerminalSession {
                 }
             }
 
-            if grid_rect.contains(pointer_pos) && !is_ctrl && !in_alternate {
+            if grid_rect.contains(pointer_pos) && !is_ctrl && show_scrollback_bar {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {
                         i.raw_scroll_delta.y
@@ -1050,6 +1096,7 @@ impl TerminalSession {
                 self.selection_start = Some((age, cell_c));
                 self.selection_end = Some((age, cell_c));
                 self.is_dragging_selection = true;
+                self.alt_drag_page_cooldown = None;
                 crate::dbg_log!(
                     "sel_start id={} age={} col={} scroll_offset={}",
                     self.id, age, cell_c, self.scroll_offset
@@ -1057,10 +1104,14 @@ impl TerminalSession {
             }
 
             if self.is_dragging_selection && is_primary_down {
-                if pointer_pos.y < grid_rect.min.y && !in_alternate {
-                    // Drag past top: extend selection into scrollback. Preserve
-                    // the mouse's X-column so the oldest selected line starts at
-                    // the correct column, not at 0.
+                let dragging_above = pointer_pos.y < grid_rect.min.y;
+                let dragging_below = pointer_pos.y > grid_rect.max.y;
+
+                if dragging_above && !in_alternate {
+                    // Drag past top in the shell: extend selection into the
+                    // terminal's own scrollback buffer. Preserve the mouse's
+                    // X-column so the oldest selected line starts at the
+                    // correct column, not at 0.
                     let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
                     let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset + auto_scroll_lines);
@@ -1071,8 +1122,8 @@ impl TerminalSession {
                         self.id, self.scroll_offset, age, cell_c
                     );
                     ui.ctx().request_repaint();
-                } else if pointer_pos.y > grid_rect.max.y && !in_alternate {
-                    // Drag past bottom: scroll toward live output.
+                } else if dragging_below && !in_alternate {
+                    // Drag past bottom in the shell: scroll toward live output.
                     let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
                     let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset.saturating_sub(auto_scroll_lines));
@@ -1083,14 +1134,44 @@ impl TerminalSession {
                         self.id, self.scroll_offset, age, cell_c
                     );
                     ui.ctx().request_repaint();
+                } else if (dragging_above || dragging_below) && in_alternate {
+                    // Alt-screen (nano, less, vim, htop, ...): there is no
+                    // scrollback to walk, so "autoscroll" means sending page
+                    // keys to the app itself while the user holds the drag
+                    // past the edge. Throttle to ~1 page per 120ms so we
+                    // don't spam the PTY.
+                    let now = std::time::Instant::now();
+                    let ready = match self.alt_drag_page_cooldown {
+                        Some(t) => now.duration_since(t).as_millis() >= 120,
+                        None => true,
+                    };
+                    if ready {
+                        let seq = if dragging_above { "\x1b[5~" } else { "\x1b[6~" };
+                        self.send_input(seq);
+                        self.alt_drag_page_cooldown = Some(now);
+                        crate::dbg_log!(
+                            "sel_alt_page id={} dir={}",
+                            self.id,
+                            if dragging_above { "up" } else { "down" }
+                        );
+                    }
+                    // Selection stays anchored to the visible frame. Alt-screen
+                    // has no scrollback, so we can only ever copy what the app
+                    // renders at the moment of release.
+                    let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
+                    self.selection_end = Some((age, cell_c));
+                    ui.ctx().request_repaint();
                 } else {
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
                     self.selection_end = Some((age, cell_c));
+                    // Reset cooldown once the pointer is back inside the pane.
+                    self.alt_drag_page_cooldown = None;
                 }
             }
 
             if self.is_dragging_selection && is_primary_released {
                 self.is_dragging_selection = false;
+                self.alt_drag_page_cooldown = None;
                 if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
                     if start == end {
                         self.selection_start = None;
@@ -1132,7 +1213,7 @@ impl TerminalSession {
             }
         }
 
-        if !in_alternate && !app_wants_mouse {
+        if show_scrollback_bar {
             ui.painter().rect_filled(sb_track, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 6));
 
             let sb_id = ui.id().with(self.id).with("term_sb");
