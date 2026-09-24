@@ -1131,29 +1131,10 @@ impl AppState {
     }
 
     fn handle_terminal_shortcuts(&mut self, ctx: &egui::Context) {
-        let mut send_tab = false;
-
-        ctx.input_mut(|i| {
-            i.events.retain(|event| match event {
-                egui::Event::Key { key: egui::Key::Tab, pressed, .. } => {
-                    if *pressed {
-                        send_tab = true;
-                    }
-                    false
-                }
-                egui::Event::Text(t) if t == "\t" => {
-                    send_tab = true;
-                    false
-                }
-                _ => true,
-            });
-        });
-
-        if send_tab {
-            if let Some(session) = self.sessions.iter_mut().find(|s| s.id == self.active_session_id) {
-                session.send_input("\t");
-            }
-        }
+        // Tab is handled inside TerminalSession::handle_keyboard_events.
+        // We set a focus-lock filter on the terminal widget so egui does
+        // not consume Tab for its own focus navigation. No interception
+        // is needed here anymore.
 
         let (ctrl_shift, alt_pressed) = ctx.input(|i| {
             (

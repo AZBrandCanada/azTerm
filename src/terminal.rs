@@ -857,6 +857,27 @@ impl TerminalSession {
                         modifiers,
                         ..
                     } => {
+                        if *key == egui::Key::Enter {
+                            crate::dbg_log!(
+                                "kbd_enter id={} ctrl={} shift={} alt={} cmd={}",
+                                self.id,
+                                modifiers.ctrl,
+                                modifiers.shift,
+                                modifiers.alt,
+                                modifiers.command
+                            );
+                        }
+                        if *key == egui::Key::Tab {
+                            // Shell autocomplete. Shift+Tab sends the
+                            // xterm "backtab" sequence (CSI Z), which zsh
+                            // and readline map to reverse-menu-complete.
+                            if modifiers.shift {
+                                self.send_input("\x1b[Z");
+                            } else {
+                                self.send_input("\t");
+                            }
+                            continue;
+                        }
                         if *key == egui::Key::Escape {
                             self.send_input("\x1b");
                             continue;
@@ -1091,6 +1112,23 @@ impl TerminalSession {
         let (full_rect, _) = ui.allocate_exact_size(total_size, egui::Sense::hover());
         let response = ui.interact(full_rect, widget_id, egui::Sense::click_and_drag());
 
+        // While this terminal widget has focus, tell egui NOT to use Tab
+        // for widget-focus navigation. Without this, pressing Tab for shell
+        // autocomplete makes egui jump focus to the next widget in its tab
+        // order, and the terminal stops receiving keystrokes until the user
+        // clicks it again.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(
+                widget_id,
+                egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: false,
+                    vertical_arrows: false,
+                    escape: false,
+                },
+            );
+        });
+
         let grid_rect = egui::Rect::from_min_size(full_rect.min, term_grid_size);
         let sb_track = egui::Rect::from_min_max(
             egui::pos2(grid_rect.max.x + 2.0, grid_rect.min.y),
@@ -1142,8 +1180,24 @@ impl TerminalSession {
         // Focus is requested by the caller (terminal_view) when the active
         // session changes, or right here when the pane is clicked. We never
         // steal focus automatically — that breaks TextEdits in split views.
-
-        if response.has_focus() {
+        //
+        // Recovery case: egui can lose widget focus on Wayland (pointer
+        // leaves the window for a frame, WM hint, etc.). When that happens,
+        // NO widget reports focus and `response.has_focus()` returns false
+        // — so keystrokes are silently dropped and the user has to mash
+        // Enter. If nothing at all has focus and we're the active session,
+        // process keys here and re-request focus.
+        //
+        // We must NOT do this when another widget owns focus (SFTP path
+        // TextEdit, settings field, ...) — otherwise keys would type both
+        // there and here.
+        let has_egui_focus = response.has_focus();
+        let nothing_else_has_focus = ui.memory(|m| m.focused().is_none());
+        if is_active_session && (has_egui_focus || nothing_else_has_focus) {
+            if !has_egui_focus && nothing_else_has_focus {
+                response.request_focus();
+                crate::dbg_log!("kbd_focus_recover id={}", self.id);
+            }
             self.handle_keyboard_events(ui.ctx(), settings, toast);
         }
 

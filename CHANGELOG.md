@@ -4,6 +4,39 @@ All notable changes to AZTerm are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.3.1] - 2026-09-24
+
+### Fixed
+- **Keystrokes could be silently dropped when the terminal lost egui
+  focus.** On Wayland, egui occasionally drops widget focus for a frame
+  (pointer briefly leaves the window, WM hint, etc.), and the terminal
+  was gated strictly on `response.has_focus()`. When nothing else had
+  focus, every keystroke — most noticeably Enter after a `cd` — was
+  discarded, so users had to mash the key or click the pane to type
+  again. The terminal now re-requests focus and processes the current
+  frame's events when it detects that no widget owns focus. This does
+  not affect split-view layouts: if an SFTP path field or settings
+  field owns focus, the terminal stays out of the way.
+- **Tab for shell autocomplete stole focus and made the terminal
+  unresponsive.** egui's built-in Tab navigation moved focus to the
+  next widget in the tab order whenever Tab was pressed, so `cd <Tab>`
+  autocomplete worked but subsequent typing went to the wrong widget
+  until the user clicked back into the terminal. Terminal panes now
+  install an `EventFilter` focus-lock (`tab: true`) so egui does not
+  consume Tab; the terminal handles Tab itself and sends a raw `\t`
+  byte to the PTY. Shift+Tab sends `ESC [ Z` (xterm backtab), which
+  zsh and readline map to reverse-menu-complete.
+- Removed the Tab interceptor from `handle_terminal_shortcuts` in
+  `main.rs`. It was consuming Tab events before the focused terminal
+  widget could see them, which is what caused the focus handoff in the
+  first place.
+
+### Changed
+- Added a `kbd_enter` diagnostic log line (enabled only in debug mode)
+  that records the modifier state of every Enter keypress. Useful for
+  isolating future input regressions without adding temporary prints.
+
+
 ## [0.3.0] - 2026-09-24
 
 ### Added
