@@ -1,5 +1,6 @@
 // src/main.rs
 mod db;
+mod debug_log;
 mod settings;
 mod sftp;
 mod ssh;
@@ -1194,6 +1195,9 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Reconcile debug logging with current settings (cheap no-op if unchanged).
+        debug_log::init(self.settings.debug_mode, &self.settings.debug_log_path);
+
         if !self.settings.use_system_titlebar {
             let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
             handle_window_resize_borders(ctx, is_max);
@@ -1280,6 +1284,18 @@ impl eframe::App for AppState {
 fn main() -> eframe::Result<()> {
     let cli_opts = parse_cli_arguments();
     let initial_settings = AppSettings::load();
+
+    // Install panic hook FIRST so any panic during startup is captured.
+    debug_log::install_panic_hook();
+    debug_log::init(initial_settings.debug_mode, &initial_settings.debug_log_path);
+
+    if initial_settings.debug_mode {
+        debug_log::log(format!(
+            "boot: debug_mode=on log_path={} version={}",
+            initial_settings.debug_log_path,
+            env!("CARGO_PKG_VERSION"),
+        ));
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

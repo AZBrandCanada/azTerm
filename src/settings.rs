@@ -16,6 +16,11 @@ fn default_zoom_factor() -> f32 {
     1.0
 }
 
+fn default_debug_log_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    format!("{}/.config/azterm/debug.log", home)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub default_shell: String,
@@ -53,6 +58,9 @@ pub struct AppSettings {
 
     #[serde(default = "default_zoom_factor")]
     pub zoom_factor: f32,
+
+    #[serde(default = "default_debug_log_path")]
+    pub debug_log_path: String,
 
     #[serde(default)]
     pub pending_update: Option<String>,
@@ -99,6 +107,7 @@ impl Default for AppSettings {
             backspace_sequence: BackspaceSequence::Delete127,
             scrollback_lines: 10000,
             zoom_factor: 1.0,
+            debug_log_path: default_debug_log_path(),
             pending_update: None,
         }
     }

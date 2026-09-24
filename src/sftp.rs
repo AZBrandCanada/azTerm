@@ -189,9 +189,18 @@ pub fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), 
 }
 
 pub fn verify_remote_sudo_password(profile: &SshProfile, password: &str) -> bool {
+    let t0 = std::time::Instant::now();
+    crate::dbg_log!("sudo_verify begin host={}", profile.host);
     let b64 = to_base64(password.as_bytes());
     let cmd_str = format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p ''\"", b64);
-    run_remote_ssh_cmd(profile, &cmd_str).is_ok()
+    let ok = run_remote_ssh_cmd(profile, &cmd_str).is_ok();
+    crate::dbg_log!(
+        "sudo_verify end host={} ok={} elapsed_ms={}",
+        profile.host,
+        ok,
+        t0.elapsed().as_millis()
+    );
+    ok
 }
 
 pub fn wrap_read_with_remote_sudo(file_path: &str, password: &str) -> String {

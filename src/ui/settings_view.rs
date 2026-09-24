@@ -405,7 +405,28 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             setting_row_disabled(ui, "Confirm Before Window Exit", "Ask for confirmation before terminating running session processes.", app.settings.confirm_before_exit);
                             setting_row_disabled(ui, "Mask Host IP Address", "Hide server IPs from status bars and session titles.", app.settings.hide_ip);
                             setting_row_disabled(ui, "Disable Connection History", "Do not cache recent SSH session targets in SQLite.", app.settings.disable_connection_history);
-                            setting_row_disabled(ui, "Debug Logging Mode", "Emit verbose PTY and layout traces to stderr.", app.settings.debug_mode);
+                            changed |= setting_row_toggle(
+                                ui,
+                                "Debug Logging Mode",
+                                "Write timestamped traces of PTY, SSH, SFTP and layout operations to a log file. Leave on if you are chasing a freeze or crash.",
+                                &mut app.settings.debug_mode,
+                                &app.theme,
+                            );
+
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(egui::RichText::new("Debug Log Path").strong().color(app.theme.text_primary_color()));
+                                    ui.label(egui::RichText::new("File is appended to on each run; rotates to .old at 20 MB.").small().color(app.theme.text_muted_color()));
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(egui::TextEdit::singleline(&mut app.settings.debug_log_path).desired_width(280.0)).changed() {
+                                        changed = true;
+                                    }
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
                         }
                     }
                 });

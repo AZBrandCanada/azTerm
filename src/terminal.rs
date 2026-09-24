@@ -358,6 +358,12 @@ impl TerminalSession {
         if self.scroll_offset > 0 && !self.parser.screen().alternate_screen() {
             self.set_view_scroll(0);
         }
+        crate::dbg_log!(
+            "pty_send_input id={} bytes={} preview={:?}",
+            self.id,
+            text.len(),
+            &text.chars().take(48).collect::<String>()
+        );
         let _ = self.writer_tx.try_send(WriterMsg::Data(text.as_bytes().to_vec()));
     }
 
@@ -418,6 +424,12 @@ impl TerminalSession {
             text.replace("\r\n", "\n").replace('\r', "\n")
         };
 
+        crate::dbg_log!(
+            "pty_send_paste id={} bytes={} bracketed={}",
+            self.id,
+            payload.len(),
+            bracketed
+        );
         let _ = self.writer_tx.try_send(WriterMsg::Data(payload.into_bytes()));
     }
 
@@ -466,6 +478,10 @@ impl TerminalSession {
             if total_bytes > 262_144 {
                 break;
             }
+        }
+
+        if total_bytes > 0 {
+            crate::dbg_log!("pty_poll id={} bytes={}", self.id, total_bytes);
         }
 
         if in_alt {

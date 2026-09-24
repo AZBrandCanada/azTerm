@@ -148,6 +148,8 @@ impl SshStore {
     }
 
     pub fn cleanup_stale_socket(profile_id: &str) {
+        let t0 = std::time::Instant::now();
+        crate::dbg_log!("ssh_cleanup_stale begin profile={}", profile_id);
         let socket_path = Self::sockets_dir().join(format!("{}.sock", profile_id));
         if socket_path.exists() {
             let output = Command::new("ssh")
@@ -168,6 +170,11 @@ impl SshStore {
                 }
             }
         }
+        crate::dbg_log!(
+            "ssh_cleanup_stale end profile={} elapsed_ms={}",
+            profile_id,
+            t0.elapsed().as_millis()
+        );
     }
 
     pub fn ensure_secure_permissions(path_str: &str) {
