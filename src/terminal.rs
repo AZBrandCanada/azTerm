@@ -1024,12 +1024,19 @@ impl TerminalSession {
         // in alternate screen) so we can route the wheel to the app instead
         // of the terminal scrollback.
         let tui_in_primary = !has_mouse && !in_alternate && self.looks_like_primary_screen_tui();
-        // Scrollback bar is only shown when we actually own the wheel.
+        // Scrollback bar is only drawn when we actually own the wheel.
         let show_scrollback_bar = !app_wants_mouse && !in_alternate && !tui_in_primary;
-        let scrollbar_width = if show_scrollback_bar { 12.0 } else { 0.0 };
+        // Always reserve scrollbar width for the *column math*, so entering
+        // or leaving alt-screen (which toggles scrollbar visibility) does not
+        // change the pty column count and trigger a spurious resize. btop,
+        // htop, top and friends don't repaint cleanly when SIGWINCH arrives
+        // mid-startup, which is what caused the double-render / ghost rows.
+        // When the bar is hidden, the reserved strip is simply unused space.
+        const SCROLLBAR_RESERVE: f32 = 12.0;
+        let scrollbar_width = if show_scrollback_bar { SCROLLBAR_RESERVE } else { 0.0 };
 
         let avail = ui.available_size();
-        let usable_w = (avail.x - scrollbar_width).max(80.0);
+        let usable_w = (avail.x - SCROLLBAR_RESERVE).max(80.0);
         let usable_h = avail.y.max(40.0);
         let new_cols = ((usable_w / char_width).floor() as u16).max(20);
         let new_rows = ((usable_h / row_height).floor() as u16).max(4);
@@ -1047,7 +1054,9 @@ impl TerminalSession {
             // previous size. Wipe the parser's visible grid — the app is
             // redrawn by SIGWINCH immediately, and shells redraw their prompt
             // via readline, so a brief blank frame is imperceptible.
-            self.parser.process(b"\x1b[2J\x1b[H");
+            if in_alternate || tui_in_primary {
+                self.parser.process(b"\x1b[2J\x1b[H");
+            }
 
             if let Ok(master) = self.master_pty.lock() {
                 let _ = master.resize(PtySize {
