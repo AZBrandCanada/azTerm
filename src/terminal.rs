@@ -618,7 +618,12 @@ impl TerminalSession {
         result
     }
 
-    fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+    fn handle_keyboard_events(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &AppSettings,
+        toast: &mut Option<(String, std::time::Instant)>,
+    ) {
         // If egui already produced an Event::Paste this frame, do NOT also send
         // the raw 0x16 (Ctrl+V / readline quoted-insert) — that double-input
         // corrupts pasted scripts and leaves readline in a weird state.
@@ -728,10 +733,33 @@ impl TerminalSession {
                             }
                         }
 
+                        if modifiers.ctrl && modifiers.shift && *key == egui::Key::A {
+                            // Select the entire scrollback buffer + current screen.
+                            let max = self.query_max_scrollback();
+                            let top_age = (max + self.rows as usize - 1) as i64;
+                            self.selection_start = Some((top_age, 0));
+                            self.selection_end = Some((0i64, self.cols.saturating_sub(1)));
+                            self.is_dragging_selection = false;
+                            crate::dbg_log!(
+                                "sel_all id={} scrollback={} rows={} top_age={}",
+                                self.id, max, self.rows, top_age
+                            );
+                            *toast = Some((
+                                format!("Selected {} line(s) of scrollback (Ctrl+Shift+C to copy)", max + self.rows as usize),
+                                std::time::Instant::now(),
+                            ));
+                            continue;
+                        }
+
                         if modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
                             let selected = self.extract_selected_text();
                             if !selected.is_empty() {
                                 set_system_clipboard_text(Some(ctx), &selected);
+                                let line_count = selected.lines().count().max(1);
+                                *toast = Some((
+                                    format!("Copied {} line(s)", line_count),
+                                    std::time::Instant::now(),
+                                ));
                             }
                             continue;
                         }
@@ -906,7 +934,7 @@ impl TerminalSession {
         // Only consume keyboard input while this widget actually owns egui
         // focus. Otherwise typing in other widgets leaks into the terminal.
         if response.has_focus() {
-            self.handle_keyboard_events(ui.ctx(), settings);
+            self.handle_keyboard_events(ui.ctx(), settings, toast);
         }
 
         if app_wants_mouse && !is_shift && is_active_session {
@@ -933,7 +961,9 @@ impl TerminalSession {
             }
         } else {
             // Alt-screen program with no mouse mode (nano, less, vim...):
-            // translate wheel to arrow keys, like xterm does.
+            // translate wheel into PageUp/PageDown. Arrow keys would move the
+            // cursor within the visible buffer without scrolling — PageUp/
+            // PageDown scroll the view, which is what users expect from a wheel.
             if grid_rect.contains(pointer_pos) && !is_ctrl && in_alternate {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {
@@ -943,8 +973,14 @@ impl TerminalSession {
                     }
                 });
                 if scroll_y != 0.0 {
-                    let count = ((scroll_y.abs() / 40.0).round() as usize).clamp(1, 5);
-                    let seq = if scroll_y > 0.0 { "\x1b[A" } else { "\x1b[B" };
+                    // One wheel notch (~50px) = one page step. Clamp so a
+                    // flick doesn't send dozens of page-ups.
+                    let count = ((scroll_y.abs() / 50.0).round() as usize).clamp(1, 3);
+                    let seq = if scroll_y > 0.0 { "\x1b[5~" } else { "\x1b[6~" };
+                    crate::dbg_log!(
+                        "altscreen_wheel id={} delta={:.1} count={} seq={:?}",
+                        self.id, scroll_y, count, seq
+                    );
                     for _ in 0..count {
                         self.send_input(seq);
                     }
@@ -1014,22 +1050,38 @@ impl TerminalSession {
                 self.selection_start = Some((age, cell_c));
                 self.selection_end = Some((age, cell_c));
                 self.is_dragging_selection = true;
+                crate::dbg_log!(
+                    "sel_start id={} age={} col={} scroll_offset={}",
+                    self.id, age, cell_c, self.scroll_offset
+                );
             }
 
             if self.is_dragging_selection && is_primary_down {
                 if pointer_pos.y < grid_rect.min.y && !in_alternate {
+                    // Drag past top: extend selection into scrollback. Preserve
+                    // the mouse's X-column so the oldest selected line starts at
+                    // the correct column, not at 0.
                     let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
-                    let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
+                    let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset + auto_scroll_lines);
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1);
-                    self.selection_end = Some((age, 0));
+                    self.selection_end = Some((age, cell_c));
+                    crate::dbg_log!(
+                        "sel_autoscroll_up id={} scroll_offset={} end=({},{})",
+                        self.id, self.scroll_offset, age, cell_c
+                    );
                     ui.ctx().request_repaint();
                 } else if pointer_pos.y > grid_rect.max.y && !in_alternate {
+                    // Drag past bottom: scroll toward live output.
                     let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
-                    let auto_scroll_lines = ((dist / 14.0).clamp(1.0, 10.0)) as usize;
+                    let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset.saturating_sub(auto_scroll_lines));
                     let age = self.scroll_offset as i64;
-                    self.selection_end = Some((age, self.cols.saturating_sub(1)));
+                    self.selection_end = Some((age, cell_c));
+                    crate::dbg_log!(
+                        "sel_autoscroll_down id={} scroll_offset={} end=({},{})",
+                        self.id, self.scroll_offset, age, cell_c
+                    );
                     ui.ctx().request_repaint();
                 } else {
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
@@ -1047,13 +1099,19 @@ impl TerminalSession {
                         let selected = self.extract_selected_text();
                         if !selected.trim().is_empty() {
                             set_system_clipboard_text(Some(ui.ctx()), &selected);
-                            let preview = if selected.len() > 24 {
-                                format!("{}...", &selected[..21].replace('\n', " "))
+                            let line_count = selected.lines().count().max(1);
+                            let preview = if selected.len() > 30 {
+                                format!("{}...", &selected[..27].replace('\n', " "))
                             } else {
                                 selected.replace('\n', " ")
                             };
+                            crate::dbg_log!(
+                                "sel_copy id={} bytes={} lines={} start=({},{}) end=({},{})",
+                                self.id, selected.len(), line_count,
+                                start.0, start.1, end.0, end.1
+                            );
                             *toast = Some((
-                                format!("Copied: {}", preview),
+                                format!("Copied {} line(s): {}", line_count, preview),
                                 std::time::Instant::now(),
                             ));
                         }
