@@ -11,6 +11,10 @@ use std::thread;
 #[cfg(target_os = "linux")]
 use arboard::{GetExtLinux, SetExtLinux};
 
+enum WriterMsg {
+    Data(Vec<u8>),
+}
+
 pub fn get_system_clipboard_text() -> Option<String> {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(text) = cb.get_text() {
@@ -104,7 +108,7 @@ pub struct TerminalSession {
     pub session_type: SessionType,
     pub parser: vt100::Parser,
     pub rx: Receiver<Vec<u8>>,
-    pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    pub writer_tx: SyncSender<WriterMsg>,
     pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub child_pid: Option<u32>,
     pub current_dir: Option<String>,
@@ -149,14 +153,30 @@ impl TerminalSession {
             .master
             .try_clone_reader()
             .expect("Failed to clone PTY reader");
-        let writer = Arc::new(Mutex::new(
-            pair.master
-                .take_writer()
-                .expect("Failed to take PTY writer"),
-        ));
+        let mut writer = pair
+            .master
+            .take_writer()
+            .expect("Failed to take PTY writer");
         let master_pty = Arc::new(Mutex::new(pair.master));
 
         let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(512);
+        let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) = sync_channel(4096);
+
+        // Dedicated writer thread. The UI never blocks on pty writes — it just
+        // hands bytes to this thread. This is what prevents UI freezes when
+        // SSH's stdin buffer backs up on a stalled connection.
+        thread::spawn(move || {
+            while let Ok(msg) = writer_rx.recv() {
+                match msg {
+                    WriterMsg::Data(bytes) => {
+                        if writer.write_all(&bytes).is_err() {
+                            break;
+                        }
+                        let _ = writer.flush();
+                    }
+                }
+            }
+        });
 
         thread::spawn(move || {
             let mut buf = [0u8; 16384];
@@ -182,7 +202,7 @@ impl TerminalSession {
             session_type,
             parser: vt100::Parser::new(rows, cols, scrollback_len.max(1000)),
             rx,
-            writer,
+            writer_tx,
             master_pty,
             child_pid,
             current_dir: initial_dir.clone(),
@@ -333,10 +353,7 @@ impl TerminalSession {
         if self.scroll_offset > 0 && !self.parser.screen().alternate_screen() {
             self.set_view_scroll(0);
         }
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(text.as_bytes());
-            let _ = w.flush();
-        }
+        let _ = self.writer_tx.try_send(WriterMsg::Data(text.as_bytes().to_vec()));
     }
 
     pub fn send_mouse_event(
@@ -372,11 +389,9 @@ impl TerminalSession {
                 let cb = 32u8.saturating_add(code);
                 let cx = (32u16.saturating_add(c)).min(255) as u8;
                 let cy = (32u16.saturating_add(r)).min(255) as u8;
-                if let Ok(mut w) = self.writer.lock() {
-                    let bytes = [b'\x1b', b'[', b'M', cb, cx, cy];
-                    let _ = w.write_all(&bytes);
-                    let _ = w.flush();
-                }
+                let _ = self.writer_tx.try_send(WriterMsg::Data(vec![
+                    b'\x1b', b'[', b'M', cb, cx, cy,
+                ]));
             }
         }
     }
@@ -398,10 +413,7 @@ impl TerminalSession {
             text.replace("\r\n", "\n").replace('\r', "\n")
         };
 
-        if let Ok(mut w) = self.writer.lock() {
-            let _ = w.write_all(payload.as_bytes());
-            let _ = w.flush();
-        }
+        let _ = self.writer_tx.try_send(WriterMsg::Data(payload.into_bytes()));
     }
 
     pub fn poll_updates(&mut self) {
@@ -586,6 +598,13 @@ impl TerminalSession {
     }
 
     fn handle_keyboard_events(&mut self, ctx: &egui::Context, settings: &AppSettings) {
+        // If egui already produced an Event::Paste this frame, do NOT also send
+        // the raw 0x16 (Ctrl+V / readline quoted-insert) — that double-input
+        // corrupts pasted scripts and leaves readline in a weird state.
+        let has_paste_event = ctx.input(|i| {
+            i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+        });
+
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
@@ -729,7 +748,7 @@ impl TerminalSession {
                                 egui::Key::S => Some(19),
                                 egui::Key::T => Some(20),
                                 egui::Key::U => Some(21),
-                                egui::Key::V => Some(22),
+                                egui::Key::V if !has_paste_event => Some(22),
                                 egui::Key::W => Some(23),
                                 egui::Key::X => Some(24),
                                 egui::Key::Y => Some(25),
@@ -860,11 +879,17 @@ impl TerminalSession {
 
         let is_active_session = has_focus || user_clicked_pane;
 
-        if is_active_session && !response.has_focus() {
+        // Auto-grab egui focus when this terminal is the active session and no
+        // other widget (e.g. an SFTP path TextEdit) currently holds focus.
+        // Do NOT force focus if some other widget already owns it — otherwise
+        // the terminal steals keystrokes from text inputs.
+        if is_active_session && !response.has_focus() && ui.memory(|m| m.focused().is_none()) {
             response.request_focus();
         }
 
-        if is_active_session {
+        // Only consume keyboard input while this widget actually owns egui
+        // focus. Otherwise typing in other widgets leaks into the terminal.
+        if response.has_focus() {
             self.handle_keyboard_events(ui.ctx(), settings);
         }
 

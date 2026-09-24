@@ -72,7 +72,6 @@ pub struct FileTransferRecord {
     pub time: chrono::DateTime<chrono::Local>,
 }
 
-#[derive(Clone)]
 pub struct SftpSudoPrompt {
     pub host_label: String,
     pub username: String,
@@ -84,6 +83,7 @@ pub struct SftpSudoPrompt {
     pub error_msg: Option<String>,
     pub needs_focus: bool,
     pub tx_reply: Arc<Mutex<Option<Sender<Option<String>>>>>,
+    pub verify_rx: Option<Receiver<bool>>,
 }
 
 pub struct PaneBrowser {
@@ -1718,6 +1718,7 @@ impl SftpManager {
                                                         error_msg: None,
                                                         needs_focus: true,
                                                         tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                                        verify_rx: None,
                                                     });
                                                 }
 
@@ -1741,6 +1742,7 @@ impl SftpManager {
                                                         error_msg: None,
                                                         needs_focus: true,
                                                         tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                                        verify_rx: None,
                                                     });
                                                 }
 
@@ -1893,6 +1895,7 @@ impl SftpManager {
                                         error_msg: None,
                                         needs_focus: true,
                                         tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                        verify_rx: None,
                                     });
                                 }
 
@@ -2006,6 +2009,7 @@ impl SftpManager {
                                         error_msg: None,
                                         needs_focus: true,
                                         tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                                        verify_rx: None,
                                     });
                                 }
 
@@ -2146,6 +2150,41 @@ impl SftpManager {
     pub fn render_transfer_history_window(&mut self, ctx: &egui::Context, theme: &ThemeConfig) {
         let mut sudo_to_cancel = false;
         let mut sudo_to_submit: Option<String> = None;
+        let mut verification_result: Option<(bool, String)> = None;
+
+        // Drain any result from an in-flight async sudo password check.
+        {
+            let mut p_lock = self.sudo_prompt.lock().unwrap();
+            if let Some(ref mut prompt) = *p_lock {
+                if let Some(ref rx) = prompt.verify_rx {
+                    match rx.try_recv() {
+                        Ok(valid) => {
+                            verification_result = Some((valid, String::new()));
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            verification_result = Some((false, "Verification failed".to_string()));
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+            }
+        }
+
+        if let Some((valid, err)) = verification_result {
+            let mut p_lock = self.sudo_prompt.lock().unwrap();
+            if valid {
+                if let Some(prompt) = p_lock.take() {
+                    sudo_to_submit = Some(prompt.password_input.clone());
+                }
+            } else if let Some(ref mut prompt) = *p_lock {
+                prompt.verify_rx = None;
+                prompt.error_msg = Some(if err.is_empty() {
+                    "Incorrect sudo password. Please try again.".to_string()
+                } else {
+                    err
+                });
+            }
+        }
 
         if let Some(ref mut prompt) = *self.sudo_prompt.lock().unwrap() {
             egui::Window::new("[Sudo Authentication Required]")
@@ -2175,12 +2214,14 @@ impl SftpManager {
                         ui.add_space(8.0);
 
                         let mut submit_pressed = false;
+                        let verifying = prompt.verify_rx.is_some();
 
                         ui.horizontal(|ui| {
-                            let resp = ui.add(
+                            let resp = ui.add_enabled(
+                                !verifying,
                                 egui::TextEdit::singleline(&mut prompt.password_input)
                                     .password(!prompt.show_plain)
-                                    .desired_width(240.0)
+                                    .desired_width(240.0),
                             );
 
                             if prompt.needs_focus || !resp.has_focus() {
@@ -2200,21 +2241,43 @@ impl SftpManager {
                             ui.label(egui::RichText::new(err).small().color(theme.danger_color()));
                         }
 
+                        if verifying {
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Verifying credentials...")
+                                    .small()
+                                    .color(theme.accent_color()),
+                            );
+                        }
+
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if ui.button(egui::RichText::new("Authenticate & Continue").strong().color(theme.accent_color())).clicked() || submit_pressed {
-                                let pw = prompt.password_input.clone();
-                                let valid = if let Some(ref prof) = prompt.profile_opt {
-                                    verify_remote_sudo_password(prof, &pw)
-                                } else {
-                                    true
-                                };
+                            let can_submit = !verifying && !prompt.password_input.is_empty();
+                            let clicked = ui
+                                .add_enabled(
+                                    can_submit,
+                                    egui::Button::new(
+                                        egui::RichText::new("Authenticate & Continue")
+                                            .strong()
+                                            .color(theme.accent_color()),
+                                    ),
+                                )
+                                .clicked();
 
-                                if valid {
-                                    sudo_to_submit = Some(pw);
-                                } else {
-                                    prompt.error_msg = Some("Incorrect sudo password. Please try again.".to_string());
-                                }
+                            if clicked || (submit_pressed && can_submit) {
+                                let pw = prompt.password_input.clone();
+                                let profile = prompt.profile_opt.clone();
+                                let (tx, rx) = channel::<bool>();
+                                prompt.verify_rx = Some(rx);
+                                prompt.error_msg = None;
+                                std::thread::spawn(move || {
+                                    let valid = match profile {
+                                        Some(prof) => verify_remote_sudo_password(&prof, &pw),
+                                        None => true,
+                                    };
+                                    let _ = tx.send(valid);
+                                });
+                                ctx.request_repaint();
                             }
                             if ui.button("Cancel").clicked() {
                                 sudo_to_cancel = true;

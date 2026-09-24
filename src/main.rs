@@ -505,7 +505,11 @@ impl AppState {
     pub fn open_ssh_auth_modal(&mut self, profile: SshProfile, target_pane_id: String, ctx: egui::Context) {
         let socket_path = SshStore::sockets_dir().join(format!("{}.sock", profile.id));
         if socket_path.exists() {
-            SshStore::cleanup_stale_socket(&profile.id);
+            // Fire-and-forget probe; do not block the UI thread.
+            let pid = profile.id.clone();
+            std::thread::spawn(move || {
+                SshStore::cleanup_stale_socket(&pid);
+            });
         }
         if socket_path.exists() {
             if target_pane_id == "sftp_left" {
@@ -558,6 +562,7 @@ impl AppState {
 
         std::thread::spawn(move || {
             use std::io::Read;
+            const MAX_OUTPUT: usize = 64 * 1024;
             let mut buf = [0u8; 1024];
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
@@ -566,6 +571,14 @@ impl AppState {
                 let chunk = String::from_utf8_lossy(&buf[..n]);
                 if let Ok(mut text) = output_clone.lock() {
                     text.push_str(&chunk);
+                    if text.len() > MAX_OUTPUT {
+                        // Drain from the front, respecting char boundaries.
+                        let mut cut = text.len() - MAX_OUTPUT;
+                        while cut < text.len() && !text.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        text.drain(..cut);
+                    }
                 }
                 ctx_clone.request_repaint();
             }
@@ -716,7 +729,12 @@ impl AppState {
     }
 
     pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
-        SshStore::cleanup_stale_socket(&profile.id);
+        // Cleanup can shell out to `ssh -O check` and block for seconds on a
+        // dead socket — do it on a worker thread so the UI never freezes.
+        let pid_for_cleanup = profile.id.clone();
+        std::thread::spawn(move || {
+            SshStore::cleanup_stale_socket(&pid_for_cleanup);
+        });
 
         let mut cmd = profile.to_command();
         cmd.env("COLORTERM", "truecolor");
@@ -789,7 +807,10 @@ impl AppState {
                     .filter(|other| other.id != session_id && matches!(&other.session_type, SessionType::Ssh { profile_id: p } if p == profile_id))
                     .count();
                 if remaining_ssh_count == 0 {
-                    SshStore::cleanup_stale_socket(profile_id);
+                    let pid = profile_id.clone();
+                    std::thread::spawn(move || {
+                        SshStore::cleanup_stale_socket(&pid);
+                    });
                 }
             }
         }
