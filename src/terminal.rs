@@ -125,6 +125,11 @@ pub struct TerminalSession {
 }
 
 impl TerminalSession {
+    /// Stable widget id used for keyboard focus tracking.
+    pub fn widget_id(session_id: usize) -> egui::Id {
+        egui::Id::new(("azterm_terminal_pane", session_id))
+    }
+
     pub fn new(
         id: usize,
         title: String,
@@ -841,10 +846,9 @@ impl TerminalSession {
 
         let mut user_clicked_pane = false;
 
-        let (full_rect, response) = ui.allocate_exact_size(
-            total_size,
-            egui::Sense::click_and_drag(),
-        );
+        let widget_id = Self::widget_id(self.id);
+        let (full_rect, _) = ui.allocate_exact_size(total_size, egui::Sense::hover());
+        let response = ui.interact(full_rect, widget_id, egui::Sense::click_and_drag());
 
         let grid_rect = egui::Rect::from_min_size(full_rect.min, term_grid_size);
         let sb_track = egui::Rect::from_min_max(
@@ -879,13 +883,9 @@ impl TerminalSession {
 
         let is_active_session = has_focus || user_clicked_pane;
 
-        // Auto-grab egui focus when this terminal is the active session and no
-        // other widget (e.g. an SFTP path TextEdit) currently holds focus.
-        // Do NOT force focus if some other widget already owns it — otherwise
-        // the terminal steals keystrokes from text inputs.
-        if is_active_session && !response.has_focus() && ui.memory(|m| m.focused().is_none()) {
-            response.request_focus();
-        }
+        // Focus is requested by the caller (terminal_view) when the active
+        // session changes, or right here when the pane is clicked. We never
+        // steal focus automatically — that breaks TextEdits in split views.
 
         // Only consume keyboard input while this widget actually owns egui
         // focus. Otherwise typing in other widgets leaks into the terminal.
@@ -916,6 +916,26 @@ impl TerminalSession {
                 self.send_mouse_event(2, true, cell_c, cell_r, ui.input(|i| i.modifiers));
             }
         } else {
+            // Alt-screen program with no mouse mode (nano, less, vim...):
+            // translate wheel to arrow keys, like xterm does.
+            if grid_rect.contains(pointer_pos) && !is_ctrl && in_alternate {
+                let scroll_y = ui.input(|i| {
+                    if i.raw_scroll_delta.y != 0.0 {
+                        i.raw_scroll_delta.y
+                    } else {
+                        i.smooth_scroll_delta.y
+                    }
+                });
+                if scroll_y != 0.0 {
+                    let count = ((scroll_y.abs() / 40.0).round() as usize).clamp(1, 5);
+                    let seq = if scroll_y > 0.0 { "\x1b[A" } else { "\x1b[B" };
+                    for _ in 0..count {
+                        self.send_input(seq);
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
+
             if grid_rect.contains(pointer_pos) && !is_ctrl && !in_alternate {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {

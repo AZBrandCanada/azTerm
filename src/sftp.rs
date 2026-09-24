@@ -8,7 +8,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1574,8 +1573,11 @@ impl SftpManager {
                     }
                 }
 
+                #[allow(unused_assignments)]
                 let mut transfer_success = false;
+                #[allow(unused_assignments)]
                 let mut error_msg = String::new();
+                #[allow(unused_assignments)]
                 let mut total_transferred = 0u64;
 
                 let mut sudo_pw_src: Option<String> = match &src_target {
@@ -1836,8 +1838,6 @@ impl SftpManager {
                                 let remote_dest_folder = dest_dir.trim_end_matches('/');
 
                                 if is_dir {
-                                    let safe_parent = src_dir.trim_end_matches('/').replace('\'', "'\\''");
-                                    let safe_folder = file_name.replace('\'', "'\\''");
                                     let safe_dest = remote_dest_folder.replace('\'', "'\\''");
 
                                     if let Some(ref pw) = sudo_pw_dest {

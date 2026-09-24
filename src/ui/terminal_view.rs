@@ -58,6 +58,15 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
 
     app.last_pane_rects = pane_rects.clone();
 
+    // Hand keyboard focus to the active terminal when the session changes.
+    // Doing it once per switch (instead of every frame) avoids stealing
+    // focus from TextEdits in the SFTP split view.
+    if app.last_focused_session_id != Some(app.active_session_id) {
+        let widget_id = crate::terminal::TerminalSession::widget_id(app.active_session_id);
+        ctx.memory_mut(|m| m.request_focus(widget_id));
+        app.last_focused_session_id = Some(app.active_session_id);
+    }
+
     let is_primary_down = ui.input(|i| i.pointer.primary_down());
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
 

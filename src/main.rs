@@ -271,6 +271,7 @@ pub struct AppState {
     pub dragging_pane_id: Option<usize>,
     pub next_split_id: usize,
     pub last_pane_rects: Vec<(usize, egui::Rect)>,
+    pub last_focused_session_id: Option<usize>,
 
     pub sftp: SftpManager,
     pub next_tab_id: usize,
@@ -376,6 +377,7 @@ impl AppState {
             dragging_pane_id: None,
             next_split_id: 1,
             last_pane_rects: Vec::new(),
+            last_focused_session_id: None,
 
             sftp: SftpManager::new(),
             next_tab_id: 1,
