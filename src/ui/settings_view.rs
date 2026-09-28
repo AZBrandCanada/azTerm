@@ -252,6 +252,12 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                             app.settings.save();
                                         }
                                         for (idx, font) in font_list.iter().enumerate() {
+                                            // Terminal cells are a fixed grid; only
+                                            // monospaced fonts render correctly. Hide
+                                            // proportional fonts from this dropdown.
+                                            if !font.is_mono {
+                                                continue;
+                                            }
                                             let path_str = font.path.to_string_lossy().to_string();
                                             let is_selected = app.settings.terminal_font_path == path_str;
                                             let label = if app.preview_fonts_loaded
