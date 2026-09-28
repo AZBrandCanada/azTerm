@@ -7,8 +7,20 @@ use eframe::egui;
 
 pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
     egui::TopBottomPanel::top("top_nav")
-        .frame(egui::Frame::none().fill(app.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 7.0)))
+        .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 7.0)))
         .show(ctx, |ui| {
+            // Vertical gradient behind the nav content, from a lighter
+            // shade at the top to a darker shade at the bottom. This is
+            // what gives the bar physical "chrome" depth instead of
+            // looking like a flat filled rectangle.
+            let bar_rect = ui.painter().clip_rect();
+            let base = app.theme.bg_panel_color();
+            crate::modern::gradient_rect(
+                ui.painter(),
+                bar_rect,
+                crate::modern::lighten(base, 14),
+                crate::modern::darken(base, 10),
+            );
             ui.horizontal(|ui| {
                 let brand_resp = ui.add(
                     egui::Label::new(
@@ -52,16 +64,16 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
                 }
 
                 if app.active_view == ActiveView::Terminal {
-                    if ui.button("Split Right").on_hover_text("Split active pane side-by-side (Ctrl+Shift+D)").clicked() {
+                    if crate::modern::button_small(ui, &app.theme, "Split Right").on_hover_text("Split active pane side-by-side (Ctrl+Shift+D)").clicked() {
                         app.split_active_pane(SplitDirection::Horizontal, ctx.clone());
                     }
-                    if ui.button("Split Down").on_hover_text("Split active pane top-and-bottom (Ctrl+Shift+E)").clicked() {
+                    if crate::modern::button_small(ui, &app.theme, "Split Down").on_hover_text("Split active pane top-and-bottom (Ctrl+Shift+E)").clicked() {
                         app.split_active_pane(SplitDirection::Vertical, ctx.clone());
                     }
                     if let Some(ws) = app.workspaces.get(app.active_workspace_idx) {
                         if !ws.is_single_pane() {
                             let max_label = if ws.maximized_session.is_some() { "Restore Splits" } else { "Maximize Pane" };
-                            if ui.button(max_label).on_hover_text("Toggle maximize active pane (Ctrl+Shift+M)").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, max_label).on_hover_text("Toggle maximize active pane (Ctrl+Shift+M)").clicked() {
                                 if let Some(ws_mut) = app.workspaces.get_mut(app.active_workspace_idx) {
                                     ws_mut.maximized_session = if ws_mut.maximized_session.is_some() { None } else { Some(app.active_session_id) };
                                 }
@@ -71,7 +83,7 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
 
                     let current_is_multi = app.workspaces.get(app.active_workspace_idx).map_or(false, |w| !w.is_single_pane());
                     if current_is_multi {
-                        if ui.button("Untile Active Tab").on_hover_text("Detach tiled panes in this tab into separate tabs").clicked() {
+                        if crate::modern::button_small(ui, &app.theme, "Untile Active Tab").on_hover_text("Detach tiled panes in this tab into separate tabs").clicked() {
                             app.untile_all_to_tabs();
                         }
                     }
@@ -82,7 +94,7 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
                         && (app.workspaces.len() > optimal_tabs_count || app.workspaces.iter().any(|w| w.is_single_pane()));
 
                     if can_tile_more {
-                        if ui.button("Tile All Tabs").on_hover_text("Tile all open tabs into balanced grids (batches of 16 per tab)").clicked() {
+                        if crate::modern::button_small(ui, &app.theme, "Tile All Tabs").on_hover_text("Tile all open tabs into balanced grids (batches of 16 per tab)").clicked() {
                             app.tile_all_tabs();
                         }
                     }
@@ -90,25 +102,29 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
 
                 if !app.settings.use_system_titlebar {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let close_resp = ui.add(
-                            egui::Button::new(egui::RichText::new("X").size(12.0).color(app.theme.text_primary_color()))
-                                .min_size(egui::vec2(28.0, 22.0))
-                                .fill(egui::Color32::TRANSPARENT)
-                        );
-                        if close_resp.hovered() {
-                            ui.painter().rect_filled(close_resp.rect, 3.0, app.theme.danger_color());
-                        }
-                        if close_resp.clicked() {
+                        if crate::modern::Button3D::new("X")
+                            .compact()
+                            .min_size(egui::vec2(28.0, 22.0))
+                            .fill(app.theme.bg_card_color())
+                            .edge(crate::modern::darken(app.theme.bg_card_color(), 40))
+                            .text_color(app.theme.text_primary_color())
+                            .show(ui, &app.theme)
+                            .clicked()
+                        {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
 
                         let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                         let max_icon = if is_max { "Restore" } else { "Max" };
-                        if ui.add(
-                            egui::Button::new(egui::RichText::new(max_icon).size(11.0).color(app.theme.text_primary_color()))
-                                .min_size(egui::vec2(44.0, 22.0))
-                                .fill(egui::Color32::TRANSPARENT)
-                        ).clicked() {
+                        if crate::modern::Button3D::new(max_icon)
+                            .compact()
+                            .min_size(egui::vec2(44.0, 22.0))
+                            .fill(app.theme.bg_card_color())
+                            .edge(crate::modern::darken(app.theme.bg_card_color(), 40))
+                            .text_color(app.theme.text_primary_color())
+                            .show(ui, &app.theme)
+                            .clicked()
+                        {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                         }
 
@@ -150,11 +166,18 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
     egui::TopBottomPanel::top("session_tabs_bar")
         .frame(
             egui::Frame::none()
-                .fill(app.theme.bg_panel_color().linear_multiply(0.85))
                 .stroke(egui::Stroke::new(1.0_f32, app.theme.border_color()))
                 .inner_margin(egui::Margin::symmetric(14.0, 4.0)),
         )
         .show(ctx, |ui| {
+            let bar_rect = ui.painter().clip_rect();
+            let base = app.theme.bg_panel_color().linear_multiply(0.85);
+            crate::modern::gradient_rect(
+                ui.painter(),
+                bar_rect,
+                crate::modern::lighten(base, 10),
+                crate::modern::darken(base, 12),
+            );
             ui.horizontal(|ui| {
                 let mut tab_to_close: Option<usize> = None;
                 let avail_w = (ui.available_width() - 20.0).max(100.0);
@@ -238,8 +261,16 @@ pub fn render_status_bar(app: &mut AppState, ctx: &egui::Context) {
     app.sftp.poll_transfers(ctx);
 
     egui::TopBottomPanel::bottom("bottom_status_bar")
-        .frame(egui::Frame::none().fill(app.theme.bg_panel_color()).inner_margin(egui::Margin::symmetric(14.0, 4.0)))
+        .frame(egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 4.0)))
         .show(ctx, |ui| {
+            let bar_rect = ui.painter().clip_rect();
+            let base = app.theme.bg_panel_color();
+            crate::modern::gradient_rect(
+                ui.painter(),
+                bar_rect,
+                crate::modern::lighten(base, 6),
+                crate::modern::darken(base, 14),
+            );
             ui.horizontal(|ui| {
                 if let Some(session) = app.sessions.iter().find(|s| s.id == app.active_session_id) {
                     let info = match &session.session_type {

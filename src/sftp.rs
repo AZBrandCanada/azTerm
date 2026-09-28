@@ -856,14 +856,14 @@ impl PaneBrowser {
                         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Create").clicked() || enter {
+                            if crate::modern::button_accent(ui, theme, "Create").clicked() || enter {
                                 let name = self.new_dir_name.trim().to_string();
                                 if !name.is_empty() {
                                     create_dir_target = Some(name);
                                 }
                                 close_modal = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if crate::modern::button(ui, theme, "Cancel").clicked() {
                                 close_modal = true;
                             }
                         });
@@ -900,14 +900,14 @@ impl PaneBrowser {
                         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Rename").clicked() || enter {
+                            if crate::modern::button_accent(ui, theme, "Rename").clicked() || enter {
                                 let new_name = self.rename_new_name.trim().to_string();
                                 if !new_name.is_empty() {
                                     execute_rename = Some((self.rename_old_name.clone(), new_name));
                                 }
                                 close_modal = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if crate::modern::button(ui, theme, "Cancel").clicked() {
                                 close_modal = true;
                             }
                         });
@@ -943,14 +943,14 @@ impl PaneBrowser {
                         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         ui.add_space(10.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Move").clicked() || enter {
+                            if crate::modern::button_accent(ui, theme, "Move").clicked() || enter {
                                 let dest = self.move_dest_path.trim().to_string();
                                 if !dest.is_empty() {
                                     execute_move = Some((self.move_items.clone(), dest));
                                 }
                                 close_modal = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if crate::modern::button(ui, theme, "Cancel").clicked() {
                                 close_modal = true;
                             }
                         });
@@ -1001,11 +1001,11 @@ impl PaneBrowser {
                         ui.add_space(10.0);
 
                         ui.horizontal(|ui| {
-                            if ui.button(egui::RichText::new("Delete Permanently").strong().color(theme.danger_color())).clicked() {
+                            if crate::modern::button_danger(ui, theme, "Delete Permanently").clicked() {
                                 execute_delete = true;
                                 close_modal = true;
                             }
-                            if ui.button("Cancel").clicked() {
+                            if crate::modern::button(ui, theme, "Cancel").clicked() {
                                 close_modal = true;
                             }
                         });
@@ -2288,7 +2288,7 @@ impl SftpManager {
                                 });
                                 ctx.request_repaint();
                             }
-                            if ui.button("Cancel").clicked() {
+                            if crate::modern::button(ui, theme, "Cancel").clicked() {
                                 sudo_to_cancel = true;
                             }
                         });

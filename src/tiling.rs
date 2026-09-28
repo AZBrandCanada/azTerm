@@ -426,7 +426,22 @@ pub fn render_single_pane(
         rect.max,
     );
 
-    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, border_color));
+    // Neon accent glow around the currently focused pane. Layers of
+    // expanding accent-tinted strokes make the border bleed outward
+    // without any post-processing.
+    if is_focused {
+        // Tighter, softer glow so it reads as a highlight rather than a
+        // halo. Tab glow (in theme.rs) keeps its original spread.
+        crate::modern::accent_glow(
+            ui.painter(),
+            rect,
+            theme.accent_color(),
+            6.0,
+            0.65,
+            0.40,
+        );
+    }
+    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(1.2_f32, border_color));
 
     if header_height > 0.0 {
         let header_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), header_height));
@@ -462,25 +477,66 @@ pub fn render_single_pane(
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(egui::RichText::new("x").strong().color(theme.danger_color())).on_hover_text("Close Pane (Ctrl+Shift+W)").clicked() {
+                    // Close button — compact, danger fill.
+                    if crate::modern::Button3D::new("×")
+                        .compact()
+                        .fill(theme.danger_color())
+                        .edge(crate::modern::darken(theme.danger_color(), 45))
+                        .text_color(egui::Color32::WHITE)
+                        .show(ui, theme)
+                        .on_hover_text("Close Pane (Ctrl+Shift+W)")
+                        .clicked()
+                    {
                         actions.push(PaneAction::Close(session.id));
                     }
                     if rect.width() >= 130.0 {
-                        if ui.small_button("Pop").on_hover_text("Pop out to a separate tab").clicked() {
+                        if crate::modern::Button3D::new("Pop")
+                            .compact()
+                            .fill(theme.bg_card_color())
+                            .edge(crate::modern::darken(theme.bg_card_color(), 40))
+                            .text_color(theme.text_primary_color())
+                            .show(ui, theme)
+                            .on_hover_text("Pop out to a separate tab")
+                            .clicked()
+                        {
                             actions.push(PaneAction::PopToTab(session.id));
                         }
                     }
                     if rect.width() >= 160.0 {
                         let max_text = if is_maximized { "Restore" } else { "Max" };
-                        if ui.small_button(max_text).on_hover_text("Maximize / Restore Pane (Ctrl+Shift+M)").clicked() {
+                        if crate::modern::Button3D::new(max_text)
+                            .compact()
+                            .fill(theme.bg_card_color())
+                            .edge(crate::modern::darken(theme.bg_card_color(), 40))
+                            .text_color(theme.text_primary_color())
+                            .show(ui, theme)
+                            .on_hover_text("Maximize / Restore Pane (Ctrl+Shift+M)")
+                            .clicked()
+                        {
                             actions.push(PaneAction::ToggleMaximize(session.id));
                         }
                     }
                     if rect.width() >= 90.0 {
-                        if ui.small_button("Split V").on_hover_text("Split Down (Ctrl+Shift+E)").clicked() {
+                        if crate::modern::Button3D::new("Split V")
+                            .compact()
+                            .fill(theme.bg_card_color())
+                            .edge(crate::modern::darken(theme.bg_card_color(), 40))
+                            .text_color(theme.text_primary_color())
+                            .show(ui, theme)
+                            .on_hover_text("Split Down (Ctrl+Shift+E)")
+                            .clicked()
+                        {
                             actions.push(PaneAction::Split(session.id, SplitDirection::Vertical));
                         }
-                        if ui.small_button("Split H").on_hover_text("Split Right (Ctrl+Shift+D)").clicked() {
+                        if crate::modern::Button3D::new("Split H")
+                            .compact()
+                            .fill(theme.bg_card_color())
+                            .edge(crate::modern::darken(theme.bg_card_color(), 40))
+                            .text_color(theme.text_primary_color())
+                            .show(ui, theme)
+                            .on_hover_text("Split Right (Ctrl+Shift+D)")
+                            .clicked()
+                        {
                             actions.push(PaneAction::Split(session.id, SplitDirection::Horizontal));
                         }
                     }

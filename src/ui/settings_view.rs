@@ -15,19 +15,28 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
             let nav_item = |ui: &mut egui::Ui, cat: SettingsCategory, label: &str, current: SettingsCategory, theme: &ThemeConfig| -> bool {
                 let is_active = current == cat;
-                let bg = if is_active { theme.bg_card_color() } else { egui::Color32::TRANSPARENT };
-                let stroke = if is_active { egui::Stroke::new(1.0_f32, theme.accent_color()) } else { egui::Stroke::NONE };
 
-                egui::Frame::none()
-                    .fill(bg)
-                    .stroke(stroke)
-                    .rounding(4.0)
-                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
-                    .show(ui, |ui| {
-                        ui.set_width(180.0);
-                        let text_color = if is_active { theme.accent_color() } else { theme.text_primary_color() };
-                        ui.selectable_label(is_active, egui::RichText::new(label).color(text_color)).clicked()
-                    }).inner
+                let (fill, edge, text_color) = if is_active {
+                    (
+                        theme.accent_color(),
+                        crate::modern::darken(theme.accent_color(), 55),
+                        egui::Color32::from_rgb(15, 23, 42),
+                    )
+                } else {
+                    (
+                        theme.bg_card_color(),
+                        crate::modern::darken(theme.bg_card_color(), 40),
+                        theme.text_primary_color(),
+                    )
+                };
+
+                crate::modern::Button3D::new(label)
+                    .fill(fill)
+                    .edge(edge)
+                    .text_color(text_color)
+                    .min_size(egui::vec2(180.0, 30.0))
+                    .show(ui, theme)
+                    .clicked()
             };
 
             if nav_item(ui, SettingsCategory::Appearance, "Themes & Window", app.settings_category, &app.theme) {
@@ -53,7 +62,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
             ui.add_space(20.0);
             ui.separator();
             ui.add_space(8.0);
-            if ui.button("Restore Defaults").clicked() {
+            if crate::modern::button(ui, &app.theme, "Restore Defaults").clicked() {
                 app.settings = crate::settings::AppSettings::default();
                 app.settings.save();
                 app.theme = ThemeConfig::default();
@@ -92,7 +101,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                     ui.label(egui::RichText::new("Current scale (Ctrl +, Ctrl -, Ctrl 0 to reset).").small().color(app.theme.text_muted_color()));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Reset (100%)").clicked() {
+                                    if crate::modern::button_small(ui, &app.theme, "Reset (100%)").clicked() {
                                         app.settings.zoom_factor = 1.0;
                                         ctx.set_zoom_factor(1.0);
                                         changed = true;
@@ -130,7 +139,15 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.horizontal_wrapped(|ui| {
                                 for preset in &builtins {
                                     let is_active = app.theme.id == preset.id;
-                                    let btn = ui.selectable_label(is_active, &preset.name);
+                                    let (fill, edge, txt) = if is_active {
+                                        (app.theme.accent_color(), crate::modern::darken(app.theme.accent_color(), 55), egui::Color32::from_rgb(15, 23, 42))
+                                    } else {
+                                        (app.theme.bg_card_color(), crate::modern::darken(app.theme.bg_card_color(), 40), app.theme.text_primary_color())
+                                    };
+                                    let btn = crate::modern::Button3D::new(&preset.name)
+                                        .small()
+                                        .fill(fill).edge(edge).text_color(txt)
+                                        .show(ui, &app.theme);
                                     if btn.clicked() {
                                         let mut new_th = preset.clone();
                                         new_th.opacity = app.theme.opacity;
@@ -140,7 +157,15 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                 for custom in &app.custom_themes {
                                     let is_active = app.theme.id == custom.id;
                                     let label = format!("* {}", custom.name);
-                                    let btn = ui.selectable_label(is_active, label);
+                                    let (fill, edge, txt) = if is_active {
+                                        (app.theme.accent_color(), crate::modern::darken(app.theme.accent_color(), 55), egui::Color32::from_rgb(15, 23, 42))
+                                    } else {
+                                        (app.theme.bg_card_color(), crate::modern::darken(app.theme.bg_card_color(), 40), app.theme.text_primary_color())
+                                    };
+                                    let btn = crate::modern::Button3D::new(&label)
+                                        .small()
+                                        .fill(fill).edge(edge).text_color(txt)
+                                        .show(ui, &app.theme);
                                     if btn.clicked() {
                                         let mut new_th = custom.clone();
                                         new_th.opacity = app.theme.opacity;
@@ -158,7 +183,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
                                 ui.text_edit_singleline(&mut app.new_theme_name);
-                                if ui.button("+ Duplicate Current as Custom").clicked() {
+                                if crate::modern::button(ui, &app.theme, "+ Duplicate Current as Custom").clicked() {
                                     let mut custom = app.theme.clone();
                                     custom.id = format!("custom_{}", chrono::Utc::now().timestamp_millis());
                                     custom.name = app.new_theme_name.clone();
@@ -171,7 +196,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                 }
 
                                 if !app.theme.is_builtin {
-                                    if ui.button("Delete This Custom Theme").clicked() {
+                                    if crate::modern::button_danger(ui, &app.theme, "Delete This Custom Theme").clicked() {
                                         let delete_id = app.theme.id.clone();
                                         app.custom_themes.retain(|t| t.id != delete_id);
                                         Database::save_custom_themes(&app.custom_themes);
@@ -340,9 +365,9 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new("Shell Presets:").small().color(app.theme.text_muted_color()));
-                                if ui.small_button("bash").clicked() { app.settings.default_shell = "/bin/bash".to_string(); changed = true; }
-                                if ui.small_button("zsh").clicked() { app.settings.default_shell = "/bin/zsh".to_string(); changed = true; }
-                                if ui.small_button("fish").clicked() { app.settings.default_shell = "/bin/fish".to_string(); changed = true; }
+                                if crate::modern::button_small(ui, &app.theme, "bash").clicked() { app.settings.default_shell = "/bin/bash".to_string(); changed = true; }
+                                if crate::modern::button_small(ui, &app.theme, "zsh").clicked() { app.settings.default_shell = "/bin/zsh".to_string(); changed = true; }
+                                if crate::modern::button_small(ui, &app.theme, "fish").clicked() { app.settings.default_shell = "/bin/fish".to_string(); changed = true; }
                             });
                             ui.add_space(8.0);
                             ui.separator();
@@ -414,7 +439,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                     ui.label(egui::RichText::new(status_text).small().color(app.theme.text_muted_color()));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Check for Updates Now").clicked() {
+                                    if crate::modern::button_accent(ui, &app.theme, "Check for Updates Now").clicked() {
                                         app.trigger_update_check(true, ctx.clone());
                                         app.set_toast("Checking for updates...");
                                     }

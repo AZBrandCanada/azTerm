@@ -1,6 +1,7 @@
 // src/main.rs
 mod db;
 mod debug_log;
+mod modern;
 mod settings;
 mod sftp;
 mod ssh;

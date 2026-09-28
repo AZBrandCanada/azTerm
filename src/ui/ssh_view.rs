@@ -18,10 +18,10 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ New SSH Profile").clicked() {
+                if crate::modern::button_accent(ui, &app.theme, "+ New SSH Profile").clicked() {
                     app.open_create_profile_modal();
                 }
-                if ui.button("Key Generator").clicked() {
+                if crate::modern::button(ui, &app.theme, "Key Generator").clicked() {
                     app.show_keygen_modal = true;
                 }
             });
@@ -63,16 +63,16 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                             });
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.button("Delete").clicked() {
+                                if crate::modern::button_danger(ui, &app.theme, "Delete").clicked() {
                                     delete_idx = Some(idx);
                                 }
-                                if ui.button("Edit").clicked() {
+                                if crate::modern::button(ui, &app.theme, "Edit").clicked() {
                                     edit_profile = Some(profile.clone());
                                 }
-                                if ui.button("SFTP").clicked() {
+                                if crate::modern::button(ui, &app.theme, "SFTP").clicked() {
                                     sftp_profile = Some(profile.clone());
                                 }
-                                if ui.button("Connect").clicked() {
+                                if crate::modern::button_accent(ui, &app.theme, "Connect").clicked() {
                                     connect_profile = Some(profile.clone());
                                 }
                             });
@@ -116,11 +116,11 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                                 });
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Delete Key").clicked() {
+                                    if crate::modern::button_danger(ui, &app.theme, "Delete Key").clicked() {
                                         key_to_delete = Some(key.file_name.clone());
                                     }
                                     if let Some(ref pub_k) = key.pub_key_content {
-                                        if ui.button("Copy Public Key").clicked() {
+                                        if crate::modern::button_small(ui, &app.theme, "Copy Public Key").clicked() {
                                             crate::terminal::set_system_clipboard_text(
                                                 Some(ui.ctx()),
                                                 &pub_k.clone(),
@@ -128,7 +128,7 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                                             app.set_toast("Public key copied to clipboard");
                                         }
                                     }
-                                    if ui.button("+ New Profile with Key").on_hover_text("Create a new SSH connection using this key").clicked() {
+                                    if crate::modern::button_small(ui, &app.theme, "+ New Profile with Key").on_hover_text("Create a new SSH connection using this key").clicked() {
                                         key_to_create_profile = Some(key.priv_path.clone());
                                         key_name_for_profile = Some(key.file_name.clone());
                                     }

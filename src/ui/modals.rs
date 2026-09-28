@@ -66,7 +66,7 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
                     ui.horizontal(|ui| {
                         match &app.install_method {
                             InstallMethod::ScriptInstalled | InstallMethod::ManualBuild => {
-                                if ui.button(egui::RichText::new("Update Now (Run in Shell)").strong()).clicked() {
+                                if crate::modern::button_accent(ui, &app.theme, "Update Now (Run in Shell)").clicked() {
                                     app.run_script_update_in_terminal(ctx.clone());
                                 }
                             }
@@ -74,13 +74,13 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
                         }
 
                         let release_url = format!("https://github.com/AZBrandCanada/azTerm/releases/tag/{}", new_tag);
-                        if ui.button("Open GitHub Release").clicked() {
+                        if crate::modern::button(ui, &app.theme, "Open GitHub Release").clicked() {
                             ctx.open_url(egui::OpenUrl::new_tab(release_url));
                             app.show_update_modal = false;
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Later").clicked() {
+                            if crate::modern::button(ui, &app.theme, "Later").clicked() {
                                 app.show_update_modal = false;
                             }
                         });
@@ -127,7 +127,7 @@ pub fn render_keygen_modal(app: &mut AppState, ctx: &egui::Context) {
 
                         ui.add_space(10.0);
 
-                        if ui.button(egui::RichText::new("Generate Keypair").strong()).clicked() {
+                        if crate::modern::button_accent(ui, &app.theme, "Generate Keypair").clicked() {
                             let algo = match app.keygen_algo {
                                 1 => SshKeyAlgorithm::Rsa4096,
                                 2 => SshKeyAlgorithm::Ecdsa384,
@@ -153,7 +153,7 @@ pub fn render_keygen_modal(app: &mut AppState, ctx: &egui::Context) {
                                     .desired_rows(5)
                                     .desired_width(f32::INFINITY),
                             );
-                            if ui.button("Copy Public Key to Clipboard").clicked() {
+                            if crate::modern::button(ui, &app.theme, "Copy Public Key to Clipboard").clicked() {
                                 crate::terminal::set_system_clipboard_text(
                                     Some(ui.ctx()),
                                     &app.generated_pub_key.clone(),
@@ -170,7 +170,7 @@ pub fn render_keygen_modal(app: &mut AppState, ctx: &egui::Context) {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Close").clicked() {
+                    if crate::modern::button(ui, &app.theme, "Close").clicked() {
                         app.show_keygen_modal = false;
                     }
                 });
@@ -276,7 +276,7 @@ pub fn render_profile_modal(app: &mut AppState, ctx: &egui::Context) {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Save Profile").clicked() {
+                    if crate::modern::button_accent(ui, &app.theme, "Save Profile").clicked() {
                         let port = app.new_ssh_port.parse().unwrap_or(22);
                         let auth_type = if app.new_ssh_auth_choice == 1 && !app.new_ssh_key_path.trim().is_empty() {
                             SshStore::ensure_secure_permissions(&app.new_ssh_key_path);
@@ -308,7 +308,7 @@ pub fn render_profile_modal(app: &mut AppState, ctx: &egui::Context) {
                         app.ssh_store.save();
                         app.show_profile_modal = false;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if crate::modern::button(ui, &app.theme, "Cancel").clicked() {
                         app.show_profile_modal = false;
                     }
                 });
@@ -352,7 +352,7 @@ pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
                         );
                         ui.label("Remote session multiplexed. SFTP file transfer is now ready.");
                         ui.add_space(12.0);
-                        if ui.button(egui::RichText::new("Continue to SFTP").strong()).clicked() {
+                        if crate::modern::button_accent(ui, &app.theme, "Continue to SFTP").clicked() {
                             refresh_pane_id = Some(modal.target_pane_id.clone());
                             should_close = true;
                         }
@@ -403,7 +403,7 @@ pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
                         }
 
                         let enter_pressed = edit_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if enter_pressed || ui.button(egui::RichText::new("Send").strong()).clicked() {
+                        if enter_pressed || crate::modern::button_accent(ui, &app.theme, "Send").clicked() {
                             let to_send = format!("{}\r", modal.input_text);
                             if let Ok(mut w) = modal.writer.lock() {
                                 let _ = w.write_all(to_send.as_bytes());
@@ -420,7 +420,7 @@ pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
+                        if crate::modern::button(ui, &app.theme, "Cancel").clicked() {
                             should_close = true;
                         }
                     });

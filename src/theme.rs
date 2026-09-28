@@ -82,11 +82,19 @@ impl ThemeConfig {
     }
 
     pub fn card_frame(&self) -> egui::Frame {
+        // Modern elevation: soft drop shadow so the card reads as
+        // floating slightly above the panel background.
         egui::Frame::none()
             .fill(self.bg_card_color())
             .stroke(egui::Stroke::new(1.0_f32, self.border_color()))
-            .rounding(8.0)
+            .rounding(10.0)
             .inner_margin(egui::Margin::same(14.0))
+            .shadow(egui::epaint::Shadow {
+                offset: egui::vec2(0.0, 6.0),
+                blur: 20.0,
+                spread: 0.0,
+                color: egui::Color32::from_black_alpha(110),
+            })
     }
 
     pub fn cyber_cyan() -> Self {
@@ -529,54 +537,37 @@ pub fn ansi_idx_to_color_extended(idx: u8) -> egui::Color32 {
 }
 
 pub fn nav_tab_button(ui: &mut egui::Ui, text: &str, is_active: bool, theme: &ThemeConfig) -> bool {
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let padding = egui::vec2(10.0, 5.0);
-    let text_color = if is_active { theme.accent_color() } else { theme.text_primary_color() };
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, text_color);
-    let size = egui::vec2(galley.size().x + padding.x * 2.0, 26.0);
-
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let bg = if is_active {
-            theme.bg_card_color()
-        } else if response.hovered() {
-            theme.bg_card_color().linear_multiply(0.6)
-        } else {
-            egui::Color32::TRANSPARENT
-        };
-        let stroke = if is_active {
-            egui::Stroke::new(1.0_f32, theme.accent_color())
-        } else {
-            egui::Stroke::NONE
-        };
-        ui.painter().rect(rect, 4.0, bg, stroke);
-        let text_pos = egui::pos2(rect.min.x + padding.x, rect.center().y - galley.size().y / 2.0);
-        ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
-    }
-    response.clicked()
+    let btn = if is_active {
+        let fill = theme.accent_color();
+        crate::modern::Button3D::new(text)
+            .small()
+            .fill(fill)
+            .edge(crate::modern::darken(fill, 55))
+            .text_color(egui::Color32::from_rgb(15, 23, 42))
+    } else {
+        crate::modern::Button3D::new(text)
+            .small()
+            .fill(theme.bg_card_color())
+            .edge(crate::modern::darken(theme.bg_card_color(), 40))
+            .text_color(theme.text_primary_color())
+    };
+    btn.show(ui, theme).clicked()
 }
 
 pub fn nav_action_button(ui: &mut egui::Ui, text: &str, theme: &ThemeConfig) -> bool {
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let padding = egui::vec2(8.0, 4.0);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font_id, theme.text_primary_color());
-    let size = egui::vec2(galley.size().x + padding.x * 2.0, 24.0);
-
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let bg = if response.is_pointer_button_down_on() {
-            theme.bg_panel_color()
-        } else if response.hovered() {
-            theme.bg_card_color()
-        } else {
-            theme.bg_main_color()
-        };
-        ui.painter().rect(rect, 4.0, bg, egui::Stroke::new(1.0_f32, theme.border_color()));
-        let text_pos = egui::pos2(rect.min.x + padding.x, rect.center().y - galley.size().y / 2.0);
-        ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
-    }
-    response.clicked()
+    crate::modern::Button3D::new(text)
+        .small()
+        .fill(theme.bg_card_color())
+        .edge(crate::modern::darken(theme.bg_card_color(), 40))
+        .text_color(theme.text_primary_color())
+        .show(ui, theme)
+        .clicked()
 }
+
+pub const SESSION_TAB_HEIGHT: f32 = 30.0;
+pub const SESSION_TAB_DEPTH: f32 = 3.0;
+pub const SESSION_TAB_LIFT: f32 = 2.0;
+pub const SESSION_TAB_TOTAL_H: f32 = SESSION_TAB_HEIGHT + SESSION_TAB_DEPTH + SESSION_TAB_LIFT;
 
 pub fn session_tab_chip(
     ui: &mut egui::Ui,
@@ -587,60 +578,168 @@ pub fn session_tab_chip(
     show_close: bool,
     theme: &ThemeConfig,
 ) -> (bool, bool) {
-    let size = egui::vec2(width, 26.0);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    use crate::modern::{accent_glow, darken, lighten};
+
+    let height = SESSION_TAB_HEIGHT;
+    let depth = SESSION_TAB_DEPTH;
+    let lift = if is_active { 0.0 } else { SESSION_TAB_LIFT };
+
+    let total_size = egui::vec2(width, height + depth + lift);
+    let (outer_rect, response) = ui.allocate_exact_size(total_size, egui::Sense::click());
+
     let mut close_clicked = response.middle_clicked();
     let mut clicked = response.clicked();
 
-    if ui.is_rect_visible(rect) {
-        let bg = if is_active { theme.bg_card_color() } else { theme.bg_main_color() };
-        let stroke = if is_active {
-            egui::Stroke::new(1.0_f32, theme.accent_color())
-        } else {
-            egui::Stroke::new(1.0_f32, theme.border_color())
-        };
-        ui.painter().rect(rect, 4.0, bg, stroke);
+    let hovered = response.hovered();
+    let pressed = response.is_pointer_button_down_on();
 
-        let font_id = egui::TextStyle::Body.resolve(ui.style());
-        let text_color = if is_active { theme.text_primary_color() } else { theme.text_muted_color() };
-        let galley = ui.painter().layout_no_wrap(title.to_string(), font_id.clone(), text_color);
-        let text_pos = egui::pos2(rect.min.x + 8.0, rect.center().y - galley.size().y / 2.0);
-        ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
+    // Idle tabs sit at +lift so the depth band below is visible. Hover
+    // lifts them the rest of the way; pressing pushes them down onto the
+    // shadow (classic 3D button behaviour).
+    let base_y = outer_rect.min.y + lift;
+    let body_top = if pressed {
+        base_y + depth
+    } else if hovered && !is_active {
+        base_y - lift * 0.6
+    } else {
+        base_y
+    };
 
-        if show_close {
-            let close_rect = egui::Rect::from_center_size(
-                egui::pos2(rect.right() - 12.0, rect.center().y),
-                egui::vec2(16.0, 16.0),
-            );
-            let close_resp = ui.interact(
-                close_rect,
-                ui.id().with(id_salt).with("tab_close_btn"),
-                egui::Sense::click(),
-            );
+    let body_rect = egui::Rect::from_min_size(
+        egui::pos2(outer_rect.min.x, body_top),
+        egui::vec2(width, height),
+    );
+    let shadow_rect = egui::Rect::from_min_size(
+        egui::pos2(body_rect.min.x, body_rect.min.y + depth),
+        egui::vec2(width, height),
+    );
 
-            if close_resp.clicked() {
-                close_clicked = true;
-                clicked = false;
-            }
+    if !ui.is_rect_visible(outer_rect) {
+        return (clicked, close_clicked);
+    }
 
-            let (x_color, x_bg) = if close_resp.hovered() {
-                (egui::Color32::WHITE, theme.danger_color())
-            } else {
-                (theme.text_muted_color(), egui::Color32::TRANSPARENT)
-            };
+    // Colour palette per state.
+    let (body_fill, edge_fill, text_color) = if is_active {
+        (
+            lighten(theme.bg_card_color(), 10),
+            theme.accent_color(),
+            theme.text_primary_color(),
+        )
+    } else if hovered {
+        (
+            lighten(theme.bg_main_color(), 24),
+            darken(theme.bg_main_color(), 60),
+            theme.text_primary_color(),
+        )
+    } else {
+        (
+            theme.bg_main_color(),
+            darken(theme.bg_main_color(), 55),
+            theme.text_muted_color(),
+        )
+    };
 
-            if x_bg != egui::Color32::TRANSPARENT {
-                ui.painter().circle_filled(close_rect.center(), 7.0, x_bg);
-            }
+    // Border colour: full accent when active, translucent accent on hover,
+    // neutral otherwise.
+    let border_color = if is_active {
+        theme.accent_color()
+    } else if hovered {
+        egui::Color32::from_rgba_unmultiplied(
+            theme.accent_color().r(),
+            theme.accent_color().g(),
+            theme.accent_color().b(),
+            150,
+        )
+    } else {
+        theme.border_color()
+    };
 
-            ui.painter().text(
-                close_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "x",
-                font_id,
-                x_color,
-            );
+    // Soft accent halo behind the active tab.
+    if is_active {
+        accent_glow(ui.painter(), body_rect, theme.accent_color(), 8.0, 0.55, 1.0);
+    }
+
+    // Depth band beneath the body — this is the visual that sells 3D.
+    if !pressed {
+        ui.painter()
+            .rect_filled(shadow_rect, egui::Rounding::same(8.0), edge_fill);
+    }
+
+    // Body.
+    ui.painter()
+        .rect_filled(body_rect, egui::Rounding::same(7.0), body_fill);
+
+    // Border ring.
+    ui.painter().rect_stroke(
+        body_rect,
+        egui::Rounding::same(7.0),
+        egui::Stroke::new(if is_active { 1.6 } else { 1.0 }, border_color),
+    );
+
+    // Accent stripe across the top of the active tab — reads like a
+    // bookmark tab marker.
+    if is_active {
+        let stripe_rect = egui::Rect::from_min_size(
+            egui::pos2(body_rect.min.x + 3.0, body_rect.min.y + 1.5),
+            egui::vec2(body_rect.width() - 6.0, 2.5),
+        );
+        ui.painter()
+            .rect_filled(stripe_rect, egui::Rounding::same(2.0), theme.accent_color());
+    }
+
+    // Title.
+    let font_id = egui::TextStyle::Body.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(title.to_string(), font_id.clone(), text_color);
+    let text_pos = egui::pos2(
+        body_rect.min.x + 10.0,
+        body_rect.center().y - galley.size().y / 2.0,
+    );
+    ui.painter().galley(text_pos, galley, egui::Color32::WHITE);
+
+    // Close button — always-visible soft circle, bright red on hover.
+    if show_close {
+        let close_rect = egui::Rect::from_center_size(
+            egui::pos2(body_rect.right() - 14.0, body_rect.center().y),
+            egui::vec2(18.0, 18.0),
+        );
+        let close_resp = ui.interact(
+            close_rect,
+            ui.id().with(id_salt).with("tab_close_btn"),
+            egui::Sense::click(),
+        );
+
+        if close_resp.clicked() {
+            close_clicked = true;
+            clicked = false;
         }
+
+        let (x_color, circle_fill) = if close_resp.hovered() {
+            (egui::Color32::WHITE, theme.danger_color())
+        } else {
+            let alpha = if is_active { 60 } else { 35 };
+            (
+                text_color,
+                egui::Color32::from_rgba_unmultiplied(
+                    theme.text_muted_color().r(),
+                    theme.text_muted_color().g(),
+                    theme.text_muted_color().b(),
+                    alpha,
+                ),
+            )
+        };
+
+        ui.painter()
+            .circle_filled(close_rect.center(), 8.5, circle_fill);
+
+        ui.painter().text(
+            close_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(13.0),
+            x_color,
+        );
     }
 
     (clicked, close_clicked)

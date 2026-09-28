@@ -30,7 +30,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                     } else {
                         "Transfers".to_string()
                     };
-                    if ui.button(badge).on_hover_text("View active file transfers and status log").clicked() {
+                    if crate::modern::button(ui, &app.theme, &badge).on_hover_text("View active file transfers and status log").clicked() {
                         app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
                     }
                 });
@@ -81,22 +81,22 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             if let SftpTarget::RemoteSsh(ref p) = app.sftp.left_pane.target {
                                 let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
                                 if !sock.exists() {
-                                    if ui.small_button(egui::RichText::new("Connect").strong().color(app.theme.accent_color())).clicked() {
+                                    if crate::modern::button_small(ui, &app.theme, "Connect").clicked() {
                                         connect_profile = Some(p.clone());
                                     }
                                 }
                             }
 
-                            if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "Up").on_hover_text("Go to parent directory").clicked() {
                                 app.sftp.left_pane.go_up();
                             }
-                            if ui.small_button("Home").on_hover_text("Go to home folder").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "Home").on_hover_text("Go to home folder").clicked() {
                                 app.sftp.left_pane.go_home();
                             }
-                            if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "Reload").on_hover_text("Reload directory").clicked() {
                                 app.sftp.left_pane.refresh();
                             }
-                            if ui.small_button("+ Folder").on_hover_text("Create new directory").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "+ Folder").on_hover_text("Create new directory").clicked() {
                                 app.sftp.left_pane.show_create_dir_modal = true;
                                 app.sftp.left_pane.new_dir_name = "new_folder".to_string();
                             }
@@ -285,22 +285,22 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             if let SftpTarget::RemoteSsh(ref p) = app.sftp.right_pane.target {
                                 let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
                                 if !sock.exists() {
-                                    if ui.small_button(egui::RichText::new("Connect").strong().color(app.theme.accent_color())).clicked() {
+                                    if crate::modern::button_small(ui, &app.theme, "Connect").clicked() {
                                         connect_profile = Some(p.clone());
                                     }
                                 }
                             }
 
-                            if ui.small_button("Up").on_hover_text("Go to parent directory").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "Up").on_hover_text("Go to parent directory").clicked() {
                                 app.sftp.right_pane.go_up();
                             }
-                            if ui.small_button("Home").on_hover_text("Go to home folder").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "Home").on_hover_text("Go to home folder").clicked() {
                                 app.sftp.right_pane.go_home();
                             }
-                            if ui.small_button("Reload").on_hover_text("Reload directory").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "Reload").on_hover_text("Reload directory").clicked() {
                                 app.sftp.right_pane.refresh();
                             }
-                            if ui.small_button("+ Folder").on_hover_text("Create new directory").clicked() {
+                            if crate::modern::button_small(ui, &app.theme, "+ Folder").on_hover_text("Create new directory").clicked() {
                                 app.sftp.right_pane.show_create_dir_modal = true;
                                 app.sftp.right_pane.new_dir_name = "new_folder".to_string();
                             }
