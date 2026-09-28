@@ -23,7 +23,7 @@ use terminal::{SessionType, TerminalSession};
 use theme::*;
 use tiling::*;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ActiveView {
     Terminal,
     SshBookmarks,
@@ -285,6 +285,7 @@ pub struct AppState {
     pub new_theme_name: String,
 
     pub toast_message: Option<(String, std::time::Instant)>,
+    pub last_heartbeat: std::time::Instant,
 
     pub available_update: Option<String>,
     pub update_rx: Option<Receiver<UpdateCheckResult>>,
@@ -309,6 +310,15 @@ pub struct AppState {
     pub keygen_status: String,
 
     pub ssh_auth_modal: Option<SshAuthModalState>,
+}
+
+
+fn modal_open_flag(app: &AppState) -> bool {
+    app.show_update_modal
+        || app.show_profile_modal
+        || app.show_keygen_modal
+        || app.ssh_auth_modal.is_some()
+        || app.sftp.has_open_modal()
 }
 
 impl AppState {
@@ -391,6 +401,7 @@ impl AppState {
             new_theme_name: "Custom Theme".to_string(),
 
             toast_message: None,
+            last_heartbeat: std::time::Instant::now(),
 
             available_update: initial_available_update,
             update_rx: None,
@@ -1178,6 +1189,25 @@ impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Reconcile debug logging with current settings (cheap no-op if unchanged).
         debug_log::init(self.settings.debug_mode, &self.settings.debug_log_path);
+
+        // Heartbeat: proves the UI thread is still ticking. If the app
+        // ever locks up, the log will simply stop emitting these every
+        // 5 seconds — that timestamp is where the freeze began.
+        if self.settings.debug_mode
+            && self.last_heartbeat.elapsed() >= std::time::Duration::from_secs(5)
+        {
+            self.last_heartbeat = std::time::Instant::now();
+            debug_log::log(format!(
+                "heartbeat view={:?} sess={} ws={} modal={} dragging_pane={:?} dragging_tab={:?} sftp_modal={}",
+                self.active_view,
+                self.active_session_id,
+                self.active_workspace_idx,
+                modal_open_flag(self),
+                self.dragging_pane_id,
+                self.dragging_tab_idx,
+                self.sftp.has_open_modal(),
+            ));
+        }
 
         if !self.settings.use_system_titlebar {
             let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));

@@ -857,6 +857,30 @@ impl TerminalSession {
                         modifiers,
                         ..
                     } => {
+                        if matches!(
+                            key,
+                            egui::Key::ArrowUp
+                                | egui::Key::ArrowDown
+                                | egui::Key::ArrowLeft
+                                | egui::Key::ArrowRight
+                                | egui::Key::Tab
+                                | egui::Key::Escape
+                                | egui::Key::Enter
+                                | egui::Key::Backspace
+                                | egui::Key::PageUp
+                                | egui::Key::PageDown
+                                | egui::Key::Home
+                                | egui::Key::End
+                        ) {
+                            crate::dbg_log!(
+                                "kbd id={} key={:?} ctrl={} shift={} alt={}",
+                                self.id,
+                                key,
+                                modifiers.ctrl,
+                                modifiers.shift,
+                                modifiers.alt
+                            );
+                        }
                         if *key == egui::Key::Enter {
                             crate::dbg_log!(
                                 "kbd_enter id={} ctrl={} shift={} alt={} cmd={}",
@@ -1121,10 +1145,16 @@ impl TerminalSession {
             m.set_focus_lock_filter(
                 widget_id,
                 egui::EventFilter {
+                    // Lock ALL focus-navigation keys to this terminal widget
+                    // so egui never steals them. Previously only `tab` was
+                    // locked; arrows and Escape were free, so pressing arrow
+                    // keys moved keyboard focus to the navbar / tab bar and
+                    // nano, vim, htop, less, etc. never received the escape
+                    // sequences they need.
                     tab: true,
-                    horizontal_arrows: false,
-                    vertical_arrows: false,
-                    escape: false,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
                 },
             );
         });
@@ -1325,7 +1355,13 @@ impl TerminalSession {
                     if settings.copy_on_select {
                         let selected = self.extract_selected_text();
                         if !selected.trim().is_empty() {
+                            crate::dbg_log!(
+                                "clipboard_word_copy begin id={} bytes={}",
+                                self.id,
+                                selected.len()
+                            );
                             set_system_clipboard_text(Some(ui.ctx()), &selected);
+                            crate::dbg_log!("clipboard_word_copy end id={}", self.id);
                             let preview = if selected.len() > 24 {
                                 format!("{}...", &selected[..21].replace('\n', " "))
                             } else {
@@ -1493,7 +1529,13 @@ impl TerminalSession {
                     } else if settings.copy_on_select {
                         let selected = self.extract_selected_text();
                         if !selected.trim().is_empty() {
+                            crate::dbg_log!(
+                                "clipboard_copy begin id={} bytes={}",
+                                self.id,
+                                selected.len()
+                            );
                             set_system_clipboard_text(Some(ui.ctx()), &selected);
+                            crate::dbg_log!("clipboard_copy end id={}", self.id);
                             let line_count = selected.lines().count().max(1);
                             let preview = if selected.len() > 30 {
                                 format!("{}...", &selected[..27].replace('\n', " "))
@@ -1520,6 +1562,7 @@ impl TerminalSession {
             }
 
             if settings.paste_on_right_click && response.secondary_clicked() {
+                crate::dbg_log!("clipboard_paste begin id={} (right-click)", self.id);
                 if let Some(clip) = get_system_clipboard_text() {
                     if !clip.is_empty() {
                         self.send_paste(&clip);
