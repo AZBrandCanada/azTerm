@@ -3,6 +3,11 @@
 // System font discovery + egui application. Used by the Settings
 // "Terminal Font" picker so users can pick any installed typeface
 // for terminal sessions (UI keeps egui's default font).
+//
+// Important: epaint PANICS on any file it can't parse as plain
+// TrueType/OpenType. It does not return an Err. So every byte buffer
+// we hand to `FontData::from_owned` must be validated against the
+// magic-byte whitelist first. `is_loadable_font()` below is that gate.
 
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -12,6 +17,59 @@ use std::process::Command;
 pub struct FontEntry {
     pub family: String,
     pub path: PathBuf,
+}
+
+/// Maximum number of installed fonts that get a preview family.
+/// Dropdowns must check `idx < PREVIEW_LIMIT` before requesting a
+/// preview font, otherwise egui panics on an unbound family.
+pub const PREVIEW_LIMIT: usize = 400;
+
+/// True if the given font index has a registered preview family.
+pub fn has_preview(idx: usize) -> bool {
+    idx < PREVIEW_LIMIT
+}
+
+/// Family name used for the Nth installed font in preview mode. The
+/// font combo boxes use this to render each item in the actual font
+/// the item names. Only valid for `idx < PREVIEW_LIMIT`.
+pub fn preview_family_name(idx: usize) -> String {
+    format!("azterm_font_preview_{}", idx)
+}
+
+/// Family name used for a preview by font path. Returns None if the
+/// path isn't currently registered.
+#[allow(dead_code)]
+pub fn preview_family_for_path(fonts: &[FontEntry], path: &str) -> Option<String> {
+    fonts
+        .iter()
+        .position(|f| f.path.to_string_lossy() == path)
+        .map(preview_family_name)
+}
+
+/// Whitelist check: does this byte buffer start with a magic number
+/// that epaint's font parser accepts?
+///
+/// Accepts:
+///   * `00 01 00 00` — TrueType outlines
+///   * `74 72 75 65` — "true" — Apple-flavoured TrueType
+///   * `4F 54 54 4F` — "OTTO"  — OpenType with CFF outlines
+///
+/// Rejects (these cause epaint to panic if passed through):
+///   * `74 74 63 66` — "ttcf" — TrueType Collection (.ttc)
+///   * `77 4F 46 46` — "wOFF" — WOFF web font
+///   * `77 4F 46 32` — "wOF2" — WOFF2 web font
+///   * Anything else, including truncated / corrupt files.
+pub fn is_loadable_font(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let tag = &data[..4];
+    matches!(
+        tag,
+        [0x00, 0x01, 0x00, 0x00]
+            | [b't', b'r', b'u', b'e']
+            | [b'O', b'T', b'T', b'O']
+    )
 }
 
 /// Enumerate installed fonts. Prefers `fc-list` (fontconfig), which
@@ -59,9 +117,29 @@ fn list_via_fc_list() -> Option<Vec<FontEntry>> {
         if !path.exists() {
             continue;
         }
+        // Skip files whose magic bytes indicate a format epaint can't
+        // parse. Cheap check: read only the first 4 bytes.
+        if !file_looks_loadable(&path) {
+            continue;
+        }
         list.push(FontEntry { family, path });
     }
     Some(list)
+}
+
+/// Read the first 4 bytes of a file and check the font magic number.
+/// Returns false for unreadable files or formats epaint rejects.
+fn file_looks_loadable(path: &Path) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 4];
+    match f.read_exact(&mut buf) {
+        Ok(_) => is_loadable_font(&buf),
+        Err(_) => false,
+    }
 }
 
 fn list_via_dir_scan() -> Vec<FontEntry> {
@@ -92,6 +170,9 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
         } else {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             if ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf") {
+                if !file_looks_loadable(&path) {
+                    continue;
+                }
                 let stem = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -121,6 +202,12 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
 ///                       Monospace family (terminal content, code
 ///                       blocks). Empty string = use AZTerm's built-in
 ///                       fallback list.
+/// `preview_fonts`     — installed fonts to expose as preview families.
+///
+/// Every load goes through `is_loadable_font()` — a bad file is skipped
+/// silently rather than panicking. If the terminal font is bad, we fall
+/// back to `default_mono_font_path()`. If that's also missing, egui's
+/// built-in monospace is used.
 pub fn apply_to_egui(
     ctx: &egui::Context,
     ui_font_path: &str,
@@ -131,52 +218,55 @@ pub fn apply_to_egui(
 
     // ---- UI font: Proportional family ---------------------------------
     if !ui_font_path.trim().is_empty() {
-        match std::fs::read(ui_font_path) {
-            Ok(data) => {
-                fonts.font_data.insert(
-                    "azterm_ui_font".to_string(),
-                    egui::FontData::from_owned(data),
-                );
-                if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    prop.insert(0, "azterm_ui_font".to_string());
-                }
-            }
-            Err(e) => eprintln!("[fonts] failed to read ui font {}: {}", ui_font_path, e),
-        }
+        try_register_font(
+            &mut fonts,
+            "azterm_ui_font",
+            ui_font_path,
+            Some(egui::FontFamily::Proportional),
+        );
     }
 
     // ---- Terminal font: Monospace family ------------------------------
-    let resolved_mono: Option<String> = if !terminal_font_path.trim().is_empty() {
-        Some(terminal_font_path.to_string())
-    } else {
+    // Try the user's pick first; if that fails, fall back to the built-in
+    // candidate list; if that fails too, egui's default Monospace stays.
+    let primary_mono = if terminal_font_path.trim().is_empty() {
         default_mono_font_path()
+    } else {
+        Some(terminal_font_path.to_string())
     };
 
-    if let Some(path) = resolved_mono {
-        match std::fs::read(&path) {
-            Ok(data) => {
-                fonts.font_data.insert(
-                    "azterm_terminal_font".to_string(),
-                    egui::FontData::from_owned(data),
-                );
-                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    mono.insert(0, "azterm_terminal_font".to_string());
-                }
-            }
-            Err(e) => eprintln!("[fonts] failed to read terminal font {}: {}", path, e),
+    let registered = match &primary_mono {
+        Some(p) => try_register_font(
+            &mut fonts,
+            "azterm_terminal_font",
+            p,
+            Some(egui::FontFamily::Monospace),
+        ),
+        None => false,
+    };
+
+    if !registered {
+        if let Some(fallback) = default_mono_font_path() {
+            let _ = try_register_font(
+                &mut fonts,
+                "azterm_terminal_font",
+                &fallback,
+                Some(egui::FontFamily::Monospace),
+            );
         }
     }
 
-    // ---- Preview families -------------------------------------------
-    // Register each installed font under a named family so the combo
-    // boxes can render each dropdown item in its own typeface. Capped
-    // at PREVIEW_LIMIT fonts to avoid pathological startup cost on
-    // systems with truly huge font libraries.
+    // ---- Preview families --------------------------------------------
+    // Register installed fonts under named families so dropdown items
+    // can render in their own typeface. Capped at PREVIEW_LIMIT.
     for (idx, entry) in preview_fonts.iter().enumerate().take(PREVIEW_LIMIT) {
         let data = match std::fs::read(&entry.path) {
             Ok(d) => d,
             Err(_) => continue,
         };
+        if !is_loadable_font(&data) {
+            continue;
+        }
         let data_key = format!("preview_data_{}", idx);
         fonts
             .font_data
@@ -190,30 +280,39 @@ pub fn apply_to_egui(
     ctx.set_fonts(fonts);
 }
 
-/// Maximum number of installed fonts that get a preview family.
-/// Dropdowns must check `idx < PREVIEW_LIMIT` before requesting a
-/// preview font, otherwise egui panics on an unbound family.
-pub const PREVIEW_LIMIT: usize = 400;
-
-/// Family name used for the Nth installed font in preview mode. The
-/// font combo boxes use this to render each item in the actual font
-/// the item names. Only valid for `idx < PREVIEW_LIMIT`.
-pub fn preview_family_name(idx: usize) -> String {
-    format!("azterm_font_preview_{}", idx)
-}
-
-/// True if the given font index has a registered preview family.
-pub fn has_preview(idx: usize) -> bool {
-    idx < PREVIEW_LIMIT
-}
-
-/// Family name used for a preview by font path. Returns None if the
-/// path isn't currently registered.
-pub fn preview_family_for_path(fonts: &[FontEntry], path: &str) -> Option<String> {
+/// Attempt to load `path` and register it as `key`. When `family` is
+/// Some, the new font is prepended to that family so it takes priority
+/// over the built-in default. Returns true on success, false if the
+/// file couldn't be read or failed the magic-byte check.
+fn try_register_font(
+    fonts: &mut egui::FontDefinitions,
+    key: &str,
+    path: &str,
+    family: Option<egui::FontFamily>,
+) -> bool {
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[fonts] failed to read {}: {}", path, e);
+            return false;
+        }
+    };
+    if !is_loadable_font(&data) {
+        eprintln!(
+            "[fonts] skipping {}: not a valid TTF/OTF (probably .ttc, .woff, or corrupt)",
+            path
+        );
+        return false;
+    }
     fonts
-        .iter()
-        .position(|f| f.path.to_string_lossy() == path)
-        .map(preview_family_name)
+        .font_data
+        .insert(key.to_string(), egui::FontData::from_owned(data));
+    if let Some(fam) = family {
+        if let Some(list) = fonts.families.get_mut(&fam) {
+            list.insert(0, key.to_string());
+        }
+    }
+    true
 }
 
 /// The built-in fallback list used when the user hasn't picked a font.
@@ -235,7 +334,7 @@ fn default_mono_font_path() -> Option<String> {
         "/usr/share/fonts/TTF/LiberationMono-Regular.ttf",
     ];
     for p in candidates {
-        if Path::new(p).exists() {
+        if Path::new(p).exists() && file_looks_loadable(Path::new(p)) {
             return Some(p.to_string());
         }
     }
