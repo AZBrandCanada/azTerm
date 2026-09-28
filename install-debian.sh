@@ -1,3 +1,4 @@
+# //install-debian.sh
 #!/usr/bin/env bash
 set -e
 

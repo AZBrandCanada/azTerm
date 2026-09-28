@@ -1,3 +1,4 @@
+# //install-arch.sh
 #!/usr/bin/env bash
 set -e
 
