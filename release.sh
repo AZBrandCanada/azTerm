@@ -84,3 +84,4 @@ else
   echo "Tag pushed. Create the release here:"
   echo "  https://github.com/${REPO}/releases/new?tag=${TAG}"
 fi
+ 

@@ -10,7 +10,7 @@ import re, sys
 path = "src/main.rs"
 with open(path) as f:
     src = f.read()
-
+ 
 # 1) Add last_heartbeat field to AppState
 old_struct = """    pub toast_message: Option<(String, std::time::Instant)>,
 """

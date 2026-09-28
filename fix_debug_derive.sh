@@ -17,7 +17,7 @@ pub enum ActiveView {
     SshBookmarks,
     SftpBrowser,
     Settings,
-}"""
+}""" 
 
 new = """#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ActiveView {

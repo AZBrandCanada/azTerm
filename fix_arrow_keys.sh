@@ -6,7 +6,7 @@ FILE="src/terminal.rs"
 if [ ! -f "$FILE" ]; then
     echo "Error: $FILE not found. Run this from the project root."
     exit 1
-fi
+fi 
 
 python3 - "$FILE" << 'PY_EOF'
 import sys

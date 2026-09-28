@@ -10,3 +10,15 @@ fix_clipboard_hang.sh
 add_clipboard_worker.sh
 fix_reentrant_clipboard_crash.sh
 check-crash.sh
+revert_installer_clipboard_deps.sh
+release.sh
+add_freeze_diagnostics.sh
+fix_arrow_keys.sh
+fix_debug_derive.sh
+release.sh
+revert_installer_clipboard_deps.sh
+add_freeze_diagnostics.sh
+fix_arrow_keys.sh
+fix_debug_derive.sh
+release.sh
+revert_installer_clipboard_deps.sh

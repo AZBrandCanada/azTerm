@@ -17,3 +17,4 @@ for path in files:
         f.write(src)
     print("reverted", path)
 PY_EOF
+  
