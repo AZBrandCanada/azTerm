@@ -497,6 +497,157 @@ impl ThemeConfig {
         }
     }
 
+
+    pub fn synthwave() -> Self {
+        Self {
+            id: "synthwave".to_string(),
+            name: "Synthwave".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [10, 4, 20],
+            bg_panel: [18, 8, 32],
+            bg_card: [32, 14, 54],
+            border: [80, 36, 120],
+            accent: [255, 60, 180],
+            accent_hover: [255, 120, 220],
+            text_primary: [245, 230, 255],
+            text_muted: [165, 135, 205],
+            success: [0, 255, 200],
+            danger: [255, 30, 90],
+            ansi_colors: [
+                [10, 4, 20], [255, 30, 90], [0, 255, 200], [255, 220, 80],
+                [120, 140, 255], [255, 60, 180], [0, 220, 255], [245, 230, 255],
+                [70, 50, 100], [255, 100, 150], [120, 255, 220], [255, 240, 140],
+                [160, 180, 255], [255, 140, 220], [100, 240, 255], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn toxic_lime() -> Self {
+        Self {
+            id: "toxic_lime".to_string(),
+            name: "Toxic Lime".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [5, 10, 5],
+            bg_panel: [8, 18, 8],
+            bg_card: [16, 32, 16],
+            border: [46, 90, 46],
+            accent: [170, 255, 0],
+            accent_hover: [200, 255, 60],
+            text_primary: [230, 255, 220],
+            text_muted: [135, 185, 135],
+            success: [100, 255, 100],
+            danger: [255, 60, 60],
+            ansi_colors: [
+                [5, 10, 5], [255, 60, 60], [170, 255, 0], [255, 220, 40],
+                [80, 200, 120], [200, 255, 80], [0, 240, 180], [230, 255, 220],
+                [46, 90, 46], [255, 110, 110], [200, 255, 80], [255, 240, 120],
+                [120, 220, 140], [230, 255, 130], [80, 255, 210], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn hot_magenta() -> Self {
+        Self {
+            id: "hot_magenta".to_string(),
+            name: "Hot Magenta".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [15, 0, 15],
+            bg_panel: [25, 0, 25],
+            bg_card: [42, 6, 42],
+            border: [100, 24, 100],
+            accent: [255, 0, 200],
+            accent_hover: [255, 90, 225],
+            text_primary: [255, 230, 255],
+            text_muted: [195, 135, 195],
+            success: [0, 255, 150],
+            danger: [255, 20, 80],
+            ansi_colors: [
+                [15, 0, 15], [255, 20, 80], [0, 255, 150], [255, 220, 60],
+                [90, 130, 255], [255, 0, 200], [0, 230, 255], [255, 230, 255],
+                [75, 20, 75], [255, 90, 140], [90, 255, 190], [255, 240, 130],
+                [140, 180, 255], [255, 100, 220], [90, 240, 255], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn infrared() -> Self {
+        Self {
+            id: "infrared".to_string(),
+            name: "Infrared".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [12, 4, 4],
+            bg_panel: [22, 8, 8],
+            bg_card: [38, 14, 14],
+            border: [90, 30, 24],
+            accent: [255, 80, 20],
+            accent_hover: [255, 130, 60],
+            text_primary: [255, 235, 220],
+            text_muted: [205, 135, 115],
+            success: [60, 255, 120],
+            danger: [255, 20, 20],
+            ansi_colors: [
+                [12, 4, 4], [255, 20, 20], [60, 255, 120], [255, 200, 40],
+                [80, 140, 255], [255, 60, 180], [0, 220, 220], [255, 235, 220],
+                [90, 30, 24], [255, 90, 90], [120, 255, 160], [255, 225, 120],
+                [130, 170, 255], [255, 120, 210], [100, 240, 240], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn ultraviolet() -> Self {
+        Self {
+            id: "ultraviolet".to_string(),
+            name: "Ultraviolet".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [8, 4, 20],
+            bg_panel: [14, 8, 32],
+            bg_card: [26, 14, 52],
+            border: [66, 44, 116],
+            accent: [150, 60, 255],
+            accent_hover: [180, 100, 255],
+            text_primary: [235, 225, 255],
+            text_muted: [155, 135, 205],
+            success: [80, 255, 180],
+            danger: [255, 60, 120],
+            ansi_colors: [
+                [8, 4, 20], [255, 60, 120], [80, 255, 180], [255, 220, 90],
+                [110, 140, 255], [200, 90, 255], [0, 220, 255], [235, 225, 255],
+                [66, 44, 116], [255, 110, 160], [130, 255, 210], [255, 240, 140],
+                [160, 185, 255], [220, 140, 255], [100, 240, 255], [255, 255, 255],
+            ],
+        }
+    }
+
+    pub fn voltage() -> Self {
+        Self {
+            id: "voltage".to_string(),
+            name: "Voltage".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [0, 5, 15],
+            bg_panel: [0, 12, 25],
+            bg_card: [5, 26, 48],
+            border: [24, 68, 110],
+            accent: [0, 180, 255],
+            accent_hover: [60, 210, 255],
+            text_primary: [220, 245, 255],
+            text_muted: [130, 180, 215],
+            success: [0, 255, 180],
+            danger: [255, 60, 90],
+            ansi_colors: [
+                [0, 5, 15], [255, 60, 90], [0, 255, 180], [255, 220, 80],
+                [0, 180, 255], [200, 90, 255], [0, 230, 230], [220, 245, 255],
+                [24, 68, 110], [255, 110, 140], [90, 255, 210], [255, 240, 140],
+                [100, 210, 255], [220, 140, 255], [90, 240, 240], [255, 255, 255],
+            ],
+        }
+    }
+
     pub fn builtins() -> Vec<Self> {
         vec![
             Self::cyber_cyan(),
@@ -515,6 +666,12 @@ impl ThemeConfig {
             Self::monokai_pro(),
             Self::matrix_green(),
             Self::solarized_dark(),
+            Self::synthwave(),
+            Self::toxic_lime(),
+            Self::hot_magenta(),
+            Self::infrared(),
+            Self::ultraviolet(),
+            Self::voltage(),
         ]
     }
 }
