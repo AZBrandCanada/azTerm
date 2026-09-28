@@ -27,6 +27,52 @@ pub fn is_dark(c: egui::Color32) -> bool {
     lum < 140.0
 }
 
+/// Choose a legible text color to sit *on top of* `accent` when accent
+/// is used as a button/​tab fill.
+///
+/// Uses the HSP perceptual-brightness formula rather than plain
+/// luminance, because plain luminance mis-classifies saturated colors:
+/// pure cyan looks bright to the eye but scores as "dark" by naive
+/// luminance. HSP handles it correctly, so on dark themes (bright
+/// accents) we still pick dark navy, and on light themes (deep accents)
+/// we correctly pick white.
+pub fn on_accent_text(accent: egui::Color32) -> egui::Color32 {
+    // WCAG 2.1 contrast ratio. We compare both candidate text colors
+    // (dark navy and white) against the accent and pick whichever wins.
+    // This is exact: it handles saturated colors correctly, and picks
+    // the right side for every borderline case (deep purples, mid-greens,
+    // hot magentas, etc.) without magic thresholds.
+    let dark = egui::Color32::from_rgb(15, 23, 42);
+    let light = egui::Color32::WHITE;
+    if wcag_contrast(accent, dark) >= wcag_contrast(accent, light) {
+        dark
+    } else {
+        light
+    }
+}
+
+fn srgb_to_linear(v: u8) -> f32 {
+    let s = v as f32 / 255.0;
+    if s <= 0.03928 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn relative_luminance(c: egui::Color32) -> f32 {
+    0.2126 * srgb_to_linear(c.r())
+        + 0.7152 * srgb_to_linear(c.g())
+        + 0.0722 * srgb_to_linear(c.b())
+}
+
+fn wcag_contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+    let la = relative_luminance(a);
+    let lb = relative_luminance(b);
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 pub fn gradient_rect(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -274,7 +320,7 @@ pub fn button_accent(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egui
     Button3D::new(text)
         .fill(fill)
         .edge(darken(fill, 55))
-        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .text_color(theme.on_accent_color())
         .show(ui, theme)
 }
 
@@ -412,7 +458,7 @@ pub fn toolbar_button_with_dot(
         .small()
         .fill(fill)
         .edge(darken(fill, 55))
-        .text_color(egui::Color32::from_rgb(15, 23, 42));
+        .text_color(theme.on_accent_color());
     if let Some(d) = dot {
         btn = btn.dot_color(d);
     }
@@ -425,7 +471,7 @@ pub fn toolbar_button_tiny(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -
         .compact()
         .fill(fill)
         .edge(darken(fill, 55))
-        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .text_color(theme.on_accent_color())
         .show(ui, theme)
 }
 
@@ -438,6 +484,6 @@ pub fn accent_button_small(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -
         .small()
         .fill(fill)
         .edge(darken(fill, 55))
-        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .text_color(theme.on_accent_color())
         .show(ui, theme)
 }

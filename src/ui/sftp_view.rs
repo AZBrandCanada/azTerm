@@ -186,10 +186,11 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                             let up_active = l_count > 0;
                             let (fill, edge, txt) = if up_active {
+                                let f = app.theme.accent_color();
                                 (
-                                    app.theme.accent_color(),
-                                    crate::modern::darken(app.theme.accent_color(), 55),
-                                    egui::Color32::from_rgb(15, 23, 42),
+                                    f,
+                                    crate::modern::darken(f, 55),
+                                    app.theme.on_accent_color(),
                                 )
                             } else {
                                 (
@@ -251,10 +252,11 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                             let dl_active = r_count > 0;
                             let (fill, edge, txt) = if dl_active {
+                                let f = app.theme.accent_color();
                                 (
-                                    app.theme.accent_color(),
-                                    crate::modern::darken(app.theme.accent_color(), 55),
-                                    egui::Color32::from_rgb(15, 23, 42),
+                                    f,
+                                    crate::modern::darken(f, 55),
+                                    app.theme.on_accent_color(),
                                 )
                             } else {
                                 (

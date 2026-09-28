@@ -393,10 +393,11 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
 
                         let up_active = l_count > 0;
                         let (up_fill, up_edge, up_txt) = if up_active {
+                            let fill = app.theme.accent_color();
                             (
-                                app.theme.accent_color(),
-                                crate::modern::darken(app.theme.accent_color(), 55),
-                                egui::Color32::from_rgb(15, 23, 42),
+                                fill,
+                                crate::modern::darken(fill, 55),
+                                app.theme.on_accent_color(),
                             )
                         } else {
                             (
@@ -450,10 +451,11 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
 
                         let dl_active = r_count > 0;
                         let (dl_fill, dl_edge, dl_txt) = if dl_active {
+                            let fill = app.theme.accent_color();
                             (
-                                app.theme.accent_color(),
-                                crate::modern::darken(app.theme.accent_color(), 55),
-                                egui::Color32::from_rgb(15, 23, 42),
+                                fill,
+                                crate::modern::darken(fill, 55),
+                                app.theme.on_accent_color(),
                             )
                         } else {
                             (

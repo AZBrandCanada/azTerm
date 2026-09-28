@@ -20,7 +20,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                     (
                         theme.accent_color(),
                         crate::modern::darken(theme.accent_color(), 55),
-                        egui::Color32::from_rgb(15, 23, 42),
+                        theme.on_accent_color(),
                     )
                 } else {
                     (
@@ -140,7 +140,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                 for preset in &builtins {
                                     let is_active = app.theme.id == preset.id;
                                     let (fill, edge, txt) = if is_active {
-                                        (app.theme.accent_color(), crate::modern::darken(app.theme.accent_color(), 55), egui::Color32::from_rgb(15, 23, 42))
+                                        (app.theme.accent_color(), crate::modern::darken(app.theme.accent_color(), 55), app.theme.on_accent_color())
                                     } else {
                                         (app.theme.bg_card_color(), crate::modern::darken(app.theme.bg_card_color(), 40), app.theme.text_primary_color())
                                     };
@@ -158,7 +158,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                     let is_active = app.theme.id == custom.id;
                                     let label = format!("* {}", custom.name);
                                     let (fill, edge, txt) = if is_active {
-                                        (app.theme.accent_color(), crate::modern::darken(app.theme.accent_color(), 55), egui::Color32::from_rgb(15, 23, 42))
+                                        (app.theme.accent_color(), crate::modern::darken(app.theme.accent_color(), 55), app.theme.on_accent_color())
                                     } else {
                                         (app.theme.bg_card_color(), crate::modern::darken(app.theme.bg_card_color(), 40), app.theme.text_primary_color())
                                     };
@@ -251,6 +251,43 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                                 ui.label("Danger / Close:");
                                 color_modified |= ui.color_edit_button_srgb(&mut app.theme.danger).changed();
+                                ui.end_row();
+
+                                // Text rendered on top of accent-colored buttons
+                                // and active tabs. [0,0,0] = auto (WCAG-based
+                                // pick from the accent color). Click the swatch
+                                // to set an explicit override.
+                                ui.label("Text on Accent:");
+                                let auto_pick = crate::modern::on_accent_text(app.theme.accent_color());
+                                let is_auto = app.theme.on_accent == [0, 0, 0];
+                                let mut display = if is_auto {
+                                    [auto_pick.r(), auto_pick.g(), auto_pick.b()]
+                                } else {
+                                    app.theme.on_accent
+                                };
+                                if ui.color_edit_button_srgb(&mut display).changed() {
+                                    app.theme.on_accent = display;
+                                    color_modified = true;
+                                }
+
+                                // Reset-to-auto button (only enabled when
+                                // an explicit override is set).
+                                if !is_auto {
+                                    if ui
+                                        .small_button("auto")
+                                        .on_hover_text("Reset to auto (based on accent)")
+                                        .clicked()
+                                    {
+                                        app.theme.on_accent = [0, 0, 0];
+                                        color_modified = true;
+                                    }
+                                } else {
+                                    ui.label(
+                                        egui::RichText::new("(auto)")
+                                            .small()
+                                            .color(app.theme.text_muted_color()),
+                                    );
+                                }
                                 ui.end_row();
                             });
 

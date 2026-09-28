@@ -15,12 +15,24 @@ pub struct ThemeConfig {
     pub border: [u8; 3],
     pub accent: [u8; 3],
     pub accent_hover: [u8; 3],
+    /// Text color drawn on top of accent-colored fills (buttons, active
+    /// tabs, etc.). Explicit override for edge cases where the WCAG
+    /// auto-pick isn't what the theme author wants.
+    #[serde(default = "default_on_accent")]
+    pub on_accent: [u8; 3],
     pub text_primary: [u8; 3],
     pub text_muted: [u8; 3],
     pub success: [u8; 3],
     pub danger: [u8; 3],
 
     pub ansi_colors: [[u8; 3]; 16],
+}
+
+fn default_on_accent() -> [u8; 3] {
+    // [0,0,0] is the "auto" sentinel: on_accent_color() falls back to
+    // WCAG-based contrast picking when the field is exactly this value.
+    // Users can override per-theme via the Settings color picker.
+    [0, 0, 0]
 }
 
 impl Default for ThemeConfig {
@@ -50,6 +62,22 @@ impl ThemeConfig {
 
     pub fn accent_color(&self) -> egui::Color32 {
         egui::Color32::from_rgb(self.accent[0], self.accent[1], self.accent[2])
+    }
+
+    /// Text color to render on top of the accent fill (buttons, active
+    /// tabs, etc.). If the theme stores an explicit non-sentinel value
+    /// in `on_accent`, that's used; otherwise we auto-pick via WCAG
+    /// contrast against the accent. `[0,0,0]` is the auto sentinel.
+    pub fn on_accent_color(&self) -> egui::Color32 {
+        if self.on_accent == [0, 0, 0] {
+            crate::modern::on_accent_text(self.accent_color())
+        } else {
+            egui::Color32::from_rgb(
+                self.on_accent[0],
+                self.on_accent[1],
+                self.on_accent[2],
+            )
+        }
     }
 
     pub fn accent_hover_color(&self) -> egui::Color32 {
@@ -109,6 +137,7 @@ impl ThemeConfig {
             border: [39, 49, 73],
             accent: [6, 182, 212],
             accent_hover: [34, 211, 238],
+            on_accent: [0, 0, 0],
             text_primary: [243, 244, 246],
             text_muted: [156, 163, 175],
             success: [34, 197, 94],
@@ -134,6 +163,7 @@ impl ThemeConfig {
             border: [78, 56, 73],
             accent: [244, 114, 182],
             accent_hover: [249, 168, 212],
+            on_accent: [0, 0, 0],
             text_primary: [253, 242, 248],
             text_muted: [190, 150, 175],
             success: [52, 211, 153],
@@ -159,6 +189,7 @@ impl ThemeConfig {
             border: [68, 65, 90],
             accent: [235, 188, 186],
             accent_hover: [235, 111, 146],
+            on_accent: [0, 0, 0],
             text_primary: [224, 222, 244],
             text_muted: [144, 140, 170],
             success: [49, 116, 143],
@@ -184,6 +215,7 @@ impl ThemeConfig {
             border: [90, 48, 76],
             accent: [236, 72, 153],
             accent_hover: [244, 114, 182],
+            on_accent: [0, 0, 0],
             text_primary: [255, 241, 242],
             text_muted: [194, 138, 168],
             success: [74, 222, 128],
@@ -209,6 +241,7 @@ impl ThemeConfig {
             border: [70, 62, 94],
             accent: [196, 167, 231],
             accent_hover: [216, 180, 254],
+            on_accent: [0, 0, 0],
             text_primary: [245, 243, 255],
             text_muted: [167, 155, 194],
             success: [110, 231, 183],
@@ -234,6 +267,7 @@ impl ThemeConfig {
             border: [86, 54, 60],
             accent: [251, 146, 60],
             accent_hover: [244, 114, 182],
+            on_accent: [0, 0, 0],
             text_primary: [255, 247, 237],
             text_muted: [194, 148, 138],
             success: [52, 211, 153],
@@ -259,6 +293,7 @@ impl ThemeConfig {
             border: [98, 104, 128],
             accent: [234, 153, 156],
             accent_hover: [202, 158, 230],
+            on_accent: [0, 0, 0],
             text_primary: [198, 208, 245],
             text_muted: [131, 139, 167],
             success: [166, 209, 137],
@@ -284,6 +319,7 @@ impl ThemeConfig {
             border: [38, 66, 52],
             accent: [16, 185, 129],
             accent_hover: [52, 211, 153],
+            on_accent: [0, 0, 0],
             text_primary: [236, 253, 245],
             text_muted: [110, 160, 135],
             success: [16, 185, 129],
@@ -309,6 +345,7 @@ impl ThemeConfig {
             border: [70, 55, 38],
             accent: [245, 158, 11],
             accent_hover: [251, 191, 36],
+            on_accent: [0, 0, 0],
             text_primary: [254, 243, 199],
             text_muted: [180, 150, 115],
             success: [34, 197, 94],
@@ -334,6 +371,7 @@ impl ThemeConfig {
             border: [98, 114, 164],
             accent: [189, 147, 249],
             accent_hover: [255, 121, 198],
+            on_accent: [0, 0, 0],
             text_primary: [248, 248, 242],
             text_muted: [139, 147, 168],
             success: [80, 250, 123],
@@ -359,6 +397,7 @@ impl ThemeConfig {
             border: [76, 86, 106],
             accent: [136, 192, 208],
             accent_hover: [129, 161, 193],
+            on_accent: [0, 0, 0],
             text_primary: [236, 239, 244],
             text_muted: [148, 156, 172],
             success: [163, 190, 140],
@@ -384,6 +423,7 @@ impl ThemeConfig {
             border: [65, 72, 104],
             accent: [122, 162, 247],
             accent_hover: [187, 154, 247],
+            on_accent: [0, 0, 0],
             text_primary: [192, 202, 245],
             text_muted: [115, 126, 166],
             success: [158, 206, 106],
@@ -409,6 +449,7 @@ impl ThemeConfig {
             border: [62, 68, 81],
             accent: [97, 175, 239],
             accent_hover: [198, 120, 221],
+            on_accent: [0, 0, 0],
             text_primary: [171, 178, 191],
             text_muted: [115, 121, 132],
             success: [152, 195, 121],
@@ -434,6 +475,7 @@ impl ThemeConfig {
             border: [82, 79, 83],
             accent: [255, 216, 102],
             accent_hover: [255, 97, 136],
+            on_accent: [0, 0, 0],
             text_primary: [252, 252, 250],
             text_muted: [147, 146, 147],
             success: [169, 220, 103],
@@ -459,6 +501,7 @@ impl ThemeConfig {
             border: [24, 48, 30],
             accent: [34, 197, 94],
             accent_hover: [74, 222, 128],
+            on_accent: [0, 0, 0],
             text_primary: [134, 239, 172],
             text_muted: [74, 140, 95],
             success: [34, 197, 94],
@@ -484,6 +527,7 @@ impl ThemeConfig {
             border: [88, 110, 117],
             accent: [38, 139, 210],
             accent_hover: [42, 161, 152],
+            on_accent: [0, 0, 0],
             text_primary: [147, 161, 161],
             text_muted: [101, 123, 131],
             success: [133, 153, 0],
@@ -510,6 +554,7 @@ impl ThemeConfig {
             border: [80, 36, 120],
             accent: [255, 60, 180],
             accent_hover: [255, 120, 220],
+            on_accent: [0, 0, 0],
             text_primary: [245, 230, 255],
             text_muted: [165, 135, 205],
             success: [0, 255, 200],
@@ -535,6 +580,7 @@ impl ThemeConfig {
             border: [46, 90, 46],
             accent: [170, 255, 0],
             accent_hover: [200, 255, 60],
+            on_accent: [0, 0, 0],
             text_primary: [230, 255, 220],
             text_muted: [135, 185, 135],
             success: [100, 255, 100],
@@ -560,6 +606,7 @@ impl ThemeConfig {
             border: [100, 24, 100],
             accent: [255, 0, 200],
             accent_hover: [255, 90, 225],
+            on_accent: [0, 0, 0],
             text_primary: [255, 230, 255],
             text_muted: [195, 135, 195],
             success: [0, 255, 150],
@@ -585,6 +632,7 @@ impl ThemeConfig {
             border: [90, 30, 24],
             accent: [255, 80, 20],
             accent_hover: [255, 130, 60],
+            on_accent: [0, 0, 0],
             text_primary: [255, 235, 220],
             text_muted: [205, 135, 115],
             success: [60, 255, 120],
@@ -610,6 +658,7 @@ impl ThemeConfig {
             border: [66, 44, 116],
             accent: [150, 60, 255],
             accent_hover: [180, 100, 255],
+            on_accent: [0, 0, 0],
             text_primary: [235, 225, 255],
             text_muted: [155, 135, 205],
             success: [80, 255, 180],
@@ -635,6 +684,7 @@ impl ThemeConfig {
             border: [24, 68, 110],
             accent: [0, 180, 255],
             accent_hover: [60, 210, 255],
+            on_accent: [0, 0, 0],
             text_primary: [220, 245, 255],
             text_muted: [130, 180, 215],
             success: [0, 255, 180],
@@ -668,6 +718,7 @@ impl ThemeConfig {
             // legible against bg_card.
             accent: [240, 180, 0],
             accent_hover: [255, 205, 60],
+            on_accent: [0, 0, 0],
 
             // Near-black primary text, warm grey muted.
             text_primary: [28, 26, 20],
@@ -714,6 +765,7 @@ impl ThemeConfig {
             border: [178, 198, 220],
             accent: [30, 110, 210],
             accent_hover: [70, 145, 235],
+            on_accent: [0, 0, 0],
             text_primary: [18, 26, 40],
             text_muted: [95, 115, 140],
             success: [26, 140, 56],
@@ -739,6 +791,7 @@ impl ThemeConfig {
             border: [172, 202, 180],
             accent: [22, 140, 90],
             accent_hover: [55, 175, 120],
+            on_accent: [0, 0, 0],
             text_primary: [20, 34, 26],
             text_muted: [92, 122, 100],
             success: [22, 140, 90],
@@ -764,6 +817,7 @@ impl ThemeConfig {
             border: [216, 178, 198],
             accent: [210, 60, 130],
             accent_hover: [235, 100, 165],
+            on_accent: [0, 0, 0],
             text_primary: [40, 22, 30],
             text_muted: [135, 95, 112],
             success: [26, 140, 56],
@@ -789,6 +843,7 @@ impl ThemeConfig {
             border: [188, 182, 218],
             accent: [110, 60, 210],
             accent_hover: [145, 100, 235],
+            on_accent: [0, 0, 0],
             text_primary: [28, 24, 44],
             text_muted: [108, 100, 140],
             success: [26, 140, 56],
@@ -814,6 +869,7 @@ impl ThemeConfig {
             border: [218, 188, 160],
             accent: [220, 95, 40],
             accent_hover: [240, 130, 75],
+            on_accent: [0, 0, 0],
             text_primary: [44, 28, 18],
             text_muted: [140, 108, 80],
             success: [26, 140, 56],
@@ -839,6 +895,7 @@ impl ThemeConfig {
             border: [180, 184, 194],
             accent: [55, 60, 75],
             accent_hover: [90, 96, 115],
+            on_accent: [0, 0, 0],
             text_primary: [24, 26, 34],
             text_muted: [108, 112, 125],
             success: [26, 140, 56],
@@ -864,6 +921,7 @@ impl ThemeConfig {
             border: [160, 198, 204],
             accent: [0, 130, 145],
             accent_hover: [30, 165, 180],
+            on_accent: [0, 0, 0],
             text_primary: [18, 34, 38],
             text_muted: [82, 122, 130],
             success: [26, 140, 56],
@@ -937,7 +995,7 @@ pub fn nav_tab_button(ui: &mut egui::Ui, text: &str, is_active: bool, theme: &Th
             .small()
             .fill(fill)
             .edge(crate::modern::darken(fill, 55))
-            .text_color(egui::Color32::from_rgb(15, 23, 42))
+            .text_color(theme.on_accent_color())
     } else {
         crate::modern::Button3D::new(text)
             .small()
@@ -950,14 +1008,15 @@ pub fn nav_tab_button(ui: &mut egui::Ui, text: &str, is_active: bool, theme: &Th
 
 pub fn nav_action_button(ui: &mut egui::Ui, text: &str, theme: &ThemeConfig) -> bool {
     // Accent face + darker-accent depth band — same recipe as the active
-    // nav tab and the toolbar buttons, so every "primary action" button
-    // in the app shares one visual language.
+    // nav tab and the toolbar buttons. Text color comes from the theme's
+    // on_accent_color(), which respects an explicit override if the
+    // user set one in Settings, otherwise picks by WCAG contrast.
     let fill = theme.accent_color();
     crate::modern::Button3D::new(text)
         .small()
         .fill(fill)
         .edge(crate::modern::darken(fill, 55))
-        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .text_color(theme.on_accent_color())
         .show(ui, theme)
         .clicked()
 }

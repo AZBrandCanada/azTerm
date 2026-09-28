@@ -2639,7 +2639,7 @@ impl SftpManager {
                         egui::Align2::LEFT_CENTER,
                         "SFTP Transfers & History",
                         egui::FontId::proportional(14.0),
-                        egui::Color32::from_rgb(15, 23, 42),
+                        theme.on_accent_color(),
                     );
 
                     let close_rect = egui::Rect::from_center_size(
@@ -2667,7 +2667,7 @@ impl SftpManager {
                         if close_resp.hovered() {
                             egui::Color32::WHITE
                         } else {
-                            egui::Color32::from_rgb(15, 23, 42)
+                            theme.on_accent_color()
                         },
                     );
                     if close_resp.clicked() {
@@ -2789,7 +2789,7 @@ impl SftpManager {
                                                         egui::Align2::CENTER_CENTER,
                                                         dir_label,
                                                         egui::FontId::proportional(10.0),
-                                                        egui::Color32::from_rgb(15, 23, 42),
+                                                        crate::modern::on_accent_text(dir_color),
                                                     );
 
                                                     ui.label(
