@@ -300,6 +300,10 @@ pub struct AppState {
     pub applied_terminal_font_path: Option<String>,
     /// Cache of installed fonts, populated lazily by the Settings picker.
     pub cached_fonts: Option<Vec<fonts::FontEntry>>,
+    /// Whether the current `cached_fonts` list has been pushed into
+    /// egui as named preview families. Reset whenever cached_fonts is
+    /// invalidated (font rescan).
+    pub preview_fonts_loaded: bool,
 
     pub available_update: Option<String>,
     pub update_rx: Option<Receiver<UpdateCheckResult>>,
@@ -353,6 +357,7 @@ impl AppState {
             &cc.egui_ctx,
             &settings.ui_font_path,
             &settings.terminal_font_path,
+            &[],
         );
         let applied_ui_font_init = settings.ui_font_path.clone();
         let applied_terminal_font_init = settings.terminal_font_path.clone();
@@ -401,6 +406,7 @@ impl AppState {
             applied_ui_font_path: Some(applied_ui_font_init),
             applied_terminal_font_path: Some(applied_terminal_font_init),
             cached_fonts: None,
+            preview_fonts_loaded: false,
 
             available_update: initial_available_update,
             update_rx: None,
@@ -1217,19 +1223,30 @@ impl eframe::App for AppState {
         // If the user picked a different UI or terminal font in Settings,
         // rebuild egui's font atlas. This is the only place we call
         // set_fonts() after startup — it's expensive (full atlas rebuild)
-        // so we guard it behind a path comparison.
+        // so we guard it behind path comparisons.
         let ui_changed = self.applied_ui_font_path.as_deref()
             != Some(self.settings.ui_font_path.as_str());
         let term_changed = self.applied_terminal_font_path.as_deref()
             != Some(self.settings.terminal_font_path.as_str());
-        if ui_changed || term_changed {
+        // Also rebuild the atlas the first time the installed-font list
+        // is populated, so the dropdown can render every item in its own
+        // typeface.
+        let previews_need_load = self.cached_fonts.is_some() && !self.preview_fonts_loaded;
+
+        if ui_changed || term_changed || previews_need_load {
+            let preview_list: Vec<fonts::FontEntry> =
+                self.cached_fonts.clone().unwrap_or_default();
             fonts::apply_to_egui(
                 ctx,
                 &self.settings.ui_font_path,
                 &self.settings.terminal_font_path,
+                &preview_list,
             );
             self.applied_ui_font_path = Some(self.settings.ui_font_path.clone());
             self.applied_terminal_font_path = Some(self.settings.terminal_font_path.clone());
+            if previews_need_load {
+                self.preview_fonts_loaded = true;
+            }
         }
 
         // Reconcile debug logging with current settings (cheap no-op if unchanged).

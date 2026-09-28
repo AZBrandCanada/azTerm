@@ -121,7 +121,12 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
 ///                       Monospace family (terminal content, code
 ///                       blocks). Empty string = use AZTerm's built-in
 ///                       fallback list.
-pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str, terminal_font_path: &str) {
+pub fn apply_to_egui(
+    ctx: &egui::Context,
+    ui_font_path: &str,
+    terminal_font_path: &str,
+    preview_fonts: &[FontEntry],
+) {
     let mut fonts = egui::FontDefinitions::default();
 
     // ---- UI font: Proportional family ---------------------------------
@@ -162,7 +167,53 @@ pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str, terminal_font_path
         }
     }
 
+    // ---- Preview families -------------------------------------------
+    // Register each installed font under a named family so the combo
+    // boxes can render each dropdown item in its own typeface. Capped
+    // at PREVIEW_LIMIT fonts to avoid pathological startup cost on
+    // systems with truly huge font libraries.
+    for (idx, entry) in preview_fonts.iter().enumerate().take(PREVIEW_LIMIT) {
+        let data = match std::fs::read(&entry.path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let data_key = format!("preview_data_{}", idx);
+        fonts
+            .font_data
+            .insert(data_key.clone(), egui::FontData::from_owned(data));
+        fonts.families.insert(
+            egui::FontFamily::Name(preview_family_name(idx).into()),
+            vec![data_key],
+        );
+    }
+
     ctx.set_fonts(fonts);
+}
+
+/// Maximum number of installed fonts that get a preview family.
+/// Dropdowns must check `idx < PREVIEW_LIMIT` before requesting a
+/// preview font, otherwise egui panics on an unbound family.
+pub const PREVIEW_LIMIT: usize = 400;
+
+/// Family name used for the Nth installed font in preview mode. The
+/// font combo boxes use this to render each item in the actual font
+/// the item names. Only valid for `idx < PREVIEW_LIMIT`.
+pub fn preview_family_name(idx: usize) -> String {
+    format!("azterm_font_preview_{}", idx)
+}
+
+/// True if the given font index has a registered preview family.
+pub fn has_preview(idx: usize) -> bool {
+    idx < PREVIEW_LIMIT
+}
+
+/// Family name used for a preview by font path. Returns None if the
+/// path isn't currently registered.
+pub fn preview_family_for_path(fonts: &[FontEntry], path: &str) -> Option<String> {
+    fonts
+        .iter()
+        .position(|f| f.path.to_string_lossy() == path)
+        .map(preview_family_name)
 }
 
 /// The built-in fallback list used when the user hasn't picked a font.

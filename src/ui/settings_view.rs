@@ -183,10 +183,24 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                             app.settings.ui_font_path = String::new();
                                             app.settings.save();
                                         }
-                                        for font in &font_list {
+                                        for (idx, font) in font_list.iter().enumerate() {
                                             let path_str = font.path.to_string_lossy().to_string();
                                             let is_selected = app.settings.ui_font_path == path_str;
-                                            if ui.selectable_label(is_selected, &font.family).clicked() {
+                                            // Render each item in its own typeface
+                                            // when the preview family is available.
+                                            let label = if app.preview_fonts_loaded
+                                                && crate::fonts::has_preview(idx)
+                                            {
+                                                let family = crate::fonts::preview_family_name(idx);
+                                                let fid = egui::FontId::new(
+                                                    14.0,
+                                                    egui::FontFamily::Name(family.into()),
+                                                );
+                                                egui::RichText::new(&font.family).font(fid)
+                                            } else {
+                                                egui::RichText::new(&font.family)
+                                            };
+                                            if ui.selectable_label(is_selected, label).clicked() {
                                                 app.settings.ui_font_path = path_str;
                                                 app.settings.save();
                                             }
@@ -195,6 +209,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                                 if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
                                     app.cached_fonts = None;
+                                    app.preview_fonts_loaded = false;
                                 }
                                 if ui.button("Use Default").clicked() {
                                     app.settings.ui_font_path = String::new();
@@ -236,10 +251,22 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                             app.settings.terminal_font_path = String::new();
                                             app.settings.save();
                                         }
-                                        for font in &font_list {
+                                        for (idx, font) in font_list.iter().enumerate() {
                                             let path_str = font.path.to_string_lossy().to_string();
                                             let is_selected = app.settings.terminal_font_path == path_str;
-                                            if ui.selectable_label(is_selected, &font.family).clicked() {
+                                            let label = if app.preview_fonts_loaded
+                                                && crate::fonts::has_preview(idx)
+                                            {
+                                                let family = crate::fonts::preview_family_name(idx);
+                                                let fid = egui::FontId::new(
+                                                    14.0,
+                                                    egui::FontFamily::Name(family.into()),
+                                                );
+                                                egui::RichText::new(&font.family).font(fid)
+                                            } else {
+                                                egui::RichText::new(&font.family)
+                                            };
+                                            if ui.selectable_label(is_selected, label).clicked() {
                                                 app.settings.terminal_font_path = path_str;
                                                 app.settings.save();
                                             }
@@ -248,6 +275,7 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                                 if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
                                     app.cached_fonts = None;
+                                    app.preview_fonts_loaded = false;
                                 }
                                 if ui.button("Use Default").clicked() {
                                     app.settings.terminal_font_path = String::new();
