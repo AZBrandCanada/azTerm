@@ -440,7 +440,7 @@ pub fn toolbar_button(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egu
         .small()
         .fill(fill)
         .edge(darken(fill, 55))
-        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .text_color(theme.on_accent_color())
         .show(ui, theme)
 }
 

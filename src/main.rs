@@ -1198,6 +1198,12 @@ impl AppState {
 
 impl eframe::App for AppState {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Push the current theme into egui's global visuals so all
+        // native widgets (Window, TextEdit, ComboBox dropdowns, popup
+        // menus, ScrollArea backgrounds) pick up the same color scheme
+        // as the rest of the UI. Cheap: mutates the style in place.
+        self.theme.apply_to_egui(ctx);
+
         // Reconcile debug logging with current settings (cheap no-op if unchanged).
         debug_log::init(self.settings.debug_mode, &self.settings.debug_log_path);
 

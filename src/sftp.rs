@@ -1130,7 +1130,7 @@ impl PaneBrowser {
                                         .color(theme.text_primary_color()),
                                 );
                                 ui.add_space(12.0);
-                                if ui.button(egui::RichText::new("Login & Authenticate").strong().size(13.0)).clicked() {
+                                if crate::modern::button_accent(ui, theme, "Login & Authenticate").clicked() {
                                     auth_request = Some((profile.clone(), self.id.clone()));
                                 }
                             });

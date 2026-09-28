@@ -125,6 +125,126 @@ impl ThemeConfig {
             })
     }
 
+    /// Is the theme's primary background light?
+    pub fn is_light(&self) -> bool {
+        !crate::modern::is_dark(self.bg_main_color())
+    }
+
+    /// Push this theme's colors into egui's global style so native
+    /// widgets (Window frames, TextEdit backgrounds, ComboBox dropdowns,
+    /// popup menus, ScrollArea backgrounds, ...) match the rest of the
+    /// app. Uses `style_mut` for in-place mutation — cheap enough to
+    /// call every frame from `AppState::update()`.
+    pub fn apply_to_egui(&self, ctx: &egui::Context) {
+        let visuals = self.build_visuals();
+        ctx.style_mut(|style| {
+            style.visuals = visuals;
+        });
+    }
+
+    fn build_visuals(&self) -> egui::Visuals {
+        use crate::modern::{darken, lighten};
+
+        let bg_main = self.bg_main_color();
+        let bg_panel = self.bg_panel_color();
+        let bg_card = self.bg_card_color();
+        let text = self.text_primary_color();
+        let text_muted = self.text_muted_color();
+        let accent = self.accent_color();
+        let accent_hover = self.accent_hover_color();
+        let border = self.border_color();
+        let on_accent = self.on_accent_color();
+        let danger = self.danger_color();
+
+        let light = self.is_light();
+        let mut v = if light {
+            egui::Visuals::light()
+        } else {
+            egui::Visuals::dark()
+        };
+
+        // ---- Window / popup chrome --------------------------------
+        v.window_fill = bg_panel;
+        v.window_stroke = egui::Stroke::new(1.0_f32, border);
+        v.window_shadow = egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 8.0),
+            blur: 28.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(if light { 80 } else { 160 }),
+        };
+        v.window_rounding = egui::Rounding::same(10.0);
+        v.popup_shadow = v.window_shadow;
+        v.menu_rounding = egui::Rounding::same(6.0);
+
+        // ---- Base fills --------------------------------------------
+        // panel_fill: our own TopBottomPanels use Frame with explicit
+        // fills, but CentralPanel and background gaps use this.
+        v.panel_fill = bg_main;
+        // extreme_bg_color: TextEdit background (this is the one that
+        // was making every input field dark).
+        v.extreme_bg_color = bg_card;
+        // faint_bg_color: alternating rows / striped widgets.
+        v.faint_bg_color = bg_card.linear_multiply(0.6);
+        // code_bg_color: monospace blocks in RichText.
+        v.code_bg_color = bg_card;
+
+        // ---- Text --------------------------------------------------
+        v.override_text_color = Some(text);
+        v.hyperlink_color = accent;
+
+        // ---- Text selection highlight ------------------------------
+        v.selection.bg_fill = accent;
+        v.selection.stroke = egui::Stroke::new(1.0_f32, on_accent);
+
+        // ---- Widget states -----------------------------------------
+        let card_hovered = lighten(bg_card, if light { 12 } else { 22 });
+        let card_active = darken(bg_card, if light { 10 } else { 18 });
+
+        let w = &mut v.widgets;
+
+        // Inactive (default)
+        w.inactive.bg_fill = bg_card;
+        w.inactive.weak_bg_fill = bg_card;
+        w.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+        w.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        w.inactive.rounding = egui::Rounding::same(6.0);
+
+        // Hovered
+        w.hovered.bg_fill = card_hovered;
+        w.hovered.weak_bg_fill = card_hovered;
+        w.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+        w.hovered.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        w.hovered.rounding = egui::Rounding::same(6.0);
+
+        // Active (pressed)
+        w.active.bg_fill = card_active;
+        w.active.weak_bg_fill = card_active;
+        w.active.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+        w.active.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        w.active.rounding = egui::Rounding::same(6.0);
+
+        // Open (dropdown expanded)
+        w.open.bg_fill = bg_card;
+        w.open.weak_bg_fill = bg_card;
+        w.open.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+        w.open.fg_stroke = egui::Stroke::new(1.0_f32, text);
+        w.open.rounding = egui::Rounding::same(6.0);
+
+        // Non-interactive (labels, separators)
+        w.noninteractive.bg_fill = bg_panel;
+        w.noninteractive.weak_bg_fill = bg_panel;
+        w.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+        w.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text_muted);
+        w.noninteractive.rounding = egui::Rounding::same(6.0);
+
+        // Misc
+        v.slider_trailing_fill = true;
+        v.warn_fg_color = accent_hover;
+        v.error_fg_color = danger;
+
+        v
+    }
+
     pub fn cyber_cyan() -> Self {
         Self {
             id: "cyber_cyan".to_string(),
