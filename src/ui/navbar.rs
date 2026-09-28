@@ -76,16 +76,16 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
                 }
 
                 if app.active_view == ActiveView::Terminal {
-                    if crate::modern::button_small(ui, &app.theme, "Split Right").on_hover_text("Split active pane side-by-side (Ctrl+Shift+D)").clicked() {
+                    if crate::modern::accent_button_small(ui, &app.theme, "Split Right").on_hover_text("Split active pane side-by-side (Ctrl+Shift+D)").clicked() {
                         app.split_active_pane(SplitDirection::Horizontal, ctx.clone());
                     }
-                    if crate::modern::button_small(ui, &app.theme, "Split Down").on_hover_text("Split active pane top-and-bottom (Ctrl+Shift+E)").clicked() {
+                    if crate::modern::accent_button_small(ui, &app.theme, "Split Down").on_hover_text("Split active pane top-and-bottom (Ctrl+Shift+E)").clicked() {
                         app.split_active_pane(SplitDirection::Vertical, ctx.clone());
                     }
                     if let Some(ws) = app.workspaces.get(app.active_workspace_idx) {
                         if !ws.is_single_pane() {
                             let max_label = if ws.maximized_session.is_some() { "Restore Splits" } else { "Maximize Pane" };
-                            if crate::modern::button_small(ui, &app.theme, max_label).on_hover_text("Toggle maximize active pane (Ctrl+Shift+M)").clicked() {
+                            if crate::modern::accent_button_small(ui, &app.theme, max_label).on_hover_text("Toggle maximize active pane (Ctrl+Shift+M)").clicked() {
                                 if let Some(ws_mut) = app.workspaces.get_mut(app.active_workspace_idx) {
                                     ws_mut.maximized_session = if ws_mut.maximized_session.is_some() { None } else { Some(app.active_session_id) };
                                 }
@@ -95,7 +95,7 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
 
                     let current_is_multi = app.workspaces.get(app.active_workspace_idx).map_or(false, |w| !w.is_single_pane());
                     if current_is_multi {
-                        if crate::modern::button_small(ui, &app.theme, "Untile Active Tab").on_hover_text("Detach tiled panes in this tab into separate tabs").clicked() {
+                        if crate::modern::accent_button_small(ui, &app.theme, "Untile Active Tab").on_hover_text("Detach tiled panes in this tab into separate tabs").clicked() {
                             app.untile_all_to_tabs();
                         }
                     }
@@ -106,7 +106,7 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
                         && (app.workspaces.len() > optimal_tabs_count || app.workspaces.iter().any(|w| w.is_single_pane()));
 
                     if can_tile_more {
-                        if crate::modern::button_small(ui, &app.theme, "Tile All Tabs").on_hover_text("Tile all open tabs into balanced grids (batches of 16 per tab)").clicked() {
+                        if crate::modern::accent_button_small(ui, &app.theme, "Tile All Tabs").on_hover_text("Tile all open tabs into balanced grids (batches of 16 per tab)").clicked() {
                             app.tile_all_tabs();
                         }
                     }

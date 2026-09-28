@@ -555,11 +555,15 @@ pub fn nav_tab_button(ui: &mut egui::Ui, text: &str, is_active: bool, theme: &Th
 }
 
 pub fn nav_action_button(ui: &mut egui::Ui, text: &str, theme: &ThemeConfig) -> bool {
+    // Accent face + darker-accent depth band — same recipe as the active
+    // nav tab and the toolbar buttons, so every "primary action" button
+    // in the app shares one visual language.
+    let fill = theme.accent_color();
     crate::modern::Button3D::new(text)
         .small()
-        .fill(theme.bg_card_color())
-        .edge(crate::modern::darken(theme.bg_card_color(), 40))
-        .text_color(theme.text_primary_color())
+        .fill(fill)
+        .edge(crate::modern::darken(fill, 55))
+        .text_color(egui::Color32::from_rgb(15, 23, 42))
         .show(ui, theme)
         .clicked()
 }

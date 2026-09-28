@@ -389,3 +389,16 @@ pub fn toolbar_button_tiny(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -
         .text_color(egui::Color32::from_rgb(15, 23, 42))
         .show(ui, theme)
 }
+
+/// Small accent-filled button — same recipe as the active nav tab and
+/// toolbar buttons. Use for secondary actions that should still read
+/// as primary/active (Split Right, Split Down, Maximize, Tile All, ...).
+pub fn accent_button_small(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egui::Response {
+    let fill = theme.accent_color();
+    Button3D::new(text)
+        .small()
+        .fill(fill)
+        .edge(darken(fill, 55))
+        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .show(ui, theme)
+}
