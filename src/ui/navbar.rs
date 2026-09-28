@@ -1,4 +1,5 @@
 // src/ui/navbar.rs
+use crate::ssh::SshProfile;
 use crate::terminal::SessionType;
 use crate::theme::{nav_action_button, nav_tab_button, session_tab_chip};
 use crate::tiling::SplitDirection;
@@ -73,6 +74,220 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
 
                 if nav_action_button(ui, "+ New Shell", &app.theme) {
                     app.spawn_local_terminal(ctx.clone(), None);
+                }
+
+                // "+ New SSH" — click opens a popup of saved profiles, with a
+                // search field that auto-focuses on open.
+                {
+                    let ssh_btn = crate::modern::Button3D::new("+ New SSH")
+                        .small()
+                        .fill(app.theme.accent_color())
+                        .edge(crate::modern::darken(app.theme.accent_color(), 55))
+                        .text_color(app.theme.on_accent_color())
+                        .show(ui, &app.theme);
+
+                    let popup_id = ui.make_persistent_id("azterm_new_ssh_popup");
+                    let search_key = popup_id.with("search_query");
+                    let fresh_key = popup_id.with("fresh");
+
+                    // When the popup is closed, wipe the search query and
+                    // mark the next open as "fresh" (so the search field
+                    // auto-focuses once, then yields to normal focus).
+                    if !ui.memory(|m| m.is_popup_open(popup_id)) {
+                        ui.memory_mut(|m| {
+                            m.data.remove::<String>(search_key);
+                            m.data.insert_temp(fresh_key, true);
+                        });
+                    }
+
+                    if ssh_btn.clicked() {
+                        ui.memory_mut(|m| m.toggle_popup(popup_id));
+                    }
+
+                    // Deferred actions — the popup closure borrows `app`
+                    // immutably, so anything needing `&mut app` runs after.
+                    let mut connect_profile: Option<SshProfile> = None;
+                    let mut open_new_profile = false;
+                    let mut close_menu = false;
+
+                    egui::popup::popup_below_widget(
+                        ui,
+                        popup_id,
+                        &ssh_btn,
+                        egui::PopupCloseBehavior::CloseOnClickOutside,
+                        |ui: &mut egui::Ui| {
+                            ui.set_min_width(300.0);
+                            ui.set_max_width(380.0);
+
+                            ui.label(
+                                egui::RichText::new("Connect to SSH profile")
+                                    .strong()
+                                    .color(app.theme.text_primary_color()),
+                            );
+                            ui.add_space(4.0);
+
+                            // ---- Search field --------------------------
+                            let mut query: String = ui
+                                .memory(|m| m.data.get_temp(search_key).unwrap_or_default());
+
+                            let search_resp = ui.add(
+                                egui::TextEdit::singleline(&mut query)
+                                    .hint_text("Search name, host, or user...")
+                                    .desired_width(f32::INFINITY),
+                            );
+
+                            // Auto-focus the search field on the first
+                            // frame the popup is open. Subsequent frames
+                            // respect whatever the user focuses.
+                            let is_fresh: bool = ui
+                                .memory(|m| m.data.get_temp(fresh_key).unwrap_or(true));
+                            if is_fresh {
+                                search_resp.request_focus();
+                                ui.memory_mut(|m| m.data.insert_temp(fresh_key, false));
+                            }
+
+                            ui.memory_mut(|m| {
+                                m.data.insert_temp(search_key, query.clone());
+                            });
+
+                            ui.add_space(4.0);
+                            ui.separator();
+                            ui.add_space(2.0);
+
+                            if app.ssh_store.profiles.is_empty() {
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new("No saved SSH profiles yet.")
+                                        .small()
+                                        .color(app.theme.text_muted_color()),
+                                );
+                                ui.add_space(6.0);
+                            } else {
+                                let q = query.to_lowercase();
+                                let matches: Vec<&SshProfile> = app
+                                    .ssh_store
+                                    .profiles
+                                    .iter()
+                                    .filter(|p| {
+                                        q.is_empty()
+                                            || p.name.to_lowercase().contains(&q)
+                                            || p.host.to_lowercase().contains(&q)
+                                            || p.username.to_lowercase().contains(&q)
+                                    })
+                                    .collect();
+
+                                if matches.is_empty() {
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new("No profiles match your search.")
+                                            .small()
+                                            .color(app.theme.text_muted_color()),
+                                    );
+                                    ui.add_space(10.0);
+                                } else {
+                                    // Scroll list — pinned to a fixed
+                                    // max height so many profiles stay
+                                    // usable without overflowing the
+                                    // screen. egui also repositions the
+                                    // popup above the button if there
+                                    // isn't room below.
+                                    egui::ScrollArea::vertical()
+                                        .max_height(320.0)
+                                        .auto_shrink([false, true])
+                                        .show(ui, |ui| {
+                                            for profile in matches {
+                                                let title = profile.name.clone();
+                                                let subtitle = format!(
+                                                    "{}@{}:{}",
+                                                    profile.username,
+                                                    profile.host,
+                                                    profile.port
+                                                );
+
+                                                let row_height = 46.0_f32;
+                                                let row_width =
+                                                    ui.available_width().max(220.0);
+                                                let (row_rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(row_width, row_height),
+                                                    egui::Sense::hover(),
+                                                );
+
+                                                let pointer_over_row =
+                                                    ui.rect_contains_pointer(row_rect);
+                                                if pointer_over_row {
+                                                    ui.painter().rect_filled(
+                                                        row_rect,
+                                                        6.0,
+                                                        app.theme.bg_card_color(),
+                                                    );
+                                                }
+
+                                                let inner = row_rect
+                                                    .shrink2(egui::vec2(12.0, 8.0));
+                                                ui.allocate_ui_at_rect(inner, |ui| {
+                                                    ui.vertical(|ui| {
+                                                        ui.label(
+                                                            egui::RichText::new(&title)
+                                                                .strong()
+                                                                .color(app.theme.text_primary_color()),
+                                                        );
+                                                        ui.label(
+                                                            egui::RichText::new(&subtitle)
+                                                                .small()
+                                                                .color(app.theme.text_muted_color()),
+                                                        );
+                                                    });
+                                                });
+
+                                                // Full-row click target, added
+                                                // AFTER the labels so it wins
+                                                // hit-testing.
+                                                let row_id = ui
+                                                    .id()
+                                                    .with("ssh_profile_row")
+                                                    .with(&profile.id);
+                                                let row_resp = ui.interact(
+                                                    row_rect,
+                                                    row_id,
+                                                    egui::Sense::click(),
+                                                );
+
+                                                if row_resp.hovered() {
+                                                    ui.ctx().set_cursor_icon(
+                                                        egui::CursorIcon::PointingHand,
+                                                    );
+                                                }
+                                                if row_resp.clicked() {
+                                                    connect_profile = Some(profile.clone());
+                                                    close_menu = true;
+                                                }
+
+                                                ui.add_space(4.0);
+                                                ui.separator();
+                                            }
+                                        });
+                                }
+                            }
+
+                            ui.add_space(2.0);
+                            ui.separator();
+                            ui.add_space(2.0);
+                            if ui.button("+ New SSH Profile…").clicked() {
+                                open_new_profile = true;
+                                close_menu = true;
+                            }
+                        },
+                    );
+
+                    if close_menu {
+                        ui.memory_mut(|m| m.close_popup());
+                    }
+                    if let Some(p) = connect_profile {
+                        app.spawn_ssh_terminal(&p, ctx.clone());
+                    }
+                    if open_new_profile {
+                        app.open_create_profile_modal();
+                    }
                 }
 
                 if app.active_view == ActiveView::Terminal {
