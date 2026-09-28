@@ -111,6 +111,7 @@ pub struct Button3D {
     font_size: f32,
     padding: egui::Vec2,
     hover_lift: bool,
+    dot_color: Option<egui::Color32>,
 }
 
 impl Button3D {
@@ -127,6 +128,7 @@ impl Button3D {
             font_size: 13.5,
             padding: egui::vec2(16.0, 8.0),
             hover_lift: true,
+            dot_color: None,
         }
     }
 
@@ -152,6 +154,13 @@ impl Button3D {
     pub fn text_color(mut self, c: egui::Color32) -> Self { self.fg = Some(c); self }
     pub fn border(mut self, c: egui::Color32) -> Self { self.border = Some(c); self }
     pub fn no_lift(mut self) -> Self { self.hover_lift = false; self }
+
+    /// Draw a small colored status dot in the top-right corner. Used
+    /// for the Transfers button to show red=active / green=done.
+    pub fn dot_color(mut self, c: egui::Color32) -> Self {
+        self.dot_color = Some(c);
+        self
+    }
 
     pub fn show(self, ui: &mut egui::Ui, theme: &ThemeConfig) -> egui::Response {
         let font_id = egui::FontId::proportional(self.font_size);
@@ -233,6 +242,17 @@ impl Button3D {
             body_rect.center().y - text_size.y / 2.0,
         );
         ui.painter().galley(text_pos, galley, text_color);
+
+        // Status dot in the top-right corner, if requested.
+        if let Some(dot) = self.dot_color {
+            let dot_center = egui::pos2(body_rect.right() - 5.0, body_rect.top() + 5.0);
+            ui.painter().circle_filled(
+                dot_center,
+                5.0,
+                egui::Color32::from_black_alpha(140),
+            );
+            ui.painter().circle_filled(dot_center, 3.5, dot);
+        }
 
         if hovered {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -380,6 +400,25 @@ pub fn toolbar_button(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egu
 
 /// Same as `toolbar_button` but smaller footprint — for tight toolbars
 /// where vertical space is at a premium.
+/// Same as `toolbar_button` but takes an optional status-dot color.
+pub fn toolbar_button_with_dot(
+    ui: &mut egui::Ui,
+    theme: &ThemeConfig,
+    text: &str,
+    dot: Option<egui::Color32>,
+) -> egui::Response {
+    let fill = theme.accent_color();
+    let mut btn = Button3D::new(text)
+        .small()
+        .fill(fill)
+        .edge(darken(fill, 55))
+        .text_color(egui::Color32::from_rgb(15, 23, 42));
+    if let Some(d) = dot {
+        btn = btn.dot_color(d);
+    }
+    btn.show(ui, theme)
+}
+
 pub fn toolbar_button_tiny(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egui::Response {
     let fill = theme.accent_color();
     Button3D::new(text)

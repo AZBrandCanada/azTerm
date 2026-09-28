@@ -1411,6 +1411,32 @@ impl PaneBrowser {
     }
 }
 
+impl SftpManager {
+    /// Aggregate state of the transfer list, for the toolbar badge dot.
+    /// Returns None when there are no transfers at all.
+    /// Red = any active or failed, green = all completed.
+    pub fn transfer_indicator(&self, theme: &crate::theme::ThemeConfig) -> Option<egui::Color32> {
+        let list = self.transfers.lock().ok()?;
+        if list.is_empty() {
+            return None;
+        }
+        let any_failed = list
+            .iter()
+            .any(|t| matches!(t.status, TransferStatus::Failed(_)));
+        let any_active = list.iter().any(|t| {
+            matches!(
+                t.status,
+                TransferStatus::InProgress | TransferStatus::Queued
+            )
+        });
+        if any_failed || any_active {
+            Some(theme.danger_color())
+        } else {
+            Some(theme.success_color())
+        }
+    }
+}
+
 pub struct SftpManager {
     pub left_pane: PaneBrowser,
     pub right_pane: PaneBrowser,
@@ -1658,6 +1684,7 @@ impl SftpManager {
                                         let mut last_sample_bytes = 0u64;
                                         let mut stream_err = false;
                                         let mut filtered_speed = 0.0f64;
+                                        let mut first_update = true;
 
                                         while let Ok(n) = src_out.read(&mut buf) {
                                             if n == 0 { break; }
@@ -1670,8 +1697,11 @@ impl SftpManager {
 
                                             let now = Instant::now();
                                             let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
-                                            if sample_dt >= 0.10 {
-                                                let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                            if first_update || sample_dt >= 0.05 {
+                                                first_update = false;
+                                                let raw_speed = if sample_dt > 0.001 {
+                                                    (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt
+                                                } else { 0.0 };
                                                 filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
 
                                                 last_sample_t = now;
@@ -1799,6 +1829,7 @@ impl SftpManager {
                                             let mut last_sample_bytes = 0u64;
                                             let mut stream_err = false;
                                             let mut filtered_speed = 0.0f64;
+                                            let mut first_update = true;
 
                                             while let Ok(n) = file.read(&mut buf) {
                                                 if n == 0 { break; }
@@ -1811,8 +1842,11 @@ impl SftpManager {
 
                                                 let now = Instant::now();
                                                 let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
-                                                if sample_dt >= 0.10 {
-                                                    let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                                if first_update || sample_dt >= 0.05 {
+                                                    first_update = false;
+                                                    let raw_speed = if sample_dt > 0.001 {
+                                                        (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt
+                                                    } else { 0.0 };
                                                     filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
 
                                                     last_sample_t = now;
@@ -1940,6 +1974,10 @@ impl SftpManager {
                                         if let Ok(mut local_file) = fs::File::create(&dest_local_file) {
                                             let mut buf = [0u8; 65536];
                                             let mut stream_err = false;
+                                            let mut last_sample_t = Instant::now();
+                                            let mut last_sample_bytes = 0u64;
+                                            let mut filtered_speed = 0.0f64;
+                                            let mut first_update = true;
                                             while let Ok(n) = stream_out.read(&mut buf) {
                                                 if n == 0 { break; }
                                                 if local_file.write_all(&buf[..n]).is_err() {
@@ -1947,6 +1985,23 @@ impl SftpManager {
                                                     break;
                                                 }
                                                 total_transferred += n as u64;
+                                                let now = Instant::now();
+                                                let sample_dt = now.duration_since(last_sample_t).as_secs_f64();
+                                                if first_update || sample_dt >= 0.05 {
+                                                    first_update = false;
+                                                    if sample_dt > 0.001 {
+                                                        let raw_speed = (total_transferred.saturating_sub(last_sample_bytes)) as f64 / sample_dt;
+                                                        filtered_speed = if filtered_speed == 0.0 { raw_speed } else { 0.35 * raw_speed + 0.65 * filtered_speed };
+                                                    }
+                                                    last_sample_t = now;
+                                                    last_sample_bytes = total_transferred;
+                                                    if let Ok(mut list) = transfers_clone.lock() {
+                                                        if let Some(item) = list.iter_mut().find(|t| t.id == tid) {
+                                                            item.transferred_bytes = total_transferred;
+                                                            item.speed_bytes_sec = filtered_speed.round() as u64;
+                                                        }
+                                                    }
+                                                }
                                             }
                                             if !stream_err {
                                                 if let Ok(out) = child.wait_with_output() {

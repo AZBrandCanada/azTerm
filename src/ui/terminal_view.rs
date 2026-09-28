@@ -261,7 +261,8 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                         } else {
                             "Transfers".to_string()
                         };
-                        if crate::modern::toolbar_button_tiny(ui, &app.theme, &badge_text).clicked() {
+                        let xfer_dot = app.sftp.transfer_indicator(&app.theme);
+                        if crate::modern::toolbar_button_with_dot(ui, &app.theme, &badge_text, xfer_dot).clicked() {
                             app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
                         }
                     });

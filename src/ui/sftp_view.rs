@@ -30,7 +30,8 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                     } else {
                         "Transfers".to_string()
                     };
-                    if crate::modern::toolbar_button(ui, &app.theme, &badge).on_hover_text("View active file transfers and status log").clicked() {
+                    let xfer_dot = app.sftp.transfer_indicator(&app.theme);
+                    if crate::modern::toolbar_button_with_dot(ui, &app.theme, &badge, xfer_dot).on_hover_text("View active file transfers and status log").clicked() {
                         app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
                     }
                 });
