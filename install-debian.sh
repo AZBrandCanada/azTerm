@@ -17,7 +17,7 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq \
     build-essential git pkg-config libxkbcommon-dev libssl-dev \
     libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev python3-nautilus \
-    wl-clipboard xclip
+   
 
 if ! command -v cargo &>/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
