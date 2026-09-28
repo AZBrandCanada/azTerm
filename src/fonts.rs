@@ -1,0 +1,168 @@
+// src/fonts.rs
+//
+// System font discovery + egui application. Used by the Settings
+// "Terminal Font" picker so users can pick any installed typeface
+// for terminal sessions (UI keeps egui's default font).
+
+use eframe::egui;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Debug, Clone)]
+pub struct FontEntry {
+    pub family: String,
+    pub path: PathBuf,
+}
+
+/// Enumerate installed fonts. Prefers `fc-list` (fontconfig), which
+/// gives canonical family names; falls back to walking the standard
+/// font directories if fontconfig isn't available.
+pub fn list_system_fonts() -> Vec<FontEntry> {
+    let mut entries = list_via_fc_list().unwrap_or_default();
+    if entries.is_empty() {
+        entries = list_via_dir_scan();
+    }
+    entries.sort_by(|a, b| a.family.to_lowercase().cmp(&b.family.to_lowercase()));
+    // Deduplicate by family — keep the first path per family.
+    entries.dedup_by(|a, b| a.family.eq_ignore_ascii_case(&b.family));
+    entries
+}
+
+fn list_via_fc_list() -> Option<Vec<FontEntry>> {
+    let out = Command::new("fc-list")
+        .args(["-f", "%{family[0]}\t%{file}\n"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut list = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        let family = match parts.next() {
+            Some(s) => s.trim().to_string(),
+            None => continue,
+        };
+        let path = match parts.next() {
+            Some(s) => s.trim().to_string(),
+            None => continue,
+        };
+        if family.is_empty() || path.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            continue;
+        }
+        list.push(FontEntry { family, path });
+    }
+    Some(list)
+}
+
+fn list_via_dir_scan() -> Vec<FontEntry> {
+    let mut roots: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/share/fonts"),
+        PathBuf::from("/usr/local/share/fonts"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(&home).join(".local/share/fonts"));
+        roots.push(PathBuf::from(&home).join(".fonts"));
+    }
+    let mut list = Vec::new();
+    for root in roots {
+        walk_fonts(&root, &mut list);
+    }
+    list
+}
+
+fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_fonts(&path, out);
+        } else {
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+            if ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf") {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let family = stem
+                    .replace('-', " ")
+                    .replace('_', " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !family.is_empty() {
+                    out.push(FontEntry { family, path });
+                }
+            }
+        }
+    }
+}
+
+/// Apply the terminal font selection to egui.
+///
+/// An empty `font_path` means "use the built-in default candidate list".
+/// A non-empty path is loaded as the primary Monospace family.
+pub fn apply_to_egui(ctx: &egui::Context, font_path: &str) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    let resolved: Option<String> = if !font_path.trim().is_empty() {
+        Some(font_path.to_string())
+    } else {
+        default_mono_font_path()
+    };
+
+    if let Some(path) = resolved {
+        if let Ok(data) = std::fs::read(&path) {
+            fonts.font_data.insert(
+                "azterm_terminal_font".to_string(),
+                egui::FontData::from_owned(data),
+            );
+            if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                mono.insert(0, "azterm_terminal_font".to_string());
+            }
+        } else {
+            eprintln!("[fonts] failed to read {}", path);
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
+/// The built-in fallback list used when the user hasn't picked a font.
+fn default_mono_font_path() -> Option<String> {
+    let candidates = [
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+        "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
+        "/usr/share/fonts/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/TTF/LiberationMono-Regular.ttf",
+    ];
+    for p in candidates {
+        if Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
+}

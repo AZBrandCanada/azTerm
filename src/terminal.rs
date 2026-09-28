@@ -1104,7 +1104,7 @@ impl TerminalSession {
         has_focus: bool,
         toast: &mut Option<(String, std::time::Instant)>,
     ) -> bool {
-        let font_size = 13.5;
+        let font_size = settings.terminal_font_size.clamp(6.0, 32.0);
         let font_id = egui::FontId::monospace(font_size);
 
         let probe = ui.painter().layout_no_wrap(

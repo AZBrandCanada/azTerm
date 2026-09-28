@@ -113,6 +113,19 @@ pub struct AppSettings {
 
     #[serde(default)]
     pub pending_update: Option<String>,
+
+    /// Absolute path to the font file used for terminal sessions.
+    /// Empty string = use AZTerm's built-in fallback list.
+    #[serde(default)]
+    pub terminal_font_path: String,
+
+    /// Point size for terminal text.
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: f32,
+}
+
+fn default_terminal_font_size() -> f32 {
+    13.5
 }
 
 impl Default for AppSettings {
@@ -159,6 +172,8 @@ impl Default for AppSettings {
             debug_log_path: default_debug_log_path(),
             mouse_wheel_scroll: WheelScrollAmount::Lines3,
             pending_update: None,
+            terminal_font_path: String::new(),
+            terminal_font_size: 13.5,
         }
     }
 }

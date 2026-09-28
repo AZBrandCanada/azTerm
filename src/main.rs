@@ -1,6 +1,7 @@
 // src/main.rs
 mod db;
 mod debug_log;
+mod fonts;
 mod modern;
 mod settings;
 mod sftp;
@@ -292,6 +293,12 @@ pub struct AppState {
     pub last_transition: Option<std::time::Instant>,
     pub last_heartbeat: std::time::Instant,
 
+    /// Last font path we applied via `ctx.set_fonts()`. Used to detect
+    /// when the user changes the font in Settings so we can re-apply.
+    pub applied_font_path: Option<String>,
+    /// Cache of installed fonts, populated lazily by the Settings picker.
+    pub cached_fonts: Option<Vec<fonts::FontEntry>>,
+
     pub available_update: Option<String>,
     pub update_rx: Option<Receiver<UpdateCheckResult>>,
     pub is_checking_update: bool,
@@ -336,37 +343,11 @@ impl AppState {
 
         cc.egui_ctx.set_zoom_factor(settings.zoom_factor);
 
-        let mut fonts = egui::FontDefinitions::default();
-        let font_candidates = [
-            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-            "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-            "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf",
-            "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
-            "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
-            "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
-            "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
-            "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
-            "/usr/share/fonts/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
-            "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
-            "/usr/share/fonts/TTF/LiberationMono-Regular.ttf",
-        ];
-
-        for path in font_candidates {
-            if let Ok(data) = std::fs::read(path) {
-                fonts.font_data.insert(
-                    "terminal_mono_font".to_string(),
-                    egui::FontData::from_owned(data),
-                );
-                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                    mono.insert(0, "terminal_mono_font".to_string());
-                }
-                break;
-            }
-        }
-        cc.egui_ctx.set_fonts(fonts);
+        // Apply the user's chosen terminal font (or the built-in
+        // fallback list). See src/fonts.rs for the discovery logic
+        // and the Settings → Terminal Interaction picker.
+        fonts::apply_to_egui(&cc.egui_ctx, &settings.terminal_font_path);
+        let applied_font_path_init = settings.terminal_font_path.clone();
 
         let current_version = env!("CARGO_PKG_VERSION");
         let initial_available_update = if let Some(ref tag) = settings.pending_update {
@@ -408,6 +389,9 @@ impl AppState {
             toast_message: None,
             last_transition: None,
             last_heartbeat: std::time::Instant::now(),
+
+            applied_font_path: Some(applied_font_path_init),
+            cached_fonts: None,
 
             available_update: initial_available_update,
             update_rx: None,
@@ -1220,6 +1204,15 @@ impl eframe::App for AppState {
         // menus, ScrollArea backgrounds) pick up the same color scheme
         // as the rest of the UI. Cheap: mutates the style in place.
         self.theme.apply_to_egui(ctx);
+
+        // If the user picked a different terminal font in Settings,
+        // rebuild egui's font atlas with the new typeface. This is the
+        // only place we call set_fonts() after startup — it's expensive
+        // (full atlas rebuild) so we guard it behind a path comparison.
+        if self.applied_font_path.as_deref() != Some(self.settings.terminal_font_path.as_str()) {
+            fonts::apply_to_egui(ctx, &self.settings.terminal_font_path);
+            self.applied_font_path = Some(self.settings.terminal_font_path.clone());
+        }
 
         // Reconcile debug logging with current settings (cheap no-op if unchanged).
         debug_log::init(self.settings.debug_mode, &self.settings.debug_log_path);
