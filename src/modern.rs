@@ -7,19 +7,40 @@ use crate::theme::ThemeConfig;
 use eframe::egui;
 
 pub fn lighten(c: egui::Color32, a: u8) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        c.r().saturating_add(a),
-        c.g().saturating_add(a),
-        c.b().saturating_add(a),
-    )
+    // Preserve alpha. `from_rgb()` would force alpha to 255, which
+    // silently turned transparent background colors opaque the moment
+    // any code path applied a lighten/darken to them (this is the bug
+    // that kept the nav bar / status bar opaque at 0% theme opacity).
+    //
+    // Color32 stores premultiplied channels, so to adjust the visible
+    // color we un-premultiply, adjust, then re-premultiply with the
+    // original alpha.
+    let alpha = c.a();
+    if alpha == 0 {
+        return c;
+    }
+    let unmul = |v: u8| -> u8 {
+        ((v as u32 * 255 + alpha as u32 / 2) / alpha as u32).min(255) as u8
+    };
+    let r = unmul(c.r()).saturating_add(a);
+    let g = unmul(c.g()).saturating_add(a);
+    let b = unmul(c.b()).saturating_add(a);
+    egui::Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 pub fn darken(c: egui::Color32, a: u8) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        c.r().saturating_sub(a),
-        c.g().saturating_sub(a),
-        c.b().saturating_sub(a),
-    )
+    // Same alpha-preserving treatment as lighten(). See above.
+    let alpha = c.a();
+    if alpha == 0 {
+        return c;
+    }
+    let unmul = |v: u8| -> u8 {
+        ((v as u32 * 255 + alpha as u32 / 2) / alpha as u32).min(255) as u8
+    };
+    let r = unmul(c.r()).saturating_sub(a);
+    let g = unmul(c.g()).saturating_sub(a);
+    let b = unmul(c.b()).saturating_sub(a);
+    egui::Color32::from_rgba_unmultiplied(r, g, b, alpha)
 }
 
 pub fn is_dark(c: egui::Color32) -> bool {

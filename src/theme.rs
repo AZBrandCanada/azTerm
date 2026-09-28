@@ -43,12 +43,17 @@ impl Default for ThemeConfig {
 
 impl ThemeConfig {
     pub fn bg_main_color(&self) -> egui::Color32 {
-        let a = (self.opacity.clamp(0.20, 1.0) * 255.0).round() as u8;
+        // Opacity range is [0.0, 1.0]. At 0.0 the terminal background
+        // becomes fully transparent — useful for a "wallpaper mode"
+        // where the desktop shows through behind terminal text.
+        let a = (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         egui::Color32::from_rgba_unmultiplied(self.bg_main[0], self.bg_main[1], self.bg_main[2], a)
     }
 
     pub fn bg_panel_color(&self) -> egui::Color32 {
-        let a = (self.opacity.clamp(0.20, 1.0) * 255.0).round() as u8;
+        // Same range as bg_main_color — matches the terminal transparency
+        // so nav, status bar and card frames fade in tandem.
+        let a = (self.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         egui::Color32::from_rgba_unmultiplied(self.bg_panel[0], self.bg_panel[1], self.bg_panel[2], a)
     }
 

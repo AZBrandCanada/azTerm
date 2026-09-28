@@ -1197,6 +1197,23 @@ impl AppState {
 }
 
 impl eframe::App for AppState {
+    /// Tell eframe what to clear the framebuffer to.
+    ///
+    /// Returning the theme's bg_main_color means the window surface
+    /// itself becomes transparent when the user slides opacity down.
+    /// Without this override, eframe clears to an opaque dark grey
+    /// (its default), which is what shows through even on light themes
+    /// at 0% opacity.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        let c = self.theme.bg_main_color();
+        [
+            c.r() as f32 / 255.0,
+            c.g() as f32 / 255.0,
+            c.b() as f32 / 255.0,
+            c.a() as f32 / 255.0,
+        ]
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Push the current theme into egui's global visuals so all
         // native widgets (Window, TextEdit, ComboBox dropdowns, popup

@@ -116,12 +116,12 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
                                     ui.label(egui::RichText::new("Window Background Opacity").strong().color(app.theme.text_primary_color()));
-                                    ui.label(egui::RichText::new("Set terminal transparency (20% to 100%). Live preview as you drag.").small().color(app.theme.text_muted_color()));
+                                    ui.label(egui::RichText::new("Set terminal transparency (0% = fully transparent, 100% = opaque). Live preview as you drag.").small().color(app.theme.text_muted_color()));
                                 });
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     let pct = (app.theme.opacity * 100.0).round() as u32;
                                     ui.label(format!("{}%", pct));
-                                    if ui.add(egui::Slider::new(&mut app.theme.opacity, 0.20..=1.0).show_value(false)).changed() {
+                                    if ui.add(egui::Slider::new(&mut app.theme.opacity, 0.0..=1.0).show_value(false)).changed() {
                                         Database::save_active_theme(&app.theme);
                                     }
                                 });
