@@ -815,6 +815,18 @@ impl TerminalSession {
             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
         });
 
+        // Any text that needs to end up on the system clipboard is queued
+        // here and flushed AFTER the ctx.input(...) closure below returns.
+        //
+        // Why: egui::Context::input() holds egui's internal parking_lot
+        // RwLock for the duration of the closure. ctx.copy_text() tries
+        // to acquire the SAME write lock on the SAME thread, which
+        // parking_lot does not permit. The process deadlocks and is
+        // aborted (SIGABRT). Collecting the payload here and calling
+        // set_system_clipboard_text once outside the closure avoids the
+        // reentrant lock entirely.
+        let mut pending_clipboard: Option<String> = None;
+
         ctx.input(|i| {
             if i.modifiers.ctrl && !i.modifiers.shift && !i.modifiers.alt {
                 if i.key_pressed(egui::Key::C) {
@@ -869,7 +881,8 @@ impl TerminalSession {
                     egui::Event::Copy => {
                         let selected = self.extract_selected_text();
                         if !selected.is_empty() {
-                            set_system_clipboard_text(Some(ctx), &selected);
+                            // Deferred — see pending_clipboard above.
+                            pending_clipboard = Some(selected);
                         } else {
                             self.send_input("\x03");
                         }
@@ -989,12 +1002,13 @@ impl TerminalSession {
                         if modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
                             let selected = self.extract_selected_text();
                             if !selected.is_empty() {
-                                set_system_clipboard_text(Some(ctx), &selected);
+                                // Deferred — see pending_clipboard above.
                                 let line_count = selected.lines().count().max(1);
                                 *toast = Some((
                                     format!("Copied {} line(s)", line_count),
                                     std::time::Instant::now(),
                                 ));
+                                pending_clipboard = Some(selected);
                             }
                             continue;
                         }
@@ -1072,6 +1086,14 @@ impl TerminalSession {
                 }
             }
         });
+
+        // Flush any clipboard copy queued while inside the ctx.input
+        // closure above. Running it here — outside the closure — is what
+        // avoids the reentrant lock on egui's Context that was
+        // triggering SIGABRT crashes on Ctrl+C / Ctrl+Shift+C.
+        if let Some(text) = pending_clipboard {
+            set_system_clipboard_text(Some(ctx), &text);
+        }
     }
 
     pub fn render(

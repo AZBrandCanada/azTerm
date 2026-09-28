@@ -8,3 +8,4 @@ patch_clipboard_deps.sh
 restore_arboard_safe.sh
 fix_clipboard_hang.sh
 add_clipboard_worker.sh
+fix_reentrant_clipboard_crash.sh
