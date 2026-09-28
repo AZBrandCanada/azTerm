@@ -2319,35 +2319,157 @@ impl SftpManager {
         }
 
         let mut open = self.show_transfer_history;
+        // We render our own header (with our own close X) inside the
+        // window body, so disable egui's default title bar. This also
+        // lets us drop `.open(&mut open)` and avoid a second mutable
+        // borrow of `open` inside the closure.
+        let mut close_requested = false;
         egui::Window::new("SFTP Transfers & History")
-            .open(&mut open)
+            .title_bar(false)
             .collapsible(false)
             .resizable(true)
-            .default_width(680.0)
-            .default_height(380.0)
+            .default_width(720.0)
+            .default_height(420.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::none()
+                    .fill(theme.bg_panel_color())
+                    .stroke(egui::Stroke::new(1.5_f32, theme.accent_color()))
+                    .rounding(10.0)
+                    .inner_margin(egui::Margin::same(0.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 10.0),
+                        blur: 28.0,
+                        spread: 0.0,
+                        color: egui::Color32::from_black_alpha(150),
+                    }),
+            )
             .show(ctx, |ui| {
                 ui.vertical(|ui| {
+                    // -----------------------------------------------------
+                    // Custom accent header bar (replaces the default one)
+                    // -----------------------------------------------------
+                    let header_h = 34.0_f32;
+                    let (header_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), header_h),
+                        egui::Sense::hover(),
+                    );
+                    crate::modern::gradient_rect(
+                        ui.painter(),
+                        header_rect,
+                        crate::modern::lighten(theme.accent_color(), 10),
+                        crate::modern::darken(theme.accent_color(), 30),
+                    );
+                    // Top highlight stripe — reads like polished chrome.
+                    let stripe = egui::Rect::from_min_size(
+                        header_rect.min,
+                        egui::vec2(header_rect.width(), 1.5),
+                    );
+                    ui.painter().rect_filled(
+                        stripe,
+                        0.0,
+                        crate::modern::lighten(theme.accent_color(), 80),
+                    );
+
+                    ui.painter().text(
+                        egui::pos2(header_rect.min.x + 14.0, header_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "SFTP Transfers & History",
+                        egui::FontId::proportional(14.0),
+                        egui::Color32::from_rgb(15, 23, 42),
+                    );
+
+                    // Close button drawn inside the header
+                    let close_rect = egui::Rect::from_center_size(
+                        egui::pos2(header_rect.right() - 18.0, header_rect.center().y),
+                        egui::vec2(24.0, 24.0),
+                    );
+                    let close_resp = ui.interact(
+                        close_rect,
+                        ui.id().with("xfer_close_hdr"),
+                        egui::Sense::click(),
+                    );
+                    let close_fill = if close_resp.hovered() {
+                        theme.danger_color()
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    if close_fill != egui::Color32::TRANSPARENT {
+                        ui.painter().circle_filled(close_rect.center(), 10.0, close_fill);
+                    }
+                    ui.painter().text(
+                        close_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "×",
+                        egui::FontId::proportional(16.0),
+                        if close_resp.hovered() {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::from_rgb(15, 23, 42)
+                        },
+                    );
+                    if close_resp.clicked() {
+                        close_requested = true;
+                    }
+
+                    ui.add_space(10.0);
+
+                    // -----------------------------------------------------
+                    // Sub-header row: label + Clear Finished button
+                    // -----------------------------------------------------
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Transfer Activity Log").strong().size(15.0).color(theme.accent_color()));
+                        ui.add_space(14.0);
+                        ui.label(
+                            egui::RichText::new("Transfer Activity Log")
+                                .strong()
+                                .size(13.0)
+                                .color(theme.text_primary_color()),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Clear Finished").clicked() {
+                            ui.add_space(14.0);
+                            if crate::modern::toolbar_button(ui, theme, "Clear Finished").clicked() {
                                 if let Ok(mut list) = self.transfers.lock() {
-                                    list.retain(|t| matches!(t.status, TransferStatus::InProgress | TransferStatus::Queued));
+                                    list.retain(|t| {
+                                        matches!(
+                                            t.status,
+                                            TransferStatus::InProgress | TransferStatus::Queued
+                                        )
+                                    });
                                 }
                             }
                         });
                     });
 
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                     ui.separator();
+                    ui.add_space(6.0);
 
                     let transfers = self.transfers.lock().map(|l| l.clone()).unwrap_or_default();
 
                     if transfers.is_empty() {
                         ui.vertical_centered(|ui| {
-                            ui.add_space(40.0);
-                            ui.label(egui::RichText::new("No active or recent transfers").color(theme.text_muted_color()));
+                            ui.add_space(50.0);
+                            // Faded icon-ish glyph for the empty state
+                            ui.label(
+                                egui::RichText::new("[ ]")
+                                    .size(40.0)
+                                    .color(crate::modern::darken(theme.text_muted_color(), 20)),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new("No active or recent transfers")
+                                    .size(14.0)
+                                    .color(theme.text_muted_color()),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "Transfers you start from the SFTP explorer will appear here.",
+                                )
+                                .small()
+                                .color(crate::modern::darken(theme.text_muted_color(), 10)),
+                            );
+                            ui.add_space(50.0);
                         });
                         return;
                     }
@@ -2355,101 +2477,305 @@ impl SftpManager {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            ui.add_space(4.0);
                             for t in transfers {
-                                theme.card_frame().show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let (dir_label, dir_color) = match t.direction {
-                                            TransferDirection::Upload => ("[Upload]", theme.success_color()),
-                                            TransferDirection::Download => ("[Download]", theme.accent_color()),
-                                            TransferDirection::RemoteToRemote => ("[VPS -> VPS]", theme.accent_hover_color()),
-                                        };
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space(14.0);
+                                    ui.vertical(|ui| {
+                                        ui.set_width((ui.available_width() - 28.0).max(120.0));
 
-                                        ui.label(egui::RichText::new(dir_label).strong().color(dir_color));
-                                        ui.label(
-                                            egui::RichText::new(format!("[{}/{}]", t.batch_index, t.batch_total))
-                                                .small()
-                                                .color(theme.accent_color()),
-                                        );
-                                        ui.label(egui::RichText::new(&t.file_name).strong().color(theme.text_primary_color()));
-
-                                        if t.file_size > 0 {
-                                            ui.label(egui::RichText::new(format!("({})", PaneBrowser::format_size(t.file_size))).small().color(theme.text_muted_color()));
-                                        }
-
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            match &t.status {
-                                                TransferStatus::Completed => {
-                                                    let speed = if t.speed_bytes_sec > 0 {
-                                                        format!(" ({})", PaneBrowser::format_speed(t.speed_bytes_sec))
-                                                    } else {
-                                                        String::new()
-                                                    };
-                                                    ui.label(egui::RichText::new(format!("[Completed{}]", speed)).strong().color(theme.success_color()));
-                                                }
-                                                TransferStatus::InProgress => {
-                                                    let speed = if t.speed_bytes_sec > 0 {
-                                                        format!(" ({})", PaneBrowser::format_speed(t.speed_bytes_sec))
-                                                    } else {
-                                                        String::new()
-                                                    };
-                                                    ui.label(egui::RichText::new(format!("[In Progress{}]", speed)).strong().color(theme.accent_color()));
-                                                }
-                                                TransferStatus::Queued => {
-                                                    ui.label(egui::RichText::new("[Queued]").color(theme.text_muted_color()));
-                                                }
-                                                TransferStatus::Failed(err) => {
-                                                    ui.label(egui::RichText::new("[Failed]").strong().color(theme.danger_color())).on_hover_text(err);
-                                                }
-                                            }
-                                            ui.label(egui::RichText::new(t.time.format("%H:%M:%S").to_string()).small().color(theme.text_muted_color()));
-                                        });
-                                    });
-
-                                    if matches!(t.status, TransferStatus::InProgress) && t.file_size > 0 {
-                                        ui.add_space(4.0);
-                                        let frac = (t.transferred_bytes as f32 / t.file_size as f32).clamp(0.0, 1.0);
-                                        ui.add(egui::ProgressBar::new(frac).show_percentage());
-
-                                        let remaining = t.file_size.saturating_sub(t.transferred_bytes);
-                                        let eta_str = if t.speed_bytes_sec > 0 && remaining > 0 {
-                                            format!(" | ETA: {}", PaneBrowser::format_eta(remaining / t.speed_bytes_sec))
-                                        } else {
-                                            String::new()
-                                        };
-
-                                        ui.label(
-                                            egui::RichText::new(format!(
-                                                "Transferred: {} / {} | Remaining: {} | Speed: {}{}",
-                                                PaneBrowser::format_size(t.transferred_bytes),
-                                                PaneBrowser::format_size(t.file_size),
-                                                PaneBrowser::format_size(remaining),
-                                                PaneBrowser::format_speed(t.speed_bytes_sec),
-                                                eta_str
+                                        // Card container per transfer record.
+                                        egui::Frame::none()
+                                            .fill(crate::modern::lighten(theme.bg_card_color(), 8))
+                                            .stroke(egui::Stroke::new(
+                                                1.0_f32,
+                                                crate::modern::darken(theme.border_color(), 10),
                                             ))
-                                            .small()
-                                            .color(theme.text_muted_color()),
-                                        );
-                                    }
+                                            .rounding(8.0)
+                                            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                                            .shadow(egui::epaint::Shadow {
+                                                offset: egui::vec2(0.0, 4.0),
+                                                blur: 12.0,
+                                                spread: 0.0,
+                                                color: egui::Color32::from_black_alpha(80),
+                                            })
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
 
-                                    ui.add_space(2.0);
-                                    ui.label(
-                                        egui::RichText::new(format!("{}  ->  {}", t.from, t.to))
-                                            .small()
-                                            .monospace()
-                                            .color(theme.text_muted_color()),
-                                    );
+                                                // ------- Top row: badges + name + status
+                                                ui.horizontal(|ui| {
+                                                    // Direction pill
+                                                    let (dir_label, dir_color) = match t.direction {
+                                                        TransferDirection::Upload => {
+                                                            ("UPLOAD", theme.success_color())
+                                                        }
+                                                        TransferDirection::Download => {
+                                                            ("DOWNLOAD", theme.accent_color())
+                                                        }
+                                                        TransferDirection::RemoteToRemote => {
+                                                            ("VPS → VPS", theme.accent_hover_color())
+                                                        }
+                                                    };
+                                                    let badge_size = egui::vec2(84.0, 18.0);
+                                                    let (badge_rect, _) = ui.allocate_exact_size(
+                                                        badge_size,
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        badge_rect,
+                                                        egui::Rounding::same(4.0),
+                                                        dir_color,
+                                                    );
+                                                    ui.painter().text(
+                                                        badge_rect.center(),
+                                                        egui::Align2::CENTER_CENTER,
+                                                        dir_label,
+                                                        egui::FontId::proportional(10.0),
+                                                        egui::Color32::from_rgb(15, 23, 42),
+                                                    );
 
-                                    if let TransferStatus::Failed(ref err) = t.status {
-                                        ui.add_space(2.0);
-                                        ui.label(egui::RichText::new(format!("Error: {}", err.trim())).small().color(theme.danger_color()));
-                                    }
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{}/{}",
+                                                            t.batch_index, t.batch_total
+                                                        ))
+                                                        .small()
+                                                        .color(theme.text_muted_color()),
+                                                    );
+
+                                                    ui.label(
+                                                        egui::RichText::new(&t.file_name)
+                                                            .strong()
+                                                            .color(theme.text_primary_color()),
+                                                    );
+
+                                                    if t.file_size > 0 {
+                                                        ui.label(
+                                                            egui::RichText::new(format!(
+                                                                "({})",
+                                                                PaneBrowser::format_size(t.file_size)
+                                                            ))
+                                                            .small()
+                                                            .color(theme.text_muted_color()),
+                                                        );
+                                                    }
+
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            match &t.status {
+                                                                TransferStatus::Completed => {
+                                                                    let speed = if t.speed_bytes_sec
+                                                                        > 0
+                                                                    {
+                                                                        format!(
+                                                                            " ({})",
+                                                                            PaneBrowser::format_speed(
+                                                                                t.speed_bytes_sec
+                                                                            )
+                                                                        )
+                                                                    } else {
+                                                                        String::new()
+                                                                    };
+                                                                    ui.label(
+                                                                        egui::RichText::new(format!(
+                                                                            "COMPLETED{}",
+                                                                            speed
+                                                                        ))
+                                                                        .strong()
+                                                                        .small()
+                                                                        .color(theme.success_color()),
+                                                                    );
+                                                                }
+                                                                TransferStatus::InProgress => {
+                                                                    let speed = if t.speed_bytes_sec
+                                                                        > 0
+                                                                    {
+                                                                        format!(
+                                                                            " ({})",
+                                                                            PaneBrowser::format_speed(
+                                                                                t.speed_bytes_sec
+                                                                            )
+                                                                        )
+                                                                    } else {
+                                                                        String::new()
+                                                                    };
+                                                                    ui.label(
+                                                                        egui::RichText::new(format!(
+                                                                            "IN PROGRESS{}",
+                                                                            speed
+                                                                        ))
+                                                                        .strong()
+                                                                        .small()
+                                                                        .color(theme.accent_color()),
+                                                                    );
+                                                                }
+                                                                TransferStatus::Queued => {
+                                                                    ui.label(
+                                                                        egui::RichText::new("QUEUED")
+                                                                            .small()
+                                                                            .color(theme.text_muted_color()),
+                                                                    );
+                                                                }
+                                                                TransferStatus::Failed(err) => {
+                                                                    ui.label(
+                                                                        egui::RichText::new("FAILED")
+                                                                            .strong()
+                                                                            .small()
+                                                                            .color(theme.danger_color()),
+                                                                    )
+                                                                    .on_hover_text(err);
+                                                                }
+                                                            }
+                                                            ui.label(
+                                                                egui::RichText::new(
+                                                                    t.time
+                                                                        .format("%H:%M:%S")
+                                                                        .to_string(),
+                                                                )
+                                                                .small()
+                                                                .color(theme.text_muted_color()),
+                                                            );
+                                                        },
+                                                    );
+                                                });
+
+                                                // ------- Progress bar (in-progress only)
+                                                if matches!(t.status, TransferStatus::InProgress)
+                                                    && t.file_size > 0
+                                                {
+                                                    ui.add_space(6.0);
+                                                    let frac = (t.transferred_bytes as f32
+                                                        / t.file_size as f32)
+                                                        .clamp(0.0, 1.0);
+
+                                                    // Custom accent progress bar
+                                                    let bar_h = 8.0_f32;
+                                                    let (bar_rect, _) = ui.allocate_exact_size(
+                                                        egui::vec2(ui.available_width(), bar_h),
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().rect_filled(
+                                                        bar_rect,
+                                                        egui::Rounding::same(4.0),
+                                                        crate::modern::darken(
+                                                            theme.bg_main_color(),
+                                                            5,
+                                                        ),
+                                                    );
+                                                    let fill_rect = egui::Rect::from_min_size(
+                                                        bar_rect.min,
+                                                        egui::vec2(
+                                                            bar_rect.width() * frac,
+                                                            bar_h,
+                                                        ),
+                                                    );
+                                                    crate::modern::gradient_rect(
+                                                        ui.painter(),
+                                                        fill_rect,
+                                                        crate::modern::lighten(
+                                                            theme.accent_color(),
+                                                            25,
+                                                        ),
+                                                        crate::modern::darken(
+                                                            theme.accent_color(),
+                                                            15,
+                                                        ),
+                                                    );
+                                                    ui.painter().text(
+                                                        egui::pos2(
+                                                            bar_rect.right() - 6.0,
+                                                            bar_rect.center().y,
+                                                        ),
+                                                        egui::Align2::RIGHT_CENTER,
+                                                        format!(
+                                                            "{:.0}%",
+                                                            frac * 100.0
+                                                        ),
+                                                        egui::FontId::proportional(10.0),
+                                                        theme.text_primary_color(),
+                                                    );
+
+                                                    let remaining = t
+                                                        .file_size
+                                                        .saturating_sub(t.transferred_bytes);
+                                                    let eta_str = if t.speed_bytes_sec > 0
+                                                        && remaining > 0
+                                                    {
+                                                        format!(
+                                                            " | ETA {}",
+                                                            PaneBrowser::format_eta(
+                                                                remaining / t.speed_bytes_sec
+                                                            )
+                                                        )
+                                                    } else {
+                                                        String::new()
+                                                    };
+
+                                                    ui.add_space(4.0);
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "{} / {}  |  {}  |  {}{}",
+                                                            PaneBrowser::format_size(
+                                                                t.transferred_bytes
+                                                            ),
+                                                            PaneBrowser::format_size(t.file_size),
+                                                            PaneBrowser::format_size(remaining),
+                                                            PaneBrowser::format_speed(
+                                                                t.speed_bytes_sec
+                                                            ),
+                                                            eta_str,
+                                                        ))
+                                                        .small()
+                                                        .color(theme.text_muted_color()),
+                                                    );
+                                                }
+
+                                                // ------- Source -> Destination
+                                                ui.add_space(6.0);
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{}  →  {}",
+                                                        t.from, t.to
+                                                    ))
+                                                    .small()
+                                                    .monospace()
+                                                    .color(
+                                                        crate::modern::darken(
+                                                            theme.text_muted_color(),
+                                                            10,
+                                                        ),
+                                                    ),
+                                                );
+
+                                                if let TransferStatus::Failed(ref err) = t.status
+                                                {
+                                                    ui.add_space(4.0);
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "Error: {}",
+                                                            err.trim()
+                                                        ))
+                                                        .small()
+                                                        .color(theme.danger_color()),
+                                                    );
+                                                }
+                                            });
+                                    });
+                                    ui.add_space(14.0);
                                 });
-                                ui.add_space(4.0);
                             }
+                            ui.add_space(8.0);
                         });
                 });
             });
 
+        if close_requested {
+            open = false;
+        }
         self.show_transfer_history = open;
     }
 }

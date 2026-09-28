@@ -45,16 +45,28 @@ pub fn render_top_nav(app: &mut AppState, ctx: &egui::Context) {
                 ui.add_space(8.0);
 
                 if nav_tab_button(ui, "Terminal", app.active_view == ActiveView::Terminal, &app.theme) {
-                    app.active_view = ActiveView::Terminal;
+                    if app.active_view != ActiveView::Terminal {
+                        app.active_view = ActiveView::Terminal;
+                        app.trigger_transition();
+                    }
                 }
                 if nav_tab_button(ui, "SSH Profiles", app.active_view == ActiveView::SshBookmarks, &app.theme) {
-                    app.active_view = ActiveView::SshBookmarks;
+                    if app.active_view != ActiveView::SshBookmarks {
+                        app.active_view = ActiveView::SshBookmarks;
+                        app.trigger_transition();
+                    }
                 }
                 if nav_tab_button(ui, "SFTP Explorer", app.active_view == ActiveView::SftpBrowser, &app.theme) {
-                    app.active_view = ActiveView::SftpBrowser;
+                    if app.active_view != ActiveView::SftpBrowser {
+                        app.active_view = ActiveView::SftpBrowser;
+                        app.trigger_transition();
+                    }
                 }
                 if nav_tab_button(ui, "Settings", app.active_view == ActiveView::Settings, &app.theme) {
-                    app.active_view = ActiveView::Settings;
+                    if app.active_view != ActiveView::Settings {
+                        app.active_view = ActiveView::Settings;
+                        app.trigger_transition();
+                    }
                 }
 
                 ui.separator();
@@ -178,6 +190,7 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
                 crate::modern::lighten(base, 10),
                 crate::modern::darken(base, 12),
             );
+            let mut transition_pending = false;
             ui.horizontal(|ui| {
                 let mut tab_to_close: Option<usize> = None;
                 let avail_w = (ui.available_width() - 20.0).max(100.0);
@@ -224,6 +237,11 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
                                     app.active_workspace_idx = i;
                                     app.active_session_id = ws.root.first_leaf();
                                     app.active_view = ActiveView::Terminal;
+                                    // Deferred: firing trigger_transition() here would
+                                    // need &mut app while the workspaces iterator is
+                                    // still borrowing app. Set a flag and fire after
+                                    // the loop exits.
+                                    transition_pending = true;
                                 }
 
                                 if close_clicked {
@@ -234,6 +252,10 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
                             }
                         });
                     });
+
+                if transition_pending {
+                    app.trigger_transition();
+                }
 
                 if let Some(i) = tab_to_close {
                     let leaves = app.workspaces[i].leaves();
@@ -290,6 +312,7 @@ pub fn render_status_bar(app: &mut AppState, ctx: &egui::Context) {
                 if nav_tab_button(ui, sftp_btn_text, app.settings.show_sftp_split_view, &app.theme) {
                     app.settings.show_sftp_split_view = !app.settings.show_sftp_split_view;
                     app.settings.save();
+                    app.trigger_transition();
                     app.set_toast(if app.settings.show_sftp_split_view {
                         "SFTP split panel opened"
                     } else {

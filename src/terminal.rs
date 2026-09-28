@@ -1139,8 +1139,13 @@ impl TerminalSession {
         let avail = ui.available_size();
         let usable_w = (avail.x - SCROLLBAR_RESERVE).max(80.0);
         let usable_h = avail.y.max(40.0);
-        let new_cols = ((usable_w / char_width).floor() as u16).max(20);
-        let new_rows = ((usable_h / row_height).floor() as u16).max(4);
+        // Minimums are deliberately low. If a pane is very narrow,
+        // forcing the terminal to 20 cols makes its grid wider than
+        // the pane itself, which used to overflow into neighbours
+        // (clipping in tiling.rs now prevents that, but a smaller
+        // minimum means the terminal actually fits its pane).
+        let new_cols = ((usable_w / char_width).floor() as u16).max(4);
+        let new_rows = ((usable_h / row_height).floor() as u16).max(2);
 
         if new_cols != self.cols || new_rows != self.rows {
             let old_rows = self.rows;

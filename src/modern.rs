@@ -64,7 +64,7 @@ pub fn accent_glow(
             rect.expand(grow),
             egui::Rounding::same(corner_radius + grow),
             egui::Stroke::new(
-                1.4,
+                1.4_f32,
                 egui::Color32::from_rgba_unmultiplied(
                     accent.r(), accent.g(), accent.b(), alpha,
                 ),
@@ -218,7 +218,7 @@ impl Button3D {
                 body_rect,
                 egui::Rounding::same(self.rounding),
                 body_fill,
-                egui::Stroke::new(1.5, border),
+                egui::Stroke::new(1.5_f32, border),
             );
         } else {
             ui.painter().rect_filled(
@@ -273,5 +273,119 @@ pub fn button_danger(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egui
         .fill(fill)
         .edge(darken(fill, 55))
         .text_color(egui::Color32::WHITE)
+        .show(ui, theme)
+}
+
+// ---------------------------------------------------------------------------
+// Transitions
+// ---------------------------------------------------------------------------
+
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+pub fn ease_out_quad(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(2)
+}
+
+/// Full-panel transition mask + accent sweep. Call once per frame while a
+/// transition is running; `progress` is normalised elapsed time (0..=1).
+///
+/// Painted AFTER the content, so it covers whatever just rendered and
+/// fades away to reveal it — that's how you fake a crossfade in an
+/// immediate-mode UI without per-widget alpha.
+pub fn transition_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    bg: egui::Color32,
+    accent: egui::Color32,
+    progress: f32,
+) {
+    let p = progress.clamp(0.0, 1.0);
+
+    // 1. Fade mask.
+    let fade_t = ease_out_cubic(p);
+    let alpha = ((1.0 - fade_t) * 210.0) as u8;
+    if alpha > 3 {
+        painter.rect_filled(
+            rect,
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), alpha),
+        );
+    }
+
+    // 2. Top accent sweep. Full width is covered by ~70 % of the duration;
+    //    the line then fades for the remainder.
+    let sweep_t = ease_out_quad((p / 0.7).min(1.0));
+    let sweep_w = rect.width() * sweep_t;
+    if sweep_w > 1.0 {
+        let line_h = 2.5;
+
+        // Faint full-width line
+        let a_body = ((1.0 - p) * 90.0) as u8;
+        if a_body > 3 {
+            painter.rect_filled(
+                egui::Rect::from_min_size(rect.min, egui::vec2(sweep_w, line_h)),
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(
+                    accent.r(), accent.g(), accent.b(), a_body,
+                ),
+            );
+        }
+
+        // Bright head at the leading edge
+        let head_w = 70.0_f32.min(sweep_w);
+        let a_head = ((1.0 - p) * 240.0) as u8;
+        if a_head > 3 {
+            let head_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.min.x + sweep_w - head_w, rect.min.y),
+                egui::vec2(head_w, line_h),
+            );
+            painter.rect_filled(
+                head_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(
+                    accent.r(), accent.g(), accent.b(), a_head,
+                ),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Toolbar buttons — high contrast against dark panel backgrounds
+// ---------------------------------------------------------------------------
+
+/// Toolbar-style button: lighter than the surrounding panel (like an active
+/// tab), with an accent-colored bottom edge so it visually pops on any
+/// theme. Use for row-of-tools toolbars where low-contrast default fills
+/// disappear into the background.
+pub fn toolbar_button(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egui::Response {
+    // Same colour recipe as the active nav tab / session tab:
+    //   face       = theme accent (bright)
+    //   depth band = darker shade of the SAME accent (recedes)
+    //   text       = very dark navy for contrast on the bright face
+    // No separate border ring — the accent face and darker accent band
+    // do the whole job on their own.
+    let fill = theme.accent_color();
+    Button3D::new(text)
+        .small()
+        .fill(fill)
+        .edge(darken(fill, 55))
+        .text_color(egui::Color32::from_rgb(15, 23, 42))
+        .show(ui, theme)
+}
+
+/// Same as `toolbar_button` but smaller footprint — for tight toolbars
+/// where vertical space is at a premium.
+pub fn toolbar_button_tiny(ui: &mut egui::Ui, theme: &ThemeConfig, text: &str) -> egui::Response {
+    let fill = theme.accent_color();
+    Button3D::new(text)
+        .compact()
+        .fill(fill)
+        .edge(darken(fill, 55))
+        .text_color(egui::Color32::from_rgb(15, 23, 42))
         .show(ui, theme)
 }

@@ -673,7 +673,7 @@ pub fn session_tab_chip(
     ui.painter().rect_stroke(
         body_rect,
         egui::Rounding::same(7.0),
-        egui::Stroke::new(if is_active { 1.6 } else { 1.0 }, border_color),
+        egui::Stroke::new(if is_active { 1.6_f32 } else { 1.0_f32 }, border_color),
     );
 
     // Accent stripe across the top of the active tab — reads like a

@@ -286,6 +286,10 @@ pub struct AppState {
     pub new_theme_name: String,
 
     pub toast_message: Option<(String, std::time::Instant)>,
+    /// Set whenever a view / tab / settings category changes so the
+    /// update() pass knows to play a short fade + sweep. Cleared
+    /// automatically once the transition finishes.
+    pub last_transition: Option<std::time::Instant>,
     pub last_heartbeat: std::time::Instant,
 
     pub available_update: Option<String>,
@@ -402,6 +406,7 @@ impl AppState {
             new_theme_name: "Custom Theme".to_string(),
 
             toast_message: None,
+            last_transition: None,
             last_heartbeat: std::time::Instant::now(),
 
             available_update: initial_available_update,
@@ -640,6 +645,11 @@ impl AppState {
         let port: u16 = port_str.parse().unwrap_or(22);
         let profile = SshProfile::new(&format!("Direct: {}", host), &host, port, &user);
         self.spawn_ssh_terminal(&profile, ctx);
+    }
+
+    /// Call after any UI state change that should trigger the fade + sweep.
+    pub fn trigger_transition(&mut self) {
+        self.last_transition = Some(std::time::Instant::now());
     }
 
     pub fn set_toast(&mut self, text: impl Into<String>) {
@@ -1276,18 +1286,43 @@ impl eframe::App for AppState {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(self.theme.bg_main_color()))
-            .show(ctx, |ui| match self.active_view {
-                ActiveView::Terminal => {
-                    ui::terminal_view::render_terminal_workspace(self, ctx, ui);
+            .show(ctx, |ui| {
+                let content_rect = ui.max_rect();
+
+                match self.active_view {
+                    ActiveView::Terminal => {
+                        ui::terminal_view::render_terminal_workspace(self, ctx, ui);
+                    }
+                    ActiveView::SshBookmarks => {
+                        ui::ssh_view::render_ssh_view(self, ctx, ui);
+                    }
+                    ActiveView::SftpBrowser => {
+                        ui::sftp_view::render_sftp_browser_view(self, ui);
+                    }
+                    ActiveView::Settings => {
+                        ui::settings_view::render_settings_view(self, ctx, ui);
+                    }
                 }
-                ActiveView::SshBookmarks => {
-                    ui::ssh_view::render_ssh_view(self, ctx, ui);
-                }
-                ActiveView::SftpBrowser => {
-                    ui::sftp_view::render_sftp_browser_view(self, ui);
-                }
-                ActiveView::Settings => {
-                    ui::settings_view::render_settings_view(self, ctx, ui);
+
+                // Transition overlay: fade mask + accent sweep. Painted
+                // AFTER content so it covers whatever just rendered and
+                // dissolves to reveal it.
+                if let Some(t0) = self.last_transition {
+                    const DURATION_SECS: f32 = 0.24;
+                    let elapsed = t0.elapsed().as_secs_f32();
+                    if elapsed >= DURATION_SECS {
+                        self.last_transition = None;
+                    } else {
+                        let progress = elapsed / DURATION_SECS;
+                        crate::modern::transition_overlay(
+                            ui.painter(),
+                            content_rect,
+                            self.theme.bg_main_color(),
+                            self.theme.accent_color(),
+                            progress,
+                        );
+                        ctx.request_repaint();
+                    }
                 }
             });
     }

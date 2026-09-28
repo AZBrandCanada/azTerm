@@ -459,6 +459,12 @@ pub fn render_single_pane(
             actions.push(PaneAction::StartDrag(session.id));
         }
 
+        // Clip the header to its own rect. Without this, the
+        // right-to-left button row will spill out to the LEFT when the
+        // pane gets narrower than the buttons, painting buttons over
+        // whatever pane is on the other side.
+        let prev_clip_hdr = ui.clip_rect();
+        ui.set_clip_rect(header_rect.intersect(prev_clip_hdr));
         ui.allocate_ui_at_rect(header_rect, |ui| {
             ui.horizontal(|ui| {
                 ui.add_space(6.0);
@@ -543,15 +549,26 @@ pub fn render_single_pane(
                 });
             });
         });
+        ui.set_clip_rect(prev_clip_hdr);
     }
 
     if body_rect.width() >= 10.0 && body_rect.height() >= 10.0 {
         let mut pane_clicked = false;
+
+        // The terminal widget has a hard minimum grid size (>= 20 cols),
+        // so a very narrow pane would otherwise paint its terminal grid
+        // out past the pane boundary and over the neighbouring panes.
+        // Clipping the body UI to body_rect prevents that entirely.
+        let prev_clip_body = ui.clip_rect();
+        ui.set_clip_rect(body_rect.intersect(prev_clip_body));
+
         ui.push_id(session.id, |ui| {
             ui.allocate_ui_at_rect(body_rect, |ui| {
                 pane_clicked = session.render(ui, settings, theme, is_focused, toast);
             });
         });
+
+        ui.set_clip_rect(prev_clip_body);
 
         if pane_clicked {
             *active_session_id = session.id;

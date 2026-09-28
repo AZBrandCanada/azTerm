@@ -30,7 +30,7 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                     } else {
                         "Transfers".to_string()
                     };
-                    if crate::modern::button(ui, &app.theme, &badge).on_hover_text("View active file transfers and status log").clicked() {
+                    if crate::modern::toolbar_button(ui, &app.theme, &badge).on_hover_text("View active file transfers and status log").clicked() {
                         app.sftp.show_transfer_history = !app.sftp.show_transfer_history;
                     }
                 });
@@ -81,22 +81,22 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             if let SftpTarget::RemoteSsh(ref p) = app.sftp.left_pane.target {
                                 let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
                                 if !sock.exists() {
-                                    if crate::modern::button_small(ui, &app.theme, "Connect").clicked() {
+                                    if crate::modern::toolbar_button(ui, &app.theme, "Connect").clicked() {
                                         connect_profile = Some(p.clone());
                                     }
                                 }
                             }
 
-                            if crate::modern::button_small(ui, &app.theme, "Up").on_hover_text("Go to parent directory").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "Up").on_hover_text("Go to parent directory").clicked() {
                                 app.sftp.left_pane.go_up();
                             }
-                            if crate::modern::button_small(ui, &app.theme, "Home").on_hover_text("Go to home folder").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "Home").on_hover_text("Go to home folder").clicked() {
                                 app.sftp.left_pane.go_home();
                             }
-                            if crate::modern::button_small(ui, &app.theme, "Reload").on_hover_text("Reload directory").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "Reload").on_hover_text("Reload directory").clicked() {
                                 app.sftp.left_pane.refresh();
                             }
-                            if crate::modern::button_small(ui, &app.theme, "+ Folder").on_hover_text("Create new directory").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "+ Folder").on_hover_text("Create new directory").clicked() {
                                 app.sftp.left_pane.show_create_dir_modal = true;
                                 app.sftp.left_pane.new_dir_name = "new_folder".to_string();
                             }
@@ -183,15 +183,29 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                             ui.add_space(4.0);
 
-                            let up_btn = egui::Button::new(
-                                egui::RichText::new("-->").strong().size(15.0).color(
-                                    if l_count > 0 { app.theme.text_primary_color() } else { app.theme.text_muted_color() }
+                            let up_active = l_count > 0;
+                            let (fill, edge, txt) = if up_active {
+                                (
+                                    app.theme.accent_color(),
+                                    crate::modern::darken(app.theme.accent_color(), 55),
+                                    egui::Color32::from_rgb(15, 23, 42),
                                 )
-                            )
-                            .min_size(egui::vec2(72.0, 26.0))
-                            .fill(if l_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
+                            } else {
+                                (
+                                    crate::modern::lighten(app.theme.bg_card_color(), 8),
+                                    crate::modern::darken(app.theme.bg_card_color(), 40),
+                                    app.theme.text_muted_color(),
+                                )
+                            };
+                            let up_resp = crate::modern::Button3D::new("-->")
+                                .fill(fill)
+                                .edge(edge)
+                                .text_color(txt)
+                                .min_size(egui::vec2(72.0, 26.0))
+                                .show(ui, &app.theme)
+                                .on_hover_text("Transfer selected files from Left to Right");
 
-                            if ui.add_enabled(l_count > 0, up_btn).on_hover_text("Transfer selected files from Left to Right").clicked() {
+                            if up_active && up_resp.clicked() {
                                 app.sftp.upload_selected();
                             }
 
@@ -234,15 +248,29 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
 
                             ui.add_space(4.0);
 
-                            let dl_btn = egui::Button::new(
-                                egui::RichText::new("<--").strong().size(15.0).color(
-                                    if r_count > 0 { app.theme.text_primary_color() } else { app.theme.text_muted_color() }
+                            let dl_active = r_count > 0;
+                            let (fill, edge, txt) = if dl_active {
+                                (
+                                    app.theme.accent_color(),
+                                    crate::modern::darken(app.theme.accent_color(), 55),
+                                    egui::Color32::from_rgb(15, 23, 42),
                                 )
-                            )
-                            .min_size(egui::vec2(72.0, 26.0))
-                            .fill(if r_count > 0 { app.theme.accent_color().linear_multiply(0.8) } else { egui::Color32::TRANSPARENT });
+                            } else {
+                                (
+                                    crate::modern::lighten(app.theme.bg_card_color(), 8),
+                                    crate::modern::darken(app.theme.bg_card_color(), 40),
+                                    app.theme.text_muted_color(),
+                                )
+                            };
+                            let dl_resp = crate::modern::Button3D::new("<--")
+                                .fill(fill)
+                                .edge(edge)
+                                .text_color(txt)
+                                .min_size(egui::vec2(72.0, 26.0))
+                                .show(ui, &app.theme)
+                                .on_hover_text("Transfer selected files from Right to Left");
 
-                            if ui.add_enabled(r_count > 0, dl_btn).on_hover_text("Transfer selected files from Right to Left").clicked() {
+                            if dl_active && dl_resp.clicked() {
                                 app.sftp.download_selected();
                             }
                         });
@@ -285,22 +313,22 @@ pub fn render_sftp_browser_view(app: &mut AppState, ui: &mut egui::Ui) {
                             if let SftpTarget::RemoteSsh(ref p) = app.sftp.right_pane.target {
                                 let sock = SshStore::sockets_dir().join(format!("{}.sock", p.id));
                                 if !sock.exists() {
-                                    if crate::modern::button_small(ui, &app.theme, "Connect").clicked() {
+                                    if crate::modern::toolbar_button(ui, &app.theme, "Connect").clicked() {
                                         connect_profile = Some(p.clone());
                                     }
                                 }
                             }
 
-                            if crate::modern::button_small(ui, &app.theme, "Up").on_hover_text("Go to parent directory").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "Up").on_hover_text("Go to parent directory").clicked() {
                                 app.sftp.right_pane.go_up();
                             }
-                            if crate::modern::button_small(ui, &app.theme, "Home").on_hover_text("Go to home folder").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "Home").on_hover_text("Go to home folder").clicked() {
                                 app.sftp.right_pane.go_home();
                             }
-                            if crate::modern::button_small(ui, &app.theme, "Reload").on_hover_text("Reload directory").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "Reload").on_hover_text("Reload directory").clicked() {
                                 app.sftp.right_pane.refresh();
                             }
-                            if crate::modern::button_small(ui, &app.theme, "+ Folder").on_hover_text("Create new directory").clicked() {
+                            if crate::modern::toolbar_button(ui, &app.theme, "+ Folder").on_hover_text("Create new directory").clicked() {
                                 app.sftp.right_pane.show_create_dir_modal = true;
                                 app.sftp.right_pane.new_dir_name = "new_folder".to_string();
                             }
