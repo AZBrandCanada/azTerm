@@ -8,8 +8,73 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-#[cfg(target_os = "linux")]
-use arboard::{GetExtLinux, SetExtLinux};
+// -- Clipboard worker thread ------------------------------------------------
+//
+// All arboard operations are serialised on this single background thread.
+// This guarantees:
+//   * only one arboard::Clipboard object exists per process (the Wayland
+//     data-control backend refuses multiple simultaneous owners);
+//   * the object is kept alive after a write so the selection is retained;
+//   * a hung arboard call can never freeze the UI thread — reads use a
+//     hard timeout, writes are fire-and-forget.
+
+use std::sync::OnceLock;
+use std::time::Duration;
+
+/// Hard upper bound on a single clipboard read. If arboard does not
+/// respond within this window (e.g. the compositor is unresponsive), the
+/// call returns `None` and the UI thread moves on.
+const CLIPBOARD_TIMEOUT: Duration = Duration::from_millis(600);
+
+pub enum ClipboardMsg {
+    Write(String),
+    Read(std::sync::mpsc::Sender<Option<String>>),
+}
+
+fn clipboard_tx() -> &'static std::sync::mpsc::Sender<ClipboardMsg> {
+    static TX: OnceLock<std::sync::mpsc::Sender<ClipboardMsg>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ClipboardMsg>();
+        std::thread::Builder::new()
+            .name("azterm-clipboard".to_string())
+            .spawn(move || {
+                let mut cb: Option<arboard::Clipboard> = None;
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        ClipboardMsg::Write(text) => {
+                            if cb.is_none() {
+                                cb = arboard::Clipboard::new().ok();
+                            }
+                            let mut ok = false;
+                            if let Some(ref mut c) = cb {
+                                if c.set_text(&text).is_ok() {
+                                    ok = true;
+                                }
+                            }
+                            if !ok {
+                                // Handle went bad; recreate once and retry.
+                                cb = arboard::Clipboard::new().ok();
+                                if let Some(ref mut c) = cb {
+                                    let _ = c.set_text(&text);
+                                }
+                            }
+                        }
+                        ClipboardMsg::Read(reply) => {
+                            if cb.is_none() {
+                                cb = arboard::Clipboard::new().ok();
+                            }
+                            let text = cb.as_mut().and_then(|c| c.get_text().ok());
+                            let _ = reply.send(text);
+                        }
+                    }
+                }
+            })
+            .expect("spawn clipboard worker");
+        tx
+    })
+}
+// ---------------------------------------------------------------------------
+
 
 /// Messages sent to the dedicated pty-writer thread. Kept pub because it
 /// appears in a pub field on TerminalSession.
@@ -18,70 +83,39 @@ pub enum WriterMsg {
 }
 
 pub fn get_system_clipboard_text() -> Option<String> {
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        if let Ok(text) = cb.get_text() {
-            if !text.is_empty() {
-                return Some(text);
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(text) = cb.get().clipboard(arboard::LinuxClipboardKind::Primary).text() {
-                if !text.is_empty() {
-                    return Some(text);
-                }
-            }
+    // All arboard work is serialised on a single background thread with a
+    // hard timeout. If the Wayland compositor is unresponsive and arboard
+    // blocks inside get_text(), the worker thread stalls but the UI thread
+    // returns None after CLIPBOARD_TIMEOUT and carries on.
+    let (tx, rx) = std::sync::mpsc::channel();
+    if clipboard_tx().send(ClipboardMsg::Read(tx)).is_err() {
+        return None;
+    }
+    match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
+        Ok(t) => t.filter(|s| !s.is_empty()),
+        Err(_) => {
+            crate::dbg_log!(
+                "clipboard_read timeout after {:?} — arboard did not respond",
+                CLIPBOARD_TIMEOUT
+            );
+            None
         }
     }
-
-    #[cfg(target_os = "linux")]
-    {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Ok(output) = std::process::Command::new("wl-paste")
-                .arg("--no-newline")
-                .output()
-            {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
-                }
-            }
-        } else {
-            if let Ok(output) = std::process::Command::new("xclip")
-                .args(["-selection", "clipboard", "-o"])
-                .output()
-            {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !text.is_empty() {
-                        return Some(text);
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 pub fn set_system_clipboard_text(ctx: Option<&egui::Context>, text: &str) {
     if text.is_empty() {
         return;
     }
-
+    // Mirror into egui's in-app clipboard so TextEdit widgets can paste
+    // even if the OS clipboard write below fails.
     if let Some(c) = ctx {
         c.copy_text(text.to_string());
     }
-
-    if let Ok(mut cb) = arboard::Clipboard::new() {
-        let _ = cb.set_text(text);
-        #[cfg(target_os = "linux")]
-        {
-            let _ = cb.set().clipboard(arboard::LinuxClipboardKind::Primary).text(text.to_string());
-        }
-    }
+    // Fire-and-forget. The worker thread holds the Clipboard object so the
+    // OS selection stays owned for as long as AZTerm runs. Callers don't
+    // wait for a result — a Ctrl+C should feel instant.
+    let _ = clipboard_tx().send(ClipboardMsg::Write(text.to_string()));
 }
 
 fn vt_to_egui_color(color: vt100::Color, is_bg: bool, theme: &ThemeConfig) -> egui::Color32 {

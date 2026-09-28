@@ -11,7 +11,7 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "[1/5] Checking Arch system dependencies..."
-sudo pacman -S --needed --noconfirm base-devel git libxkbcommon openssl libxcb libx11 wayland mesa
+sudo pacman -S --needed --noconfirm base-devel git libxkbcommon openssl libxcb libx11 wayland mesa wl-clipboard xclip
 
 if ! command -v cargo &>/dev/null; then
     sudo pacman -S --needed --noconfirm rust

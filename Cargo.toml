@@ -1,7 +1,7 @@
 # Cargo.toml
 [package]
 name = "azterm"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["AZBrandCanada Developers"]
 description = "Fast, modern native cross-platform terminal, SSH profile manager, and SFTP client"
@@ -30,6 +30,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# arboard is only used on Windows and macOS. On Linux, clipboard I/O
+# is done via wl-paste/wl-copy or xclip/xsel subprocesses to avoid
+# the Wayland data-control deadlock that arboard can trigger when the
+# compositor is unresponsive. See src/terminal.rs.
 arboard = { version = "3.4", features = ["wayland-data-control"] }
 
 [package.metadata.deb]

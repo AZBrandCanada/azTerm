@@ -154,10 +154,11 @@ pub fn render_keygen_modal(app: &mut AppState, ctx: &egui::Context) {
                                     .desired_width(f32::INFINITY),
                             );
                             if ui.button("Copy Public Key to Clipboard").clicked() {
-                                if let Ok(mut cb) = arboard::Clipboard::new() {
-                                    let _ = cb.set_text(app.generated_pub_key.clone());
-                                    app.set_toast("Public key copied to clipboard");
-                                }
+                                crate::terminal::set_system_clipboard_text(
+                                    Some(ui.ctx()),
+                                    &app.generated_pub_key.clone(),
+                                );
+                                app.set_toast("Public key copied to clipboard");
                             }
                         }
 

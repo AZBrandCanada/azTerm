@@ -121,10 +121,11 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                                     }
                                     if let Some(ref pub_k) = key.pub_key_content {
                                         if ui.button("Copy Public Key").clicked() {
-                                            if let Ok(mut cb) = arboard::Clipboard::new() {
-                                                let _ = cb.set_text(pub_k.clone());
-                                                app.set_toast("Public key copied to clipboard");
-                                            }
+                                            crate::terminal::set_system_clipboard_text(
+                                                Some(ui.ctx()),
+                                                &pub_k.clone(),
+                                            );
+                                            app.set_toast("Public key copied to clipboard");
                                         }
                                     }
                                     if ui.button("+ New Profile with Key").on_hover_text("Create a new SSH connection using this key").clicked() {

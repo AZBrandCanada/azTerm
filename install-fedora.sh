@@ -11,7 +11,7 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "[1/5] Checking Fedora system dependencies..."
-sudo dnf install -y git gcc gcc-c++ make pkgconf-pkg-config libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
+sudo dnf install -y git gcc gcc-c++ make pkgconf-pkg-config libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel wl-clipboard xclip
 
 if ! command -v cargo &>/dev/null; then
     sudo dnf install -y rust cargo || {
