@@ -648,6 +648,235 @@ impl ThemeConfig {
         }
     }
 
+
+    pub fn sunshine() -> Self {
+        Self {
+            id: "sunshine".to_string(),
+            name: "Sunshine".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            // Panel/card hierarchy: pure white terminal, warm off-white
+            // panels, light grey cards. Keeps the same 3-step depth the
+            // dark themes use, just inverted.
+            bg_main: [255, 255, 255],
+            bg_panel: [250, 247, 238],
+            bg_card: [238, 235, 224],
+            border: [198, 192, 176],
+
+            // Bright amber/gold — reads as "yellow" but dark enough that
+            // selected-item text (accent used as text color) is still
+            // legible against bg_card.
+            accent: [240, 180, 0],
+            accent_hover: [255, 205, 60],
+
+            // Near-black primary text, warm grey muted.
+            text_primary: [28, 26, 20],
+            text_muted: [110, 104, 92],
+
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+
+            // ANSI palette tuned for white backgrounds. Every "dark"
+            // colour is a mid-tone so it stays readable when an app
+            // writes black-on-white or uses low-intensity attributes.
+            ansi_colors: [
+                [40, 40, 40],       // Black (readable on white)
+                [200, 40, 40],      // Red
+                [26, 140, 56],      // Green
+                [170, 130, 0],      // Yellow (dark amber — must read on white)
+                [30, 90, 200],      // Blue
+                [160, 40, 160],     // Magenta
+                [0, 130, 150],      // Cyan
+                [90, 90, 90],       // White (grey — must read on white)
+
+                [110, 110, 110],    // Bright Black (grey)
+                [230, 60, 60],      // Bright Red
+                [40, 170, 70],      // Bright Green
+                [210, 160, 0],      // Bright Yellow
+                [50, 120, 235],     // Bright Blue
+                [200, 60, 200],     // Bright Magenta
+                [0, 160, 190],      // Bright Cyan
+                [20, 20, 20],       // Bright White (near-black — readable on white)
+            ],
+        }
+    }
+
+
+    pub fn sky_blue() -> Self {
+        Self {
+            id: "sky_blue".to_string(),
+            name: "Sky Blue".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [255, 255, 255],
+            bg_panel: [240, 246, 252],
+            bg_card: [222, 234, 246],
+            border: [178, 198, 220],
+            accent: [30, 110, 210],
+            accent_hover: [70, 145, 235],
+            text_primary: [18, 26, 40],
+            text_muted: [95, 115, 140],
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [40, 48, 60], [200, 40, 40], [26, 140, 56], [170, 130, 0],
+                [30, 110, 210], [160, 40, 160], [0, 130, 150], [90, 100, 115],
+                [110, 120, 135], [230, 60, 60], [40, 170, 70], [210, 160, 0],
+                [50, 140, 240], [200, 60, 200], [0, 160, 190], [20, 26, 34],
+            ],
+        }
+    }
+
+    pub fn mint_fresh() -> Self {
+        Self {
+            id: "mint_fresh".to_string(),
+            name: "Mint Fresh".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [255, 255, 255],
+            bg_panel: [238, 248, 240],
+            bg_card: [218, 238, 222],
+            border: [172, 202, 180],
+            accent: [22, 140, 90],
+            accent_hover: [55, 175, 120],
+            text_primary: [20, 34, 26],
+            text_muted: [92, 122, 100],
+            success: [22, 140, 90],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [38, 46, 40], [200, 40, 40], [22, 140, 90], [170, 130, 0],
+                [30, 90, 200], [160, 40, 160], [0, 130, 150], [90, 100, 95],
+                [110, 125, 115], [230, 60, 60], [40, 170, 110], [210, 160, 0],
+                [50, 120, 235], [200, 60, 200], [0, 160, 190], [20, 30, 24],
+            ],
+        }
+    }
+
+    pub fn sakura_light() -> Self {
+        Self {
+            id: "sakura_light".to_string(),
+            name: "Sakura Light".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [255, 255, 255],
+            bg_panel: [252, 240, 246],
+            bg_card: [246, 222, 234],
+            border: [216, 178, 198],
+            accent: [210, 60, 130],
+            accent_hover: [235, 100, 165],
+            text_primary: [40, 22, 30],
+            text_muted: [135, 95, 112],
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [50, 38, 45], [200, 40, 40], [26, 140, 56], [170, 130, 0],
+                [30, 90, 200], [210, 60, 130], [0, 130, 150], [100, 85, 95],
+                [125, 105, 115], [230, 60, 60], [40, 170, 70], [210, 160, 0],
+                [50, 120, 235], [235, 100, 165], [0, 160, 190], [30, 22, 28],
+            ],
+        }
+    }
+
+    pub fn lavender_light() -> Self {
+        Self {
+            id: "lavender_light".to_string(),
+            name: "Lavender Light".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [255, 255, 255],
+            bg_panel: [242, 240, 252],
+            bg_card: [226, 222, 246],
+            border: [188, 182, 218],
+            accent: [110, 60, 210],
+            accent_hover: [145, 100, 235],
+            text_primary: [28, 24, 44],
+            text_muted: [108, 100, 140],
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [45, 40, 60], [200, 40, 40], [26, 140, 56], [170, 130, 0],
+                [110, 60, 210], [160, 40, 160], [0, 130, 150], [95, 90, 115],
+                [118, 112, 138], [230, 60, 60], [40, 170, 70], [210, 160, 0],
+                [145, 100, 235], [200, 60, 200], [0, 160, 190], [22, 20, 34],
+            ],
+        }
+    }
+
+    pub fn peach_cream() -> Self {
+        Self {
+            id: "peach_cream".to_string(),
+            name: "Peach Cream".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [255, 253, 248],
+            bg_panel: [252, 240, 226],
+            bg_card: [248, 224, 200],
+            border: [218, 188, 160],
+            accent: [220, 95, 40],
+            accent_hover: [240, 130, 75],
+            text_primary: [44, 28, 18],
+            text_muted: [140, 108, 80],
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [52, 40, 30], [200, 40, 40], [26, 140, 56], [170, 130, 0],
+                [30, 90, 200], [160, 40, 160], [0, 130, 150], [110, 95, 80],
+                [135, 118, 100], [230, 60, 60], [40, 170, 70], [210, 160, 0],
+                [50, 120, 235], [200, 60, 200], [0, 160, 190], [32, 22, 14],
+            ],
+        }
+    }
+
+    pub fn paper_slate() -> Self {
+        Self {
+            id: "paper_slate".to_string(),
+            name: "Paper Slate".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [252, 252, 253],
+            bg_panel: [240, 240, 244],
+            bg_card: [222, 224, 230],
+            border: [180, 184, 194],
+            accent: [55, 60, 75],
+            accent_hover: [90, 96, 115],
+            text_primary: [24, 26, 34],
+            text_muted: [108, 112, 125],
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [42, 44, 52], [200, 40, 40], [26, 140, 56], [170, 130, 0],
+                [30, 90, 200], [160, 40, 160], [0, 130, 150], [90, 92, 100],
+                [112, 116, 128], [230, 60, 60], [40, 170, 70], [210, 160, 0],
+                [50, 120, 235], [200, 60, 200], [0, 160, 190], [20, 22, 28],
+            ],
+        }
+    }
+
+    pub fn ocean_foam() -> Self {
+        Self {
+            id: "ocean_foam".to_string(),
+            name: "Ocean Foam".to_string(),
+            is_builtin: true,
+            opacity: 1.0,
+            bg_main: [253, 255, 255],
+            bg_panel: [232, 246, 248],
+            bg_card: [206, 232, 236],
+            border: [160, 198, 204],
+            accent: [0, 130, 145],
+            accent_hover: [30, 165, 180],
+            text_primary: [18, 34, 38],
+            text_muted: [82, 122, 130],
+            success: [26, 140, 56],
+            danger: [200, 42, 42],
+            ansi_colors: [
+                [34, 44, 48], [200, 40, 40], [26, 140, 56], [170, 130, 0],
+                [30, 90, 200], [160, 40, 160], [0, 130, 145], [86, 100, 106],
+                [104, 122, 130], [230, 60, 60], [40, 170, 70], [210, 160, 0],
+                [50, 120, 235], [200, 60, 200], [30, 165, 180], [16, 26, 30],
+            ],
+        }
+    }
+
     pub fn builtins() -> Vec<Self> {
         vec![
             Self::cyber_cyan(),
@@ -672,6 +901,14 @@ impl ThemeConfig {
             Self::infrared(),
             Self::ultraviolet(),
             Self::voltage(),
+            Self::sunshine(),
+            Self::sky_blue(),
+            Self::mint_fresh(),
+            Self::sakura_light(),
+            Self::lavender_light(),
+            Self::peach_cream(),
+            Self::paper_slate(),
+            Self::ocean_foam(),
         ]
     }
 }
