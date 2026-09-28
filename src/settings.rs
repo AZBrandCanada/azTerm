@@ -114,6 +114,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub pending_update: Option<String>,
 
+    /// Absolute path to the font file used for the whole UI
+    /// (buttons, labels, nav, settings — everything except terminal
+    /// cells). Empty string = use egui's built-in proportional font.
+    #[serde(default)]
+    pub ui_font_path: String,
+
     /// Absolute path to the font file used for terminal sessions.
     /// Empty string = use AZTerm's built-in fallback list.
     #[serde(default)]
@@ -172,6 +178,7 @@ impl Default for AppSettings {
             debug_log_path: default_debug_log_path(),
             mouse_wheel_scroll: WheelScrollAmount::Lines3,
             pending_update: None,
+            ui_font_path: String::new(),
             terminal_font_path: String::new(),
             terminal_font_size: 13.5,
         }

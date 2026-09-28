@@ -111,30 +111,54 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
     }
 }
 
-/// Apply the terminal font selection to egui.
+/// Apply the UI and terminal font selections to egui.
 ///
-/// An empty `font_path` means "use the built-in default candidate list".
-/// A non-empty path is loaded as the primary Monospace family.
-pub fn apply_to_egui(ctx: &egui::Context, font_path: &str) {
+/// `ui_font_path`      — absolute path to a font file to use for the
+///                       Proportional family (buttons, labels, nav,
+///                       settings, everything except terminal cells).
+///                       Empty string = keep egui's built-in default.
+/// `terminal_font_path`— absolute path to a font file to use for the
+///                       Monospace family (terminal content, code
+///                       blocks). Empty string = use AZTerm's built-in
+///                       fallback list.
+pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str, terminal_font_path: &str) {
     let mut fonts = egui::FontDefinitions::default();
 
-    let resolved: Option<String> = if !font_path.trim().is_empty() {
-        Some(font_path.to_string())
+    // ---- UI font: Proportional family ---------------------------------
+    if !ui_font_path.trim().is_empty() {
+        match std::fs::read(ui_font_path) {
+            Ok(data) => {
+                fonts.font_data.insert(
+                    "azterm_ui_font".to_string(),
+                    egui::FontData::from_owned(data),
+                );
+                if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                    prop.insert(0, "azterm_ui_font".to_string());
+                }
+            }
+            Err(e) => eprintln!("[fonts] failed to read ui font {}: {}", ui_font_path, e),
+        }
+    }
+
+    // ---- Terminal font: Monospace family ------------------------------
+    let resolved_mono: Option<String> = if !terminal_font_path.trim().is_empty() {
+        Some(terminal_font_path.to_string())
     } else {
         default_mono_font_path()
     };
 
-    if let Some(path) = resolved {
-        if let Ok(data) = std::fs::read(&path) {
-            fonts.font_data.insert(
-                "azterm_terminal_font".to_string(),
-                egui::FontData::from_owned(data),
-            );
-            if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                mono.insert(0, "azterm_terminal_font".to_string());
+    if let Some(path) = resolved_mono {
+        match std::fs::read(&path) {
+            Ok(data) => {
+                fonts.font_data.insert(
+                    "azterm_terminal_font".to_string(),
+                    egui::FontData::from_owned(data),
+                );
+                if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                    mono.insert(0, "azterm_terminal_font".to_string());
+                }
             }
-        } else {
-            eprintln!("[fonts] failed to read {}", path);
+            Err(e) => eprintln!("[fonts] failed to read terminal font {}: {}", path, e),
         }
     }
 

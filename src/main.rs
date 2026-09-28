@@ -293,9 +293,11 @@ pub struct AppState {
     pub last_transition: Option<std::time::Instant>,
     pub last_heartbeat: std::time::Instant,
 
-    /// Last font path we applied via `ctx.set_fonts()`. Used to detect
+    /// Last UI font path applied via `ctx.set_fonts()`. Used to detect
     /// when the user changes the font in Settings so we can re-apply.
-    pub applied_font_path: Option<String>,
+    pub applied_ui_font_path: Option<String>,
+    /// Last terminal font path applied via `ctx.set_fonts()`.
+    pub applied_terminal_font_path: Option<String>,
     /// Cache of installed fonts, populated lazily by the Settings picker.
     pub cached_fonts: Option<Vec<fonts::FontEntry>>,
 
@@ -343,11 +345,17 @@ impl AppState {
 
         cc.egui_ctx.set_zoom_factor(settings.zoom_factor);
 
-        // Apply the user's chosen terminal font (or the built-in
-        // fallback list). See src/fonts.rs for the discovery logic
-        // and the Settings → Terminal Interaction picker.
-        fonts::apply_to_egui(&cc.egui_ctx, &settings.terminal_font_path);
-        let applied_font_path_init = settings.terminal_font_path.clone();
+        // Apply the user's chosen fonts. UI font fills egui's
+        // Proportional family, terminal font fills Monospace. See
+        // src/fonts.rs for discovery; pickers live in Settings →
+        // Themes & Window Appearance.
+        fonts::apply_to_egui(
+            &cc.egui_ctx,
+            &settings.ui_font_path,
+            &settings.terminal_font_path,
+        );
+        let applied_ui_font_init = settings.ui_font_path.clone();
+        let applied_terminal_font_init = settings.terminal_font_path.clone();
 
         let current_version = env!("CARGO_PKG_VERSION");
         let initial_available_update = if let Some(ref tag) = settings.pending_update {
@@ -390,7 +398,8 @@ impl AppState {
             last_transition: None,
             last_heartbeat: std::time::Instant::now(),
 
-            applied_font_path: Some(applied_font_path_init),
+            applied_ui_font_path: Some(applied_ui_font_init),
+            applied_terminal_font_path: Some(applied_terminal_font_init),
             cached_fonts: None,
 
             available_update: initial_available_update,
@@ -1205,13 +1214,22 @@ impl eframe::App for AppState {
         // as the rest of the UI. Cheap: mutates the style in place.
         self.theme.apply_to_egui(ctx);
 
-        // If the user picked a different terminal font in Settings,
-        // rebuild egui's font atlas with the new typeface. This is the
-        // only place we call set_fonts() after startup — it's expensive
-        // (full atlas rebuild) so we guard it behind a path comparison.
-        if self.applied_font_path.as_deref() != Some(self.settings.terminal_font_path.as_str()) {
-            fonts::apply_to_egui(ctx, &self.settings.terminal_font_path);
-            self.applied_font_path = Some(self.settings.terminal_font_path.clone());
+        // If the user picked a different UI or terminal font in Settings,
+        // rebuild egui's font atlas. This is the only place we call
+        // set_fonts() after startup — it's expensive (full atlas rebuild)
+        // so we guard it behind a path comparison.
+        let ui_changed = self.applied_ui_font_path.as_deref()
+            != Some(self.settings.ui_font_path.as_str());
+        let term_changed = self.applied_terminal_font_path.as_deref()
+            != Some(self.settings.terminal_font_path.as_str());
+        if ui_changed || term_changed {
+            fonts::apply_to_egui(
+                ctx,
+                &self.settings.ui_font_path,
+                &self.settings.terminal_font_path,
+            );
+            self.applied_ui_font_path = Some(self.settings.ui_font_path.clone());
+            self.applied_terminal_font_path = Some(self.settings.terminal_font_path.clone());
         }
 
         // Reconcile debug logging with current settings (cheap no-op if unchanged).

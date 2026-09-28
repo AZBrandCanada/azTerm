@@ -130,6 +130,176 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.separator();
                             ui.add_space(8.0);
 
+                            // ---------- Fonts ----------
+                            ui.label(
+                                egui::RichText::new("Fonts")
+                                    .strong()
+                                    .size(14.0)
+                                    .color(app.theme.accent_color()),
+                            );
+                            ui.label(
+                                egui::RichText::new("Pick a typeface for the app UI (buttons, labels, nav) and a separate one for terminal sessions. Changes apply live.")
+                                    .small()
+                                    .color(app.theme.text_muted_color()),
+                            );
+                            ui.add_space(10.0);
+
+                            // Lazy-load the font list on first render.
+                            if app.cached_fonts.is_none() {
+                                app.cached_fonts = Some(crate::fonts::list_system_fonts());
+                            }
+                            let font_list: Vec<crate::fonts::FontEntry> =
+                                app.cached_fonts.clone().unwrap_or_default();
+
+                            // ===== UI Font =====
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("UI Font:")
+                                        .strong()
+                                        .color(app.theme.text_primary_color()),
+                                );
+
+                                let current_label = if app.settings.ui_font_path.is_empty() {
+                                    "Default (egui)".to_string()
+                                } else {
+                                    font_list
+                                        .iter()
+                                        .find(|f| f.path.to_string_lossy() == app.settings.ui_font_path)
+                                        .map(|f| f.family.clone())
+                                        .unwrap_or_else(|| "(missing font)".to_string())
+                                };
+
+                                egui::ComboBox::from_id_source("ui_font_combo")
+                                    .width(260.0)
+                                    .selected_text(current_label)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                app.settings.ui_font_path.is_empty(),
+                                                "Default (egui)",
+                                            )
+                                            .clicked()
+                                        {
+                                            app.settings.ui_font_path = String::new();
+                                            app.settings.save();
+                                        }
+                                        for font in &font_list {
+                                            let path_str = font.path.to_string_lossy().to_string();
+                                            let is_selected = app.settings.ui_font_path == path_str;
+                                            if ui.selectable_label(is_selected, &font.family).clicked() {
+                                                app.settings.ui_font_path = path_str;
+                                                app.settings.save();
+                                            }
+                                        }
+                                    });
+
+                                if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
+                                    app.cached_fonts = None;
+                                }
+                                if ui.button("Use Default").clicked() {
+                                    app.settings.ui_font_path = String::new();
+                                    app.settings.save();
+                                }
+                            });
+
+                            ui.add_space(6.0);
+
+                            // ===== Terminal Font =====
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Terminal Font:")
+                                        .strong()
+                                        .color(app.theme.text_primary_color()),
+                                );
+
+                                let current_label = if app.settings.terminal_font_path.is_empty() {
+                                    "Default (system monospace)".to_string()
+                                } else {
+                                    font_list
+                                        .iter()
+                                        .find(|f| f.path.to_string_lossy() == app.settings.terminal_font_path)
+                                        .map(|f| f.family.clone())
+                                        .unwrap_or_else(|| "(missing font)".to_string())
+                                };
+
+                                egui::ComboBox::from_id_source("terminal_font_combo")
+                                    .width(260.0)
+                                    .selected_text(current_label)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                app.settings.terminal_font_path.is_empty(),
+                                                "Default (system monospace)",
+                                            )
+                                            .clicked()
+                                        {
+                                            app.settings.terminal_font_path = String::new();
+                                            app.settings.save();
+                                        }
+                                        for font in &font_list {
+                                            let path_str = font.path.to_string_lossy().to_string();
+                                            let is_selected = app.settings.terminal_font_path == path_str;
+                                            if ui.selectable_label(is_selected, &font.family).clicked() {
+                                                app.settings.terminal_font_path = path_str;
+                                                app.settings.save();
+                                            }
+                                        }
+                                    });
+
+                                if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
+                                    app.cached_fonts = None;
+                                }
+                                if ui.button("Use Default").clicked() {
+                                    app.settings.terminal_font_path = String::new();
+                                    app.settings.save();
+                                }
+                            });
+
+                            ui.add_space(6.0);
+
+                            // ===== Terminal Font Size =====
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Terminal Font Size:")
+                                        .strong()
+                                        .color(app.theme.text_primary_color()),
+                                );
+                                let sz = ui.add(
+                                    egui::Slider::new(&mut app.settings.terminal_font_size, 6.0..=32.0)
+                                        .suffix(" pt"),
+                                );
+                                if sz.changed() {
+                                    app.settings.save();
+                                }
+                            });
+
+                            ui.add_space(10.0);
+
+                            // ===== Preview =====
+                            ui.label(
+                                egui::RichText::new("Terminal preview:")
+                                    .small()
+                                    .color(app.theme.text_muted_color()),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "The quick brown fox jumps over the lazy dog 0123456789",
+                                )
+                                .monospace()
+                                .size(app.settings.terminal_font_size)
+                                .color(app.theme.text_primary_color()),
+                            );
+                            ui.label(
+                                egui::RichText::new("$ ls -la ~/.config/azterm/")
+                                    .monospace()
+                                    .size(app.settings.terminal_font_size)
+                                    .color(app.theme.text_muted_color()),
+                            );
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(12.0);
+
                             ui.label(egui::RichText::new("Select Theme Preset").strong().color(app.theme.text_primary_color()));
                             ui.add_space(4.0);
 
@@ -329,134 +499,6 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.label(egui::RichText::new("Terminal Interaction").strong().size(16.0).color(app.theme.accent_color()));
                             ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and scrollback depth.").small().color(app.theme.text_muted_color()));
                             ui.add_space(12.0);
-
-                            // ---------- Terminal Font ----------
-                            ui.label(
-                                egui::RichText::new("Terminal Font")
-                                    .strong()
-                                    .color(app.theme.text_primary_color()),
-                            );
-                            ui.label(
-                                egui::RichText::new("Choose the typeface and size used inside terminal sessions. Only affects the terminal; the rest of the UI uses egui's default font.")
-                                    .small()
-                                    .color(app.theme.text_muted_color()),
-                            );
-                            ui.add_space(6.0);
-
-                            // Lazy-load the font list on first render.
-                            if app.cached_fonts.is_none() {
-                                app.cached_fonts = Some(crate::fonts::list_system_fonts());
-                            }
-                            let font_list: Vec<crate::fonts::FontEntry> =
-                                app.cached_fonts.clone().unwrap_or_default();
-
-                            ui.horizontal(|ui| {
-                                let current_label = if app.settings.terminal_font_path.is_empty() {
-                                    "Default (system monospace)".to_string()
-                                } else {
-                                    font_list
-                                        .iter()
-                                        .find(|f| {
-                                            f.path.to_string_lossy()
-                                                == app.settings.terminal_font_path
-                                        })
-                                        .map(|f| f.family.clone())
-                                        .unwrap_or_else(|| "(missing font)".to_string())
-                                };
-
-                                egui::ComboBox::from_id_source("terminal_font_combo")
-                                    .width(280.0)
-                                    .selected_text(current_label)
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_label(
-                                                app.settings.terminal_font_path.is_empty(),
-                                                "Default (system monospace)",
-                                            )
-                                            .clicked()
-                                        {
-                                            app.settings.terminal_font_path =
-                                                String::new();
-                                            app.settings.save();
-                                        }
-                                        for font in &font_list {
-                                            let path_str =
-                                                font.path.to_string_lossy().to_string();
-                                            let is_selected = app.settings.terminal_font_path
-                                                == path_str;
-                                            if ui
-                                                .selectable_label(is_selected, &font.family)
-                                                .clicked()
-                                            {
-                                                app.settings.terminal_font_path =
-                                                    path_str;
-                                                app.settings.save();
-                                            }
-                                        }
-                                    });
-
-                                if ui
-                                    .button("↻")
-                                    .on_hover_text("Rescan installed fonts")
-                                    .clicked()
-                                {
-                                    app.cached_fonts = None;
-                                }
-
-                                if ui
-                                    .button("Use Default")
-                                    .on_hover_text("Reset to the built-in fallback font")
-                                    .clicked()
-                                {
-                                    app.settings.terminal_font_path = String::new();
-                                    app.settings.save();
-                                }
-                            });
-
-                            ui.add_space(6.0);
-
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Font size:")
-                                        .color(app.theme.text_primary_color()),
-                                );
-                                let sz = ui.add(
-                                    egui::Slider::new(
-                                        &mut app.settings.terminal_font_size,
-                                        6.0..=32.0,
-                                    )
-                                    .suffix(" pt"),
-                                );
-                                if sz.changed() {
-                                    app.settings.save();
-                                }
-                            });
-
-                            ui.add_space(8.0);
-
-                            ui.label(
-                                egui::RichText::new("Preview:")
-                                    .small()
-                                    .color(app.theme.text_muted_color()),
-                            );
-                            ui.label(
-                                egui::RichText::new(
-                                    "The quick brown fox jumps over the lazy dog 0123456789",
-                                )
-                                .monospace()
-                                .size(app.settings.terminal_font_size)
-                                .color(app.theme.text_primary_color()),
-                            );
-                            ui.label(
-                                egui::RichText::new("$ ls -la ~/.config/azterm/")
-                                    .monospace()
-                                    .size(app.settings.terminal_font_size)
-                                    .color(app.theme.text_muted_color()),
-                            );
-
-                            ui.add_space(10.0);
-                            ui.separator();
-                            ui.add_space(10.0);
 
                             changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut app.settings.cursor_blink, &app.theme);
                             changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut app.settings.copy_on_select, &app.theme);
