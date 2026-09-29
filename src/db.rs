@@ -286,6 +286,30 @@ impl Database {
         list
     }
 
+    /// Directory holding per-session raw-PTY scrollback files.
+    pub fn scrollback_dir() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let dir = PathBuf::from(home).join(".config/azterm/scrollback");
+        let _ = fs::create_dir_all(&dir);
+        dir
+    }
+
+    pub fn scrollback_path(session_id: usize) -> PathBuf {
+        Self::scrollback_dir().join(format!("{}.bin", session_id))
+    }
+
+    pub fn save_scrollback(session_id: usize, bytes: &[u8]) {
+        let _ = fs::write(Self::scrollback_path(session_id), bytes);
+    }
+
+    pub fn load_scrollback(session_id: usize) -> Option<Vec<u8>> {
+        fs::read(Self::scrollback_path(session_id)).ok()
+    }
+
+    pub fn delete_scrollback(session_id: usize) {
+        let _ = fs::remove_file(Self::scrollback_path(session_id));
+    }
+
     pub fn save_workspaces(workspaces: &[WorkspaceTab]) {
         if let Some(conn) = Self::get_connection() {
             if let Ok(json) = serde_json::to_string(workspaces) {

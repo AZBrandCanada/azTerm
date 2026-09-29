@@ -668,7 +668,7 @@ impl AppState {
         self.toast_message = Some((text.into(), std::time::Instant::now()));
     }
 
-    pub fn persist_sessions(&self) {
+    pub fn persist_sessions(&mut self) {
         let saved: Vec<SavedSessionState> = self
             .sessions
             .iter()
@@ -691,6 +691,15 @@ impl AppState {
             .collect();
         Database::save_sessions(&saved);
         Database::save_workspaces(&self.workspaces);
+
+        // Persist terminal scrollback for any session whose output has
+        // changed since the last save. Idle sessions cost nothing.
+        for s in self.sessions.iter_mut() {
+            if s.history_dirty {
+                Database::save_scrollback(s.id, &s.history_buf);
+                s.history_dirty = false;
+            }
+        }
     }
 
     fn restore_saved_sessions(&mut self, ctx: egui::Context) {
@@ -755,6 +764,16 @@ impl AppState {
             }
         }
         self.next_tab_id = self.next_tab_id.max(max_id);
+
+        // Replay persisted scrollback into each session's parser so tab
+        // history survives a restart. This runs BEFORE the shell's first
+        // bytes are drained from the channel, so ordering is guaranteed:
+        // history first, then the fresh prompt on top of a cleared pane.
+        for s in &mut self.sessions {
+            if let Some(bytes) = Database::load_scrollback(s.id) {
+                s.feed_restore_history(&bytes);
+            }
+        }
 
         // Restore the saved tiling layout, but only if every leaf still maps
         // to a restored session (guards against deleted SSH profiles and
@@ -953,6 +972,7 @@ impl AppState {
             }
         }
 
+        Database::delete_scrollback(session_id);
         self.sessions.retain(|s| s.id != session_id);
 
         let mut ws_idx_to_remove: Option<usize> = None;

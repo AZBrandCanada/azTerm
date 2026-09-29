@@ -118,6 +118,11 @@ pub fn set_system_clipboard_text(ctx: Option<&egui::Context>, text: &str) {
     let _ = clipboard_tx().send(ClipboardMsg::Write(text.to_string()));
 }
 
+/// Maximum raw PTY bytes retained per session for restore-on-reopen.
+/// When exceeded, the front of the buffer is trimmed up to the next ESC
+/// so we never start replaying mid-escape-sequence.
+const HISTORY_MAX: usize = 1024 * 1024;
+
 fn vt_to_egui_color(color: vt100::Color, is_bg: bool, theme: &ThemeConfig) -> egui::Color32 {
     match color {
         vt100::Color::Default => {
@@ -207,6 +212,13 @@ pub struct TerminalSession {
     pub tui_drag_last_snapshot: Vec<String>,
     /// None until the user pages; true = paged up (older content), false = down.
     pub tui_drag_direction: Option<bool>,
+
+    /// Raw PTY output bytes captured for restore-on-reopen. Bounded ring
+    /// trimmed at HISTORY_MAX, aligned to the next ESC.
+    pub history_buf: Vec<u8>,
+    /// Set true whenever history_buf grows; the caller clears it after
+    /// writing to disk. Lets persist_sessions skip unchanged sessions.
+    pub history_dirty: bool,
 }
 
 impl TerminalSession {
@@ -312,6 +324,8 @@ impl TerminalSession {
             tui_drag_frames: Vec::new(),
             tui_drag_last_snapshot: Vec::new(),
             tui_drag_direction: None,
+            history_buf: Vec::new(),
+            history_dirty: false,
         }
     }
 
@@ -422,6 +436,35 @@ impl TerminalSession {
         }
 
         Some(resolved)
+    }
+
+    /// Replay persisted raw PTY bytes into the parser, then roll every
+    /// visible row into scrollback and clear the visible screen so the
+    /// new shell's prompt lands at the top-left of a clean pane. All
+    /// historical output stays reachable via the scroll wheel.
+    pub fn feed_restore_history(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.parser.process(bytes);
+        }));
+
+        // Emit enough line-feeds to push every visible row into the
+        // scrollback ring, then clear the visible screen and home the
+        // cursor. 2*rows is safely more than the cursor can ever need.
+        let mut push = Vec::with_capacity(self.rows as usize * 2 + 8);
+        for _ in 0..(self.rows as usize * 2) {
+            push.push(b'\n');
+        }
+        push.extend_from_slice(b"\x1b[2J\x1b[H");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.parser.process(&push);
+        }));
+
+        self.scroll_offset = 0;
+        self.max_scroll = 0;
+        self.parser.set_scrollback(0);
     }
 
     pub fn clear_screen_and_scrollback(&mut self) {
@@ -640,6 +683,23 @@ impl TerminalSession {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.parser.process(&bytes);
             }));
+
+            // Mirror into the restore-history buffer. Same loop iteration
+            // as parser.process, so the two stay in sync even if the
+            // 256 KB break below kicks in (bytes leftover stay in the
+            // channel for the next frame).
+            self.history_buf.extend_from_slice(&bytes);
+            if self.history_buf.len() > HISTORY_MAX {
+                let target = self.history_buf.len() - HISTORY_MAX;
+                let mut cut = target;
+                while cut < self.history_buf.len() && self.history_buf[cut] != 0x1b {
+                    cut += 1;
+                }
+                if cut < self.history_buf.len() {
+                    self.history_buf.drain(..cut);
+                }
+            }
+            self.history_dirty = true;
 
             if total_bytes > 262_144 {
                 break;
