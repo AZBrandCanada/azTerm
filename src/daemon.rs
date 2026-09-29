@@ -17,6 +17,22 @@ use std::path::PathBuf;
 pub const DEFAULT_COLS: u16 = 120;
 pub const DEFAULT_ROWS: u16 = 40;
 
+/// Wire-protocol version. Bump this whenever the shape of `Request`
+/// or `Response` changes in a way an older peer could misinterpret
+/// (added field, reordered variant, new request the old daemon can't
+/// handle, etc.).
+///
+/// The GUI checks this on connect. A daemon that reports a different
+/// value is replaced: the GUI kills it and spawns a fresh one built
+/// from the same binary. That costs any live sessions on the old
+/// daemon, but it's a one-time hit per update — and it's far less
+/// painful than the alternative, where the new GUI sends a request
+/// the old daemon silently rejects and the user has no idea why.
+///
+/// History:
+///   1  initial versioned protocol (SshSpec.profile_id, Shutdown)
+pub const PROTO_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: u64,
@@ -89,7 +105,12 @@ pub enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    Pong,
+    /// Pong carries the daemon's wire-protocol version so the client
+    /// can refuse to talk to an incompatible peer. Old (pre-version)
+    /// daemons serialize `Pong` as the bare string `"Pong"`, which
+    /// will *not* deserialize into this struct variant — that parse
+    /// failure is itself the version-mismatch signal.
+    Pong { proto_version: u32 },
     Sessions(Vec<SessionInfo>),
     Attached { id: u64 },
     /// base64-encoded raw PTY bytes

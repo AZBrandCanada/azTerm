@@ -9,7 +9,7 @@
 //
 // Protocol lives in src/daemon.rs, shared with the GUI via #[path].
 
-use crate::daemon::{b64_decode, b64_encode, read_msg, write_msg, Request, Response, SessionInfo, socket_path};
+use crate::daemon::{b64_decode, b64_encode, read_msg, write_msg, Request, Response, SessionInfo, socket_path, PROTO_VERSION};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -151,7 +151,12 @@ fn handle_client(mut stream: UnixStream, shared: Shared) -> std::io::Result<()> 
         };
 
         match req {
-            Request::Ping => write_msg(&mut stream, &Response::Pong)?,
+            Request::Ping => write_msg(
+                &mut stream,
+                &Response::Pong {
+                    proto_version: PROTO_VERSION,
+                },
+            )?,
 
             Request::List => {
                 let sessions: Vec<SessionInfo> = {

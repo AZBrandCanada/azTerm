@@ -5,7 +5,7 @@
 // own dedicated Unix socket for streaming, so a slow session never
 // blocks a control request.
 
-use crate::daemon::{read_msg, write_msg, Request, Response, SessionInfo, SshSpec, socket_path};
+use crate::daemon::{read_msg, write_msg, Request, Response, SessionInfo, SshSpec, socket_path, PROTO_VERSION};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Mutex;
@@ -34,8 +34,31 @@ impl DaemonClient {
         s.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
         write_msg(&mut s, &Request::Ping).ok()?;
         match read_msg::<_, Response>(&mut s) {
-            Ok(Response::Pong) => {}
-            _ => return None,
+            Ok(Response::Pong { proto_version }) => {
+                if proto_version != PROTO_VERSION {
+                    eprintln!(
+                        "[daemon_client] daemon speaks proto v{}, this client speaks v{} — will replace",
+                        proto_version, PROTO_VERSION
+                    );
+                    return None;
+                }
+            }
+            Ok(other) => {
+                eprintln!("[daemon_client] unexpected Ping reply: {:?}", other);
+                return None;
+            }
+            Err(e) => {
+                // This is the old-daemon path: pre-version daemons reply
+                // with the bare string "Pong", which fails to deserialize
+                // into Pong { proto_version }. Treat it as a version
+                // mismatch and let ensure_daemon_running() replace them.
+                eprintln!(
+                    "[daemon_client] Ping failed ({}): {} — likely a pre-version daemon",
+                    path.display(),
+                    e
+                );
+                return None;
+            }
         }
         s.set_read_timeout(None).ok()?;
         s.set_write_timeout(None).ok()?;
@@ -180,8 +203,67 @@ impl DaemonClient {
     }
 }
 
-/// Try to reach a running daemon. If none is running, spawn the
-/// azterm-daemon sibling binary and wait up to ~1s for it to bind.
+/// Best-effort removal of an incompatible or wedged daemon.
+///
+/// Called only when we've already retried `try_connect` a few times
+/// and gotten nowhere. Two cases are handled:
+///
+///   * **Orphaned socket** — no process is listening. We just unlink
+///     the file so a fresh daemon can bind.
+///   * **Live but incompatible** — a process answers on the socket but
+///     reports the wrong `PROTO_VERSION`, or can't be parsed at all
+///     because it predates the version field. We SIGTERM it, wait for
+///     the socket to vanish, then SIGKILL if it doesn't. Worst case
+///     we unlink the socket ourselves so the next daemon can start.
+///
+/// `pkill -f 'azterm.*--daemon'` can never match the GUI process: the
+/// GUI's argv does not contain `--daemon`.
+fn kill_stale_daemon() {
+    let sock = socket_path();
+    if !sock.exists() {
+        return;
+    }
+
+    // Is anything actually listening?
+    match UnixStream::connect(&sock) {
+        Err(_) => {
+            // Orphaned socket file — just unlink it.
+            let _ = std::fs::remove_file(&sock);
+            return;
+        }
+        Ok(probe) => {
+            // Close the probe before we start killing, so it can't keep
+            // the old daemon in a weird half-connected state.
+            drop(probe);
+        }
+    }
+
+    eprintln!("[daemon_client] replacing stale daemon (version mismatch or wedged)");
+
+    let _ = std::process::Command::new("pkill")
+        .args(["-TERM", "-f", "azterm.*--daemon"])
+        .output();
+
+    // The daemon unlinks its own socket as part of a clean exit, so
+    // "socket gone" is our success signal.
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    while sock.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    if sock.exists() {
+        eprintln!("[daemon_client] SIGTERM ignored, escalating to SIGKILL");
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-f", "azterm.*--daemon"])
+            .output();
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = std::fs::remove_file(&sock);
+    }
+}
+
+/// Try to reach a running daemon. If none is running — or the one that
+/// is answers with an incompatible `PROTO_VERSION` — spawn a fresh
+/// daemon from this binary and wait up to ~2s for it to bind.
 /// Returns the connectable client if one was or could be started.
 pub fn ensure_daemon_running() -> Option<DaemonClient> {
     // Retry a few times before spawning. A daemon that is mid-stream
@@ -197,6 +279,11 @@ pub fn ensure_daemon_running() -> Option<DaemonClient> {
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+
+    // Either no daemon, or one we can't speak to. Clear the way before
+    // spawning our own — otherwise the new daemon would fail to grab
+    // the singleton flock and exit immediately, leaving us stuck.
+    kill_stale_daemon();
 
     // Re-exec THIS binary with --daemon. Single-binary install: the
     // same executable is both the GUI and the daemon, so nothing else
