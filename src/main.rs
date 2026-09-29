@@ -762,7 +762,7 @@ impl AppState {
                         info.rows,
                     ) {
                         s.recovery_note = Some((
-                            format!("\u{2713} Reattached to live daemon session #{} \u{2014} process still running", info.id),
+                            format!("\u{2713} Reattached  #{}  ", info.id),
                             (100, 220, 140),
                         ));
                         self.sessions.push(s);
@@ -1595,20 +1595,63 @@ impl AppState {
     /// legacy path. Used by the "Keep Sessions Running in Background"
     /// toggle in Settings → Terminal Interaction.
     pub fn disable_daemon(&mut self, ctx: egui::Context) {
-        // 1. Tell the daemon to die. It SIGHUPs every child, unlinks
-        //    its socket, and exits.
-        if let Some(ref daemon) = self.daemon {
+        // 1. Take the client handle. If we have one, send the graceful
+        //    Shutdown request and hand it to a watchdog thread. The
+        //    watchdog gives the daemon a short grace period to exit on
+        //    its own; if the socket is still there afterwards, it
+        //    SIGTERMs the daemon by name. That covers the case where
+        //    the running daemon predates the Shutdown variant (protocol
+        //    skew across an update) or has simply wedged.
+        //
+        //    Doing this on a background thread matters: the UI thread
+        //    must not block for the poll loop, and it must not block on
+        //    the socket write either.
+        if let Some(daemon) = self.daemon.take() {
             daemon.shutdown();
+            std::thread::spawn(move || {
+                let sock = crate::daemon::socket_path();
+
+                // Grace window: give the daemon up to 500 ms to exit
+                // cleanly. It unlinks its own socket on the way out, so
+                // socket-gone is our success signal.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(500);
+                while sock.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+
+                if sock.exists() {
+                    // Daemon ignored Shutdown (old protocol, wedged, or
+                    // stuck in a blocking PTY read). Force it. The match
+                    // pattern deliberately requires "--daemon" so it can
+                    // never hit the GUI process, which never has that
+                    // flag on its own argv.
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-TERM", "-f", "azterm.*--daemon"])
+                        .output();
+
+                    let deadline2 =
+                        std::time::Instant::now() + std::time::Duration::from_millis(300);
+                    while sock.exists() && std::time::Instant::now() < deadline2 {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+
+                    // Last resort: SIGTERM was ignored or the process is
+                    // a zombie whose parent hasn't reaped it yet. Remove
+                    // the socket file ourselves so a fresh daemon can
+                    // bind on the next launch.
+                    if sock.exists() {
+                        let _ = std::fs::remove_file(&sock);
+                    }
+                }
+            });
         }
 
-        // 2. Drop our client handle. Subsequent close_session() calls
-        //    will skip the daemon-kill path entirely (dead socket).
-        self.daemon = None;
-
-        // 3. Close every daemon-backed GUI session. close_session prunes
+        // 2. Close every daemon-backed GUI session. close_session prunes
         //    the tile tree, removes scrollback files, and spawns a fresh
         //    local shell if that was the last workspace. Since
-        //    `self.daemon` is None, its internal daemon.kill() is skipped.
+        //    `self.daemon` is None now, its internal daemon.kill() is
+        //    skipped — the daemon is being torn down anyway.
         let ids: Vec<usize> = self
             .sessions
             .iter()
