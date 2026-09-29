@@ -777,10 +777,24 @@ impl AppState {
                             .all(|ws| ws.leaves().iter().all(|id| session_ids.contains(id)));
                         if layout_valid {
                             let mut max_split = 0usize;
+                            let mut max_ws_id = 0usize;
                             for ws in &ws_list {
                                 collect_max_split_id(&ws.root, &mut max_split);
+                                if ws.id >= max_ws_id {
+                                    max_ws_id = ws.id + 1;
+                                }
                             }
                             self.next_split_id = self.next_split_id.max(max_split + 1);
+                            // Bump next_tab_id above every loaded workspace
+                            // id, not just every daemon session id. On the
+                            // previous run, a workspace could have been
+                            // created with id = next_tab_id (e.g. tile_all),
+                            // so its id may be HIGHER than any session id.
+                            // Without this bump, the next new tab spawns
+                            // with the same id, and their per-tab widget
+                            // ids collide — egui keeps only the newest, so
+                            // the older tab's close button goes dead.
+                            self.next_tab_id = self.next_tab_id.max(max_ws_id);
                             self.workspaces = ws_list;
                             self.active_workspace_idx = 0;
                             if let Some(ws) = self.workspaces.first() {
@@ -894,10 +908,16 @@ impl AppState {
 
                 if layout_valid {
                     let mut max_split = 0usize;
+                    let mut max_ws_id = 0usize;
                     for ws in &ws_list {
                         collect_max_split_id(&ws.root, &mut max_split);
+                        if ws.id >= max_ws_id {
+                            max_ws_id = ws.id + 1;
+                        }
                     }
                     self.next_split_id = self.next_split_id.max(max_split + 1);
+                    // See daemon reattach path above for the reasoning.
+                    self.next_tab_id = self.next_tab_id.max(max_ws_id);
 
                     self.workspaces = ws_list;
                     self.active_workspace_idx = 0;
@@ -1221,6 +1241,8 @@ impl AppState {
         let before_lens: Vec<usize> =
             self.workspaces.iter().map(|w| w.root.leaves().len()).collect();
         let before_count = self.workspaces.len();
+        let before_titles: Vec<String> =
+            self.workspaces.iter().map(|w| w.title.clone()).collect();
 
         for ws in &mut self.workspaces {
             ws.root.prune(&live);
@@ -1232,9 +1254,42 @@ impl AppState {
         }
         self.workspaces.retain(|ws| ws.root.contains_live(&live));
 
+        // Refresh titles to reflect post-prune pane counts. A workspace
+        // whose tree collapsed to a single leaf takes its session's
+        // title; a multi-pane workspace keeps its "Tiled ..." prefix
+        // but gets an accurate pane count. Without this, a tab that was
+        // tiled then had panes closed keeps showing the old count —
+        // e.g. "Tiled (3 Panes)" on a workspace that now has 1 leaf.
+        let session_titles: Vec<(usize, String)> = self
+            .sessions
+            .iter()
+            .map(|s| (s.id, s.title.clone()))
+            .collect();
+        for ws in &mut self.workspaces {
+            let n = ws.root.leaves().len();
+            if n == 1 {
+                let sid = ws.root.first_leaf();
+                if let Some((_, t)) = session_titles.iter().find(|(id, _)| *id == sid) {
+                    ws.title = t.clone();
+                }
+            } else if n > 1 {
+                if ws.title.starts_with("Tiled (") {
+                    ws.title = format!("Tiled ({} Panes)", n);
+                } else if ws.title.starts_with("Tiled Group ") {
+                    if let Some(open) = ws.title.rfind('(') {
+                        ws.title = format!("{} ({} Panes)", ws.title[..open].trim_end(), n);
+                    }
+                }
+            }
+        }
+
         let after_lens: Vec<usize> =
             self.workspaces.iter().map(|w| w.root.leaves().len()).collect();
-        let changed = before_lens != after_lens || before_count != self.workspaces.len();
+        let after_titles: Vec<String> =
+            self.workspaces.iter().map(|w| w.title.clone()).collect();
+        let changed = before_lens != after_lens
+            || before_count != self.workspaces.len()
+            || before_titles != after_titles;
 
         if self.workspaces.is_empty() {
             if self.settings.open_default_tab {
