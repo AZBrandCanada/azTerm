@@ -1109,6 +1109,7 @@ impl AppState {
                 username: profile.username.clone(),
                 identity_file,
                 control_path: Some(control_path),
+                profile_id: Some(profile.id.clone()),
             };
 
             match daemon.new_ssh(
@@ -1434,56 +1435,94 @@ impl AppState {
     }
 
     fn sync_sftp_with_active_session(&mut self) {
+        // TARGET SYNC: when the active session changes, point the SFTP
+        // pane at the matching remote (if it's an SSH session). Runs
+        // BEFORE the path sync so the path sync sees the correct target
+        // on the same frame the tab is clicked.
+        //
+        // Ordering matters: the previous version ran the path sync first,
+        // which updated `last_detected_dir` even though the SFTP target
+        // was still Local. The target sync then reset the pane to its
+        // default path, and the path sync never fired again because
+        // `last_detected_dir` already matched — the pane was stuck at
+        // the default until the user cd'd again.
+        if self.active_view == ActiveView::Terminal
+            && self.last_synced_session_id != Some(self.active_session_id)
+        {
+            self.last_synced_session_id = Some(self.active_session_id);
+
+            // Clone the profile out so we don't hold an immutable borrow
+            // on `self.sessions` while mutating `self.sftp`.
+            let prof_opt: Option<SshProfile> = {
+                let session = self
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == self.active_session_id);
+                match session.map(|s| &s.session_type) {
+                    Some(SessionType::Ssh { profile_id }) => self
+                        .ssh_store
+                        .profiles
+                        .iter()
+                        .find(|p| p.id == *profile_id)
+                        .cloned(),
+                    _ => None,
+                }
+            };
+            if let Some(prof) = prof_opt {
+                let target = SftpTarget::RemoteSsh(prof);
+                if self.sftp.right_pane.target != target {
+                    self.sftp.right_pane.set_target(target);
+                }
+            }
+        }
+
+        // PATH SYNC: follow the active shell's cwd into the SFTP pane.
+        //
+        // `last_detected_dir` is updated ONLY when the path is actually
+        // applied. Otherwise a detection that fired while the target was
+        // still Local (or while a directory listing was in flight)
+        // would be silently swallowed and the next cd would be missed.
         if self.settings.sftp_path_sync {
             if let Some(session) = self.sessions.iter_mut().find(|s| s.id == self.active_session_id) {
                 match &session.session_type {
                     SessionType::Local { .. } => {
                         if self.sftp.left_pane.target == SftpTarget::Local {
                             if let Some(detected_dir) = session.detect_current_working_dir(None) {
-                                if session.last_detected_dir.as_deref() != Some(&detected_dir) {
+                                if session.last_detected_dir.as_deref() != Some(&detected_dir)
+                                    && !self.sftp.left_pane.is_loading
+                                {
                                     session.last_detected_dir = Some(detected_dir.clone());
-                                    if !self.sftp.left_pane.is_loading {
-                                        self.sftp.left_pane.set_path(detected_dir);
-                                    }
+                                    self.sftp.left_pane.set_path(detected_dir);
                                 }
                             }
                         }
                     }
                     SessionType::Ssh { profile_id } => {
                         let profile_id = profile_id.clone();
-                        let prof_opt = self.ssh_store.profiles.iter().find(|p| p.id == profile_id).cloned();
+                        let prof_opt = self
+                            .ssh_store
+                            .profiles
+                            .iter()
+                            .find(|p| p.id == profile_id)
+                            .cloned();
                         if let Some(prof) = prof_opt {
-                            if let Some(detected_dir) = session.detect_current_working_dir(Some(&prof.username)) {
-                                if session.last_detected_dir.as_deref() != Some(&detected_dir) {
+                            if let Some(detected_dir) =
+                                session.detect_current_working_dir(Some(&prof.username))
+                            {
+                                let target_matches = matches!(
+                                    &self.sftp.right_pane.target,
+                                    SftpTarget::RemoteSsh(p) if p.id == prof.id
+                                );
+                                if target_matches
+                                    && !self.sftp.right_pane.is_loading
+                                    && session.last_detected_dir.as_deref()
+                                        != Some(&detected_dir)
+                                {
                                     session.last_detected_dir = Some(detected_dir.clone());
-                                    if let SftpTarget::RemoteSsh(ref current_sftp_prof) = self.sftp.right_pane.target {
-                                        if current_sftp_prof.id == prof.id && !self.sftp.right_pane.is_loading {
-                                            self.sftp.right_pane.set_path(detected_dir);
-                                        }
-                                    }
+                                    self.sftp.right_pane.set_path(detected_dir);
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-
-        if self.active_view != ActiveView::Terminal {
-            return;
-        }
-
-        if self.last_synced_session_id == Some(self.active_session_id) {
-            return;
-        }
-        self.last_synced_session_id = Some(self.active_session_id);
-
-        if let Some(session) = self.sessions.iter().find(|s| s.id == self.active_session_id) {
-            if let SessionType::Ssh { profile_id } = &session.session_type {
-                if let Some(prof) = self.ssh_store.profiles.iter().find(|p| p.id == *profile_id) {
-                    let target = SftpTarget::RemoteSsh(prof.clone());
-                    if self.sftp.right_pane.target != target {
-                        self.sftp.right_pane.set_target(target);
                     }
                 }
             }

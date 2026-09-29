@@ -37,6 +37,11 @@ pub struct SshSpec {
     pub username: String,
     pub identity_file: Option<String>,
     pub control_path: Option<String>,
+    /// SSH profile id this session was launched from. Stored on the
+    /// daemon so the GUI can re-associate live sessions with their
+    /// profile after reattach (SFTP path sync, tab tooltips, etc.).
+    #[serde(default)]
+    pub profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -487,11 +487,21 @@ fn create_ssh(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let master = Arc::new(Mutex::new(pair.master));
 
+    // Prefer the profile id the GUI supplied; fall back to
+    // user@host:port for old clients. The GUI reads this back on
+    // reattach and needs the real profile id (not the connection
+    // string) to re-target SFTP path sync.
+    let target = spec
+        .profile_id
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{}@{}:{}", spec.username, spec.host, spec.port));
+
     spawn_session_workers(
         id,
         title,
         "ssh".into(),
-        format!("{}@{}:{}", spec.username, spec.host, spec.port),
+        target,
         cols,
         rows,
         child_pid,
