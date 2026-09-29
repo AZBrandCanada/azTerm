@@ -240,6 +240,9 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
                 app.dragging_pane_id = Some(id);
                 app.active_session_id = id;
             }
+            PaneAction::LayoutChanged => {
+                app.persist_sessions();
+            }
         }
     }
 

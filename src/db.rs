@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SavedSessionState {
+    #[serde(default)]
+    pub id: usize,
     pub kind: String,
     pub title: String,
     pub target: String,
@@ -52,6 +54,7 @@ impl Database {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS open_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_uid INTEGER NOT NULL DEFAULT 0,
                 tab_order INTEGER NOT NULL,
                 kind TEXT NOT NULL,
                 title TEXT NOT NULL,
@@ -59,6 +62,21 @@ impl Database {
             )",
             [],
         )?;
+
+        // Migration: older DBs lack the session_uid column.
+        let has_session_uid: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('open_sessions') WHERE name = 'session_uid'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if !has_session_uid {
+            let _ = conn.execute(
+                "ALTER TABLE open_sessions ADD COLUMN session_uid INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+        }
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS custom_themes (
@@ -179,8 +197,9 @@ impl Database {
                 let _ = tx.execute("DELETE FROM open_sessions", []);
                 for (idx, s) in sessions.iter().enumerate() {
                     let _ = tx.execute(
-                        "INSERT INTO open_sessions (tab_order, kind, title, target) VALUES (?1, ?2, ?3, ?4)",
-                        params![idx as i32, s.kind, s.title, s.target],
+                        "INSERT INTO open_sessions (session_uid, tab_order, kind, title, target)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![s.id as i64, idx as i32, s.kind, s.title, s.target],
                     );
                 }
                 let _ = tx.commit();
@@ -191,12 +210,16 @@ impl Database {
     pub fn load_sessions() -> Vec<SavedSessionState> {
         let mut list = Vec::new();
         if let Some(conn) = Self::get_connection() {
-            if let Ok(mut stmt) = conn.prepare("SELECT kind, title, target FROM open_sessions ORDER BY tab_order ASC") {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT session_uid, kind, title, target
+                 FROM open_sessions ORDER BY tab_order ASC",
+            ) {
                 if let Ok(rows) = stmt.query_map([], |row| {
                     Ok(SavedSessionState {
-                        kind: row.get(0)?,
-                        title: row.get(1)?,
-                        target: row.get(2)?,
+                        id: row.get::<_, i64>(0).unwrap_or(0) as usize,
+                        kind: row.get(1)?,
+                        title: row.get(2)?,
+                        target: row.get(3)?,
                     })
                 }) {
                     for r in rows.flatten() {

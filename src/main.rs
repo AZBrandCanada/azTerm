@@ -252,6 +252,19 @@ fn handle_window_resize_borders(ctx: &egui::Context, is_maximized: bool) {
     }
 }
 
+fn collect_max_split_id(node: &TileNode, max: &mut usize) {
+    match node {
+        TileNode::Leaf(_) => {}
+        TileNode::Split { id, first, second, .. } => {
+            if *id >= *max {
+                *max = *id + 1;
+            }
+            collect_max_split_id(first, max);
+            collect_max_split_id(second, max);
+        }
+    }
+}
+
 pub struct SshAuthModalState {
     pub profile: SshProfile,
     pub output: Arc<Mutex<String>>,
@@ -659,17 +672,21 @@ impl AppState {
         let saved: Vec<SavedSessionState> = self
             .sessions
             .iter()
-            .map(|s| match &s.session_type {
-                SessionType::Local { working_dir } => SavedSessionState {
-                    kind: "local".to_string(),
+            .map(|s| {
+                let (kind, target) = match &s.session_type {
+                    SessionType::Local { working_dir } => {
+                        ("local".to_string(), working_dir.clone())
+                    }
+                    SessionType::Ssh { profile_id } => {
+                        ("ssh".to_string(), profile_id.clone())
+                    }
+                };
+                SavedSessionState {
+                    id: s.id,
+                    kind,
                     title: s.title.clone(),
-                    target: working_dir.clone(),
-                },
-                SessionType::Ssh { profile_id } => SavedSessionState {
-                    kind: "ssh".to_string(),
-                    title: s.title.clone(),
-                    target: profile_id.clone(),
-                },
+                    target,
+                }
             })
             .collect();
         Database::save_sessions(&saved);
@@ -682,30 +699,109 @@ impl AppState {
             if self.settings.open_default_tab {
                 self.spawn_local_terminal(ctx, None);
             }
-        } else {
-            for item in saved {
-                if item.kind == "ssh" {
-                    if let Some(profile) = self.ssh_store.profiles.iter().find(|p| p.id == item.target) {
-                        let profile_clone = profile.clone();
-                        self.spawn_ssh_terminal(&profile_clone, ctx.clone());
+            return;
+        }
+
+        let saved_ws = Database::load_workspaces();
+
+        // Recreate every session with its ORIGINAL saved ID so the saved
+        // workspace TileNode::Leaf(id) references remain valid.
+        let mut max_id = 0usize;
+        for (idx, item) in saved.iter().enumerate() {
+            // Migration: pre-patch DBs stored session_uid=0 for every row.
+            // Assign sequential IDs in that case.
+            let id = if item.id == 0 { idx + 1 } else { item.id };
+
+            match item.kind.as_str() {
+                "ssh" => {
+                    if let Some(profile) = self
+                        .ssh_store
+                        .profiles
+                        .iter()
+                        .find(|p| p.id == item.target)
+                        .cloned()
+                    {
+                        self.create_ssh_session_with_id(
+                            &profile,
+                            id,
+                            ctx.clone(),
+                            Some(item.title.clone()),
+                        );
                     } else {
-                        self.spawn_local_terminal(ctx.clone(), None);
+                        self.create_local_session_with_id(
+                            id,
+                            ctx.clone(),
+                            None,
+                            Some(item.title.clone()),
+                        );
                     }
-                } else {
-                    let dir = if item.target.is_empty() { None } else { Some(item.target) };
-                    self.spawn_local_terminal(ctx.clone(), dir);
+                }
+                _ => {
+                    let dir = if item.target.is_empty() {
+                        None
+                    } else {
+                        Some(item.target.clone())
+                    };
+                    self.create_local_session_with_id(
+                        id,
+                        ctx.clone(),
+                        dir,
+                        Some(item.title.clone()),
+                    );
                 }
             }
+            if id >= max_id {
+                max_id = id + 1;
+            }
+        }
+        self.next_tab_id = self.next_tab_id.max(max_id);
 
-            if let Some(saved_ws) = Database::load_workspaces() {
-                if !saved_ws.is_empty() {
-                    self.workspaces = saved_ws;
+        // Restore the saved tiling layout, but only if every leaf still maps
+        // to a restored session (guards against deleted SSH profiles and
+        // pre-patch DBs where IDs were never persisted).
+        if let Some(ws_list) = saved_ws {
+            if !ws_list.is_empty() {
+                let session_ids: std::collections::HashSet<usize> =
+                    self.sessions.iter().map(|s| s.id).collect();
+                let layout_valid = ws_list
+                    .iter()
+                    .all(|ws| ws.leaves().iter().all(|id| session_ids.contains(id)));
+
+                if layout_valid {
+                    let mut max_split = 0usize;
+                    for ws in &ws_list {
+                        collect_max_split_id(&ws.root, &mut max_split);
+                    }
+                    self.next_split_id = self.next_split_id.max(max_split + 1);
+
+                    self.workspaces = ws_list;
+                    self.active_workspace_idx = 0;
+                    if let Some(ws) = self.workspaces.first() {
+                        self.active_session_id = ws.root.first_leaf();
+                    }
+                    return;
                 }
             }
         }
+
+        // Fallback: no usable layout — one tab per session.
+        for s in &self.sessions {
+            let ws = WorkspaceTab::new(s.id, s.id, s.title.clone());
+            self.workspaces.push(ws);
+        }
+        self.active_workspace_idx = 0;
+        if let Some(ws) = self.workspaces.first() {
+            self.active_session_id = ws.root.first_leaf();
+        }
     }
 
-    fn create_local_session(&mut self, ctx: egui::Context, custom_dir: Option<String>) -> usize {
+    fn create_local_session_with_id(
+        &mut self,
+        id: usize,
+        ctx: egui::Context,
+        custom_dir: Option<String>,
+        title_override: Option<String>,
+    ) -> usize {
         let shell = if !self.settings.default_shell.trim().is_empty() {
             self.settings.default_shell.clone()
         } else if cfg!(windows) {
@@ -728,11 +824,10 @@ impl AppState {
         });
         c.cwd(&work_dir);
 
-        let id = self.next_tab_id;
-        self.next_tab_id += 1;
+        let title = title_override.unwrap_or_else(|| format!("Local #{}", id));
         let session = TerminalSession::new(
             id,
-            format!("Local #{}", id),
+            title,
             SessionType::Local { working_dir: work_dir },
             c,
             ctx,
@@ -742,17 +837,19 @@ impl AppState {
         id
     }
 
-    pub fn spawn_local_terminal(&mut self, ctx: egui::Context, custom_dir: Option<String>) {
-        let id = self.create_local_session(ctx, custom_dir);
-        let ws = WorkspaceTab::new(id, id, format!("Local #{}", id));
-        self.workspaces.push(ws);
-        self.active_workspace_idx = self.workspaces.len() - 1;
-        self.active_session_id = id;
-        self.active_view = ActiveView::Terminal;
-        self.persist_sessions();
+    fn create_local_session(&mut self, ctx: egui::Context, custom_dir: Option<String>) -> usize {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.create_local_session_with_id(id, ctx, custom_dir, None)
     }
 
-    pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
+    fn create_ssh_session_with_id(
+        &mut self,
+        profile: &SshProfile,
+        id: usize,
+        ctx: egui::Context,
+        title_override: Option<String>,
+    ) {
         // Cleanup can shell out to `ssh -O check` and block for seconds on a
         // dead socket — do it on a worker thread so the UI never freezes.
         let pid_for_cleanup = profile.id.clone();
@@ -765,17 +862,34 @@ impl AppState {
         cmd.env_remove("LINES");
         cmd.env_remove("COLUMNS");
 
-        let id = self.next_tab_id;
-        self.next_tab_id += 1;
+        let title = title_override.unwrap_or_else(|| format!("SSH: {}", profile.name));
         let session = TerminalSession::new(
             id,
-            format!("SSH: {}", profile.name),
+            title,
             SessionType::Ssh { profile_id: profile.id.clone() },
             cmd,
             ctx,
             self.settings.scrollback_lines,
         );
         self.sessions.push(session);
+    }
+
+    pub fn spawn_local_terminal(&mut self, ctx: egui::Context, custom_dir: Option<String>) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.create_local_session_with_id(id, ctx, custom_dir, None);
+        let ws = WorkspaceTab::new(id, id, format!("Local #{}", id));
+        self.workspaces.push(ws);
+        self.active_workspace_idx = self.workspaces.len() - 1;
+        self.active_session_id = id;
+        self.active_view = ActiveView::Terminal;
+        self.persist_sessions();
+    }
+
+    pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        self.create_ssh_session_with_id(profile, id, ctx, None);
 
         let ws = WorkspaceTab::new(id, id, format!("SSH: {}", profile.name));
         self.workspaces.push(ws);
@@ -1214,6 +1328,12 @@ impl eframe::App for AppState {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Flush session/layout state on window-close request so a divider
+        // drag in the same tick as Alt+F4 still persists.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.persist_sessions();
+        }
+
         // Push the current theme into egui's global visuals so all
         // native widgets (Window, TextEdit, ComboBox dropdowns, popup
         // menus, ScrollArea backgrounds) pick up the same color scheme

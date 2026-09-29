@@ -257,6 +257,9 @@ pub enum PaneAction {
     Close(usize),
     Focus(usize),
     StartDrag(usize),
+    /// Emitted once when a divider drag finishes, so the caller can
+    /// persist the new ratio to the DB.
+    LayoutChanged,
 }
 
 pub fn render_tile_tree(
@@ -344,6 +347,18 @@ pub fn render_tile_tree(
                             }
                         }
                     }
+                    // Persist the new ratio when the drag ends.
+                    {
+                        let drag_key = div_id.with("was_dragging");
+                        let was_dragging: bool =
+                            ui.memory(|m| m.data.get_temp(drag_key).unwrap_or(false));
+                        if div_resp.dragged() {
+                            ui.memory_mut(|m| m.data.insert_temp(drag_key, true));
+                        } else if was_dragging {
+                            ui.memory_mut(|m| m.data.insert_temp(drag_key, false));
+                            actions.push(PaneAction::LayoutChanged);
+                        }
+                    }
                     let div_color = if div_resp.dragged() {
                         theme.accent_color()
                     } else if div_resp.hovered() {
@@ -382,6 +397,18 @@ pub fn render_tile_tree(
                             if !new_r.is_nan() {
                                 *ratio = new_r;
                             }
+                        }
+                    }
+                    // Persist the new ratio when the drag ends.
+                    {
+                        let drag_key = div_id.with("was_dragging");
+                        let was_dragging: bool =
+                            ui.memory(|m| m.data.get_temp(drag_key).unwrap_or(false));
+                        if div_resp.dragged() {
+                            ui.memory_mut(|m| m.data.insert_temp(drag_key, true));
+                        } else if was_dragging {
+                            ui.memory_mut(|m| m.data.insert_temp(drag_key, false));
+                            actions.push(PaneAction::LayoutChanged);
                         }
                     }
                     let div_color = if div_resp.dragged() {
