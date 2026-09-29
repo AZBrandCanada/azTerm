@@ -960,6 +960,59 @@ impl AppState {
             std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
         };
 
+        let work_dir = custom_dir.unwrap_or_else(|| {
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        });
+
+        let title = title_override.unwrap_or_else(|| format!("Local #{}", id));
+
+        // DAEMON PATH: when a daemon is running, create the shell there
+        // so it survives window close / app restart. The ID is passed
+        // through unchanged so saved layouts still match.
+        //
+        // This path is what makes restore-after-reboot work. After a
+        // reboot the daemon is empty (it died with the OS), but a fresh
+        // one has just been spawned. Without this check, restore fell
+        // straight through to the in-process path and recovered tabs
+        // were never daemon-backed — so they could not be recovered a
+        // second time.
+        //
+        // Also covers split_active_pane, which used to always produce
+        // in-process sessions regardless of the daemon setting.
+        let daemon_opt = self.daemon.clone();
+        if let Some(ref daemon) = daemon_opt {
+            if daemon
+                .new_local(
+                    id as u64,
+                    &title,
+                    Some(&work_dir),
+                    &shell,
+                    daemon::DEFAULT_COLS,
+                    daemon::DEFAULT_ROWS,
+                )
+                .is_ok()
+            {
+                let session_type = SessionType::Local {
+                    working_dir: work_dir.clone(),
+                };
+                if let Some(s) = TerminalSession::new_daemon(
+                    id,
+                    title.clone(),
+                    session_type,
+                    daemon.clone(),
+                    ctx.clone(),
+                    self.settings.scrollback_lines,
+                    daemon::DEFAULT_COLS,
+                    daemon::DEFAULT_ROWS,
+                ) {
+                    self.sessions.push(s);
+                    return id;
+                }
+            }
+            // Daemon refused. Fall through to in-process so the user
+            // still gets a working shell rather than a silent failure.
+        }
+
         let mut c = CommandBuilder::new(shell);
         c.env("TERM", "xterm-256color");
         c.env("COLORTERM", "truecolor");
@@ -969,12 +1022,8 @@ impl AppState {
         let lang = std::env::var("LANG").unwrap_or_else(|_| "en_US.UTF-8".to_string());
         c.env("LANG", lang);
 
-        let work_dir = custom_dir.unwrap_or_else(|| {
-            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-        });
         c.cwd(&work_dir);
 
-        let title = title_override.unwrap_or_else(|| format!("Local #{}", id));
         let session = TerminalSession::new(
             id,
             title,
@@ -1007,12 +1056,84 @@ impl AppState {
             SshStore::cleanup_stale_socket(&pid_for_cleanup);
         });
 
+        let title = title_override.unwrap_or_else(|| format!("SSH: {}", profile.name));
+
+        // DAEMON PATH: mirror spawn_ssh_terminal's setup so restored SSH
+        // tabs are daemon-backed and survive close / restart. Without
+        // this, recovered SSH sessions were in-process and could not be
+        // recovered a second time.
+        let daemon_opt = self.daemon.clone();
+        if let Some(ref daemon) = daemon_opt {
+            let identity_file = match &profile.auth_type {
+                ssh::SshAuthType::KeyFile(p) => {
+                    if p.trim().is_empty() {
+                        None
+                    } else {
+                        SshStore::ensure_secure_permissions(p);
+                        Some(p.clone())
+                    }
+                }
+                ssh::SshAuthType::PastedKey { key_id } => {
+                    let kp = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                    if kp.exists() {
+                        let s = kp.to_string_lossy().to_string();
+                        SshStore::ensure_secure_permissions(&s);
+                        Some(s)
+                    } else {
+                        None
+                    }
+                }
+                ssh::SshAuthType::PasswordOrAgent => None,
+            };
+            let control_path = SshStore::sockets_dir()
+                .join(format!("{}.sock", profile.id))
+                .to_string_lossy()
+                .to_string();
+
+            let spec = daemon::SshSpec {
+                host: profile.host.clone(),
+                port: profile.port,
+                username: profile.username.clone(),
+                identity_file,
+                control_path: Some(control_path),
+                profile_id: Some(profile.id.clone()),
+            };
+
+            if daemon
+                .new_ssh(
+                    id as u64,
+                    &title,
+                    spec,
+                    daemon::DEFAULT_COLS,
+                    daemon::DEFAULT_ROWS,
+                )
+                .is_ok()
+            {
+                let session_type = SessionType::Ssh {
+                    profile_id: profile.id.clone(),
+                };
+                if let Some(s) = TerminalSession::new_daemon(
+                    id,
+                    title.clone(),
+                    session_type,
+                    daemon.clone(),
+                    ctx.clone(),
+                    self.settings.scrollback_lines,
+                    daemon::DEFAULT_COLS,
+                    daemon::DEFAULT_ROWS,
+                ) {
+                    self.sessions.push(s);
+                    return;
+                }
+            }
+            // Daemon refused. Fall through to in-process.
+        }
+
         let mut cmd = profile.to_command();
         cmd.env("COLORTERM", "truecolor");
         cmd.env_remove("LINES");
         cmd.env_remove("COLUMNS");
 
-        let title = title_override.unwrap_or_else(|| format!("SSH: {}", profile.name));
         let session = TerminalSession::new(
             id,
             title,
