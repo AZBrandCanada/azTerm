@@ -534,6 +534,13 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             ui.label(egui::RichText::new("Configure mouse behavior, clipboard actions, and scrollback depth.").small().color(app.theme.text_muted_color()));
                             ui.add_space(12.0);
 
+                            changed |= setting_row_toggle(
+                                ui,
+                                "Keep Sessions Running in Background",
+                                "Runs shells, SSH, and long-running commands in a background daemon so they survive closing the AZTerm window. Disable to run sessions entirely inside the GUI process (changes take effect on next launch).",
+                                &mut app.settings.use_daemon,
+                                &app.theme,
+                            );
                             changed |= setting_row_toggle(ui, "Cursor Blink", "Animate cursor blinking in the active terminal buffer.", &mut app.settings.cursor_blink, &app.theme);
                             changed |= setting_row_toggle(ui, "Copy Selected Text on Select", "Automatically copy highlighted text to OS clipboard on drag release.", &mut app.settings.copy_on_select, &app.theme);
                             changed |= setting_row_toggle(ui, "Paste on Right Click", "Immediately write clipboard text into the terminal on right click.", &mut app.settings.paste_on_right_click, &app.theme);

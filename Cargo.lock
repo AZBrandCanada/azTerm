@@ -449,6 +449,7 @@ dependencies = [
  "arboard",
  "chrono",
  "eframe",
+ "libc",
  "portable-pty",
  "rusqlite",
  "serde",

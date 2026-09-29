@@ -128,6 +128,17 @@ pub struct AppSettings {
     /// Point size for terminal text.
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: f32,
+
+    /// When true, PTYs are owned by a background azterm-daemon process
+    /// so shells and SSH connections survive window closes. When false,
+    /// sessions live entirely in the GUI process (the pre-daemon
+    /// behavior). Toggling requires an app restart to take effect.
+    #[serde(default = "default_true")]
+    pub use_daemon: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_terminal_font_size() -> f32 {
@@ -181,6 +192,7 @@ impl Default for AppSettings {
             ui_font_path: String::new(),
             terminal_font_path: String::new(),
             terminal_font_size: 13.5,
+            use_daemon: true,
         }
     }
 }

@@ -187,7 +187,12 @@ pub struct TerminalSession {
     /// Channel to the dedicated pty-writer thread. Kept pub for parity with
     /// the old `writer` field; callers should use send_input/send_paste.
     pub writer_tx: SyncSender<WriterMsg>,
-    pub master_pty: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Local PTY master handle. None in daemon mode (the daemon owns the
+    /// real PTY; the GUI only sees a byte stream).
+    pub master_pty: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
+    /// Daemon-mode resize sink. Some when this session is daemon-backed.
+    /// Resize events are forwarded over IPC instead of hitting a local PTY.
+    pub daemon_resize_tx: Option<SyncSender<(u16, u16)>>,
     pub child_pid: Option<u32>,
     pub current_dir: Option<String>,
     pub last_detected_dir: Option<String>,
@@ -308,7 +313,8 @@ impl TerminalSession {
             parser: vt100::Parser::new(rows, cols, scrollback_len.max(1000)),
             rx,
             writer_tx,
-            master_pty,
+            master_pty: Some(master_pty),
+            daemon_resize_tx: None,
             child_pid,
             current_dir: initial_dir.clone(),
             last_detected_dir: initial_dir,
@@ -327,6 +333,106 @@ impl TerminalSession {
             history_buf: Vec::new(),
             history_dirty: false,
         }
+    }
+
+    /// True if this session's PTY lives in the azterm-daemon process.
+    pub fn is_daemon(&self) -> bool {
+        self.daemon_resize_tx.is_some()
+    }
+
+    /// Build a TerminalSession that reads from and writes to the daemon
+    /// instead of owning a local PTY. Returns None if the attach handshake
+    /// fails (daemon died, session was killed between List and Attach).
+    pub fn new_daemon(
+        id: usize,
+        title: String,
+        session_type: SessionType,
+        daemon: Arc<crate::daemon_client::DaemonClient>,
+        ctx: egui::Context,
+        scrollback_len: usize,
+        initial_cols: u16,
+        initial_rows: u16,
+    ) -> Option<Self> {
+        let attach = match daemon.attach(id as u64, initial_cols, initial_rows) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("[terminal] daemon attach failed for id={}: {}", id, e);
+                return None;
+            }
+        };
+
+        let rows = initial_rows;
+        let cols = initial_cols;
+
+        let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(512);
+
+        {
+            let tx = tx.clone();
+            let out_rx = attach.out_rx;
+            let ctx2 = ctx.clone();
+            thread::spawn(move || {
+                while let Ok(bytes) = out_rx.recv() {
+                    if bytes.is_empty() {
+                        // EOF sentinel from client reader.
+                        break;
+                    }
+                    if tx.send(bytes).is_err() {
+                        break;
+                    }
+                    ctx2.request_repaint();
+                }
+            });
+        }
+
+        let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) =
+            sync_channel(4096);
+        {
+            let in_tx = attach.in_tx;
+            thread::spawn(move || {
+                while let Ok(msg) = writer_rx.recv() {
+                    match msg {
+                        WriterMsg::Data(bytes) => {
+                            if in_tx.send(bytes).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let initial_dir = match &session_type {
+            SessionType::Local { working_dir } => Some(working_dir.clone()),
+            SessionType::Ssh { .. } => None,
+        };
+
+        Some(Self {
+            id,
+            title,
+            session_type,
+            parser: vt100::Parser::new(rows, cols, scrollback_len.max(1000)),
+            rx,
+            writer_tx,
+            master_pty: None,
+            daemon_resize_tx: Some(attach.resize_tx),
+            child_pid: None,
+            current_dir: initial_dir.clone(),
+            last_detected_dir: initial_dir,
+            rows,
+            cols,
+            scroll_offset: 0,
+            max_scroll: 0,
+            scrollback_limit: scrollback_len.max(1000),
+            selection_start: None,
+            selection_end: None,
+            is_dragging_selection: false,
+            alt_drag_page_cooldown: None,
+            tui_drag_frames: Vec::new(),
+            tui_drag_last_snapshot: Vec::new(),
+            tui_drag_direction: None,
+            history_buf: Vec::new(),
+            history_dirty: false,
+        })
     }
 
     pub fn detect_current_working_dir(&self, ssh_user: Option<&str>) -> Option<String> {
@@ -1224,13 +1330,17 @@ impl TerminalSession {
                 self.parser.process(b"\x1b[2J\x1b[H");
             }
 
-            if let Ok(master) = self.master_pty.lock() {
-                let _ = master.resize(PtySize {
-                    rows: new_rows,
-                    cols: new_cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
+            if let Some(tx) = &self.daemon_resize_tx {
+                let _ = tx.try_send((new_cols, new_rows));
+            } else if let Some(master) = &self.master_pty {
+                if let Ok(m) = master.lock() {
+                    let _ = m.resize(PtySize {
+                        rows: new_rows,
+                        cols: new_cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
             }
 
             crate::dbg_log!(

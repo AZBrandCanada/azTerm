@@ -1,4 +1,7 @@
 // src/main.rs
+mod daemon;
+mod daemon_client;
+mod daemon_server;
 mod db;
 mod debug_log;
 mod fonts;
@@ -11,6 +14,7 @@ mod theme;
 mod tiling;
 mod ui;
 
+use daemon_client::DaemonClient;
 use db::{Database, SavedSessionState};
 use eframe::egui;
 use portable_pty::CommandBuilder;
@@ -299,6 +303,10 @@ pub struct AppState {
     pub custom_themes: Vec<ThemeConfig>,
     pub new_theme_name: String,
 
+    /// Daemon client when use_daemon is enabled and the daemon is
+    /// reachable. When None, sessions live in-process (legacy path).
+    pub daemon: Option<Arc<DaemonClient>>,
+
     pub toast_message: Option<(String, std::time::Instant)>,
     /// Set whenever a view / tab / settings category changes so the
     /// update() pass knows to play a short fade + sweep. Cleared
@@ -375,6 +383,15 @@ impl AppState {
         let applied_ui_font_init = settings.ui_font_path.clone();
         let applied_terminal_font_init = settings.terminal_font_path.clone();
 
+        // Daemon: if enabled, ensure a background process is running
+        // and connect to it. Falls back to in-process mode cleanly if
+        // the daemon binary is missing or fails to start.
+        let daemon = if settings.use_daemon {
+            daemon_client::ensure_daemon_running().map(Arc::new)
+        } else {
+            None
+        };
+
         let current_version = env!("CARGO_PKG_VERSION");
         let initial_available_update = if let Some(ref tag) = settings.pending_update {
             if is_newer_version(tag, current_version) {
@@ -412,6 +429,7 @@ impl AppState {
             custom_themes,
             new_theme_name: "Custom Theme".to_string(),
 
+            daemon,
             toast_message: None,
             last_transition: None,
             last_heartbeat: std::time::Instant::now(),
@@ -694,7 +712,14 @@ impl AppState {
 
         // Persist terminal scrollback for any session whose output has
         // changed since the last save. Idle sessions cost nothing.
+        // Daemon-backed sessions are skipped: their scrollback lives in
+        // the daemon's replay buffer and is streamed on attach, so
+        // writing it to disk too would produce duplicates on restart.
         for s in self.sessions.iter_mut() {
+            if s.is_daemon() {
+                s.history_dirty = false;
+                continue;
+            }
             if s.history_dirty {
                 Database::save_scrollback(s.id, &s.history_buf);
                 s.history_dirty = false;
@@ -703,6 +728,80 @@ impl AppState {
     }
 
     fn restore_saved_sessions(&mut self, ctx: egui::Context) {
+        // Daemon path first: if the daemon already owns live sessions
+        // from a previous run, reattach to them instead of spawning new
+        // ones. Their IDs are preserved so saved layouts still match.
+        if let Some(ref daemon) = self.daemon {
+            let live = daemon.list();
+            if !live.is_empty() {
+                let saved_ws = Database::load_workspaces();
+                for info in &live {
+                    let id = info.id as usize;
+                    let session_type = if info.kind == "ssh" {
+                        SessionType::Ssh {
+                            profile_id: info.target.clone(),
+                        }
+                    } else {
+                        SessionType::Local {
+                            working_dir: info.target.clone(),
+                        }
+                    };
+                    if let Some(s) = TerminalSession::new_daemon(
+                        id,
+                        info.title.clone(),
+                        session_type,
+                        daemon.clone(),
+                        ctx.clone(),
+                        self.settings.scrollback_lines,
+                        info.cols,
+                        info.rows,
+                    ) {
+                        self.sessions.push(s);
+                        if id >= self.next_tab_id {
+                            self.next_tab_id = id + 1;
+                        }
+                    }
+                }
+
+                // Reattach saved layout if every leaf maps to a live session.
+                if let Some(ws_list) = saved_ws {
+                    if !ws_list.is_empty() {
+                        let session_ids: std::collections::HashSet<usize> =
+                            self.sessions.iter().map(|s| s.id).collect();
+                        let layout_valid = ws_list
+                            .iter()
+                            .all(|ws| ws.leaves().iter().all(|id| session_ids.contains(id)));
+                        if layout_valid {
+                            let mut max_split = 0usize;
+                            for ws in &ws_list {
+                                collect_max_split_id(&ws.root, &mut max_split);
+                            }
+                            self.next_split_id = self.next_split_id.max(max_split + 1);
+                            self.workspaces = ws_list;
+                            self.active_workspace_idx = 0;
+                            if let Some(ws) = self.workspaces.first() {
+                                self.active_session_id = ws.root.first_leaf();
+                            }
+                            self.active_view = ActiveView::Terminal;
+                            return;
+                        }
+                    }
+                }
+
+                // Fallback: one tab per reattached session.
+                for s in &self.sessions {
+                    let ws = WorkspaceTab::new(s.id, s.id, s.title.clone());
+                    self.workspaces.push(ws);
+                }
+                self.active_workspace_idx = 0;
+                if let Some(ws) = self.workspaces.first() {
+                    self.active_session_id = ws.root.first_leaf();
+                }
+                self.active_view = ActiveView::Terminal;
+                return;
+            }
+        }
+
         let saved = Database::load_sessions();
         if saved.is_empty() {
             if self.settings.open_default_tab {
@@ -770,6 +869,9 @@ impl AppState {
         // bytes are drained from the channel, so ordering is guaranteed:
         // history first, then the fresh prompt on top of a cleared pane.
         for s in &mut self.sessions {
+            if s.is_daemon() {
+                continue;
+            }
             if let Some(bytes) = Database::load_scrollback(s.id) {
                 s.feed_restore_history(&bytes);
             }
@@ -896,6 +998,64 @@ impl AppState {
     pub fn spawn_local_terminal(&mut self, ctx: egui::Context, custom_dir: Option<String>) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
+
+        if let Some(ref daemon) = self.daemon {
+            let shell = if !self.settings.default_shell.trim().is_empty() {
+                self.settings.default_shell.clone()
+            } else if cfg!(windows) {
+                "powershell.exe".to_string()
+            } else {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+            };
+            let title = format!("Local #{}", id);
+            let work_dir = custom_dir
+                .clone()
+                .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+
+            match daemon.new_local(
+                id as u64,
+                &title,
+                Some(&work_dir),
+                &shell,
+                daemon::DEFAULT_COLS,
+                daemon::DEFAULT_ROWS,
+            ) {
+                Ok(()) => {
+                    let session_type = SessionType::Local {
+                        working_dir: work_dir,
+                    };
+                    match TerminalSession::new_daemon(
+                        id,
+                        title.clone(),
+                        session_type,
+                        daemon.clone(),
+                        ctx.clone(),
+                        self.settings.scrollback_lines,
+                        daemon::DEFAULT_COLS,
+                        daemon::DEFAULT_ROWS,
+                    ) {
+                        Some(s) => {
+                            self.sessions.push(s);
+                            let ws = WorkspaceTab::new(id, id, title);
+                            self.workspaces.push(ws);
+                            self.active_workspace_idx = self.workspaces.len() - 1;
+                            self.active_session_id = id;
+                            self.active_view = ActiveView::Terminal;
+                            self.persist_sessions();
+                        }
+                        None => {
+                            self.set_toast("Failed to attach to daemon session");
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.set_toast(format!("Daemon refused session: {}", e));
+                }
+            }
+            return;
+        }
+
+        // Legacy in-process path.
         self.create_local_session_with_id(id, ctx, custom_dir, None);
         let ws = WorkspaceTab::new(id, id, format!("Local #{}", id));
         self.workspaces.push(ws);
@@ -908,15 +1068,102 @@ impl AppState {
     pub fn spawn_ssh_terminal(&mut self, profile: &SshProfile, ctx: egui::Context) {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
+        let title = format!("SSH: {}", profile.name);
+
+        if let Some(ref daemon) = self.daemon {
+            // Resolve identity-file + control-path on the GUI side so the
+            // daemon doesn't need to know about SshStore.
+            let identity_file = match &profile.auth_type {
+                ssh::SshAuthType::KeyFile(p) => {
+                    if p.trim().is_empty() {
+                        None
+                    } else {
+                        SshStore::ensure_secure_permissions(p);
+                        Some(p.clone())
+                    }
+                }
+                ssh::SshAuthType::PastedKey { key_id } => {
+                    let kp = SshStore::keys_dir().join(format!("{}.pem", key_id));
+                    if kp.exists() {
+                        let s = kp.to_string_lossy().to_string();
+                        SshStore::ensure_secure_permissions(&s);
+                        Some(s)
+                    } else {
+                        None
+                    }
+                }
+                ssh::SshAuthType::PasswordOrAgent => None,
+            };
+            let control_path = SshStore::sockets_dir()
+                .join(format!("{}.sock", profile.id))
+                .to_string_lossy()
+                .to_string();
+
+            let spec = daemon::SshSpec {
+                host: profile.host.clone(),
+                port: profile.port,
+                username: profile.username.clone(),
+                identity_file,
+                control_path: Some(control_path),
+            };
+
+            match daemon.new_ssh(
+                id as u64,
+                &title,
+                spec,
+                daemon::DEFAULT_COLS,
+                daemon::DEFAULT_ROWS,
+            ) {
+                Ok(()) => {
+                    let session_type = SessionType::Ssh {
+                        profile_id: profile.id.clone(),
+                    };
+                    match TerminalSession::new_daemon(
+                        id,
+                        title.clone(),
+                        session_type,
+                        daemon.clone(),
+                        ctx.clone(),
+                        self.settings.scrollback_lines,
+                        daemon::DEFAULT_COLS,
+                        daemon::DEFAULT_ROWS,
+                    ) {
+                        Some(s) => {
+                            self.sessions.push(s);
+                            let ws = WorkspaceTab::new(id, id, title);
+                            self.workspaces.push(ws);
+                            self.active_workspace_idx = self.workspaces.len() - 1;
+                            self.active_session_id = id;
+                            self.active_view = ActiveView::Terminal;
+                            self.sftp
+                                .right_pane
+                                .set_target(SftpTarget::RemoteSsh(profile.clone()));
+                            self.persist_sessions();
+                        }
+                        None => {
+                            self.set_toast("Failed to attach to daemon session");
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.set_toast(format!("Daemon refused SSH session: {}", e));
+                }
+            }
+            return;
+        }
+
+        // Legacy in-process path.
         self.create_ssh_session_with_id(profile, id, ctx, None);
 
-        let ws = WorkspaceTab::new(id, id, format!("SSH: {}", profile.name));
+        let ws = WorkspaceTab::new(id, id, title);
         self.workspaces.push(ws);
         self.active_workspace_idx = self.workspaces.len() - 1;
         self.active_session_id = id;
         self.active_view = ActiveView::Terminal;
 
-        self.sftp.right_pane.set_target(SftpTarget::RemoteSsh(profile.clone()));
+        self.sftp
+            .right_pane
+            .set_target(SftpTarget::RemoteSsh(profile.clone()));
         self.persist_sessions();
     }
 
@@ -969,6 +1216,20 @@ impl AppState {
                         SshStore::cleanup_stale_socket(&pid);
                     });
                 }
+            }
+        }
+
+        // If this session was daemon-backed, tell the daemon to tear
+        // down the PTY and kill the child process.
+        if let Some(ref daemon) = self.daemon {
+            let was_daemon = self
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .map(|s| s.is_daemon())
+                .unwrap_or(false);
+            if was_daemon {
+                daemon.kill(session_id as u64);
             }
         }
 
@@ -1520,6 +1781,16 @@ impl eframe::App for AppState {
 }
 
 fn main() -> eframe::Result<()> {
+    // Single-binary daemon: when we re-exec ourselves with --daemon we
+    // take the daemon path before any GUI startup work (settings load,
+    // panic hook, argument parsing). This is what makes the install
+    // story one file — the same azterm binary is both the GUI and the
+    // background process it spawns.
+    if std::env::args().nth(1).as_deref() == Some("--daemon") {
+        daemon_server::run();
+        return Ok(());
+    }
+
     let cli_opts = parse_cli_arguments();
     let initial_settings = AppSettings::load();
 
