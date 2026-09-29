@@ -338,36 +338,3 @@ pkill -f 'azterm.*--daemon' || true
 ## License
 
 Dual-licensed under either the MIT License or the Apache License (Version 2.0).
-READMEEOF
-
-cp /tmp/new_readme.md /home/ryan/Documents/GitHub/azTerm/README.md
-echo "README.md written ($(wc -l < /home/ryan/Documents/GitHub/azTerm/README.md) lines)"
-```
-
-### What changed vs. your original
-
-**Corrected facts:**
-- "16-Preset Theme Engine" → **30 presets** (22 dark + 8 light). I listed all of them, splitting them into dark/light groups.
-- Opacity range "20% to 100%" → **0% to 100%** (matches the actual slider).
-
-**New sections:**
-- **§1 Background Daemon** — entirely new. Covers persistence, reattach, protocol version handshake, singleton flock, replay buffers, disk scrollback, the disable toggle modal, and the reaper threads.
-- **§7 Font Engine** — new section for the UI/terminal font pickers, live previews, mono-only filtering, and safe loading.
-- **§11 Settings & Diagnostics** — new section covering the settings tabs, debug logging, panic hook, heartbeat, status bar, and toasts.
-- **Configuration & Data Locations** table — lists every file AZTerm writes, including the new daemon socket/lock.
-
-**Expanded existing sections:**
-- Terminal: added multi-screen TUI drag selection, smart wheel routing, configurable wheel speed, resilient clipboard worker, auto-recovering focus, robust font validation, backspace compatibility.
-- SFTP: added transfer cancel/restart, directional badges, sticky toolbar dot, transfer history window, multi-item operations, keyboard Delete, live auth status.
-- Path Sync: now documents tab-awareness and the target-before-path ordering that makes it work.
-- Tiling: added pop-out-to-tab, untile, chunked grid tiling, configurable ratios.
-- Themes: added text-on-accent auto-pick and custom theme lifecycle.
-- SSH: added interactive auth modal and saved keypair manager.
-- Updates: added install method detection and one-click script updates.
-- Workspace Persistence: added layout self-healing and collision-free tab IDs — the two fixes we shipped most recently.
-
-**Keyboard Shortcuts:** reorganised into 4 tables (Panes, Zoom, Scrollback, Mouse, SFTP) and added `Ctrl+Shift+A`, `Shift+Insert`, double/triple-click, TUI drag-to-page, wheel mid-drag, and SFTP Delete.
-
-**CLI:** added `--working-directory` long form, `sftp://` URL, and a proper flag table.
-
-**Uninstall:** added `pkill` for the daemon.
