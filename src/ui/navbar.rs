@@ -478,21 +478,18 @@ pub fn render_tabs_bar(app: &mut AppState, ctx: &egui::Context) {
                 }
 
                 if let Some(i) = tab_to_close {
+                    // Route each leaf through close_session so the daemon
+                    // is told to kill the PTY, scrollback files are
+                    // removed, and the tile tree is updated. Then
+                    // reconcile to drop any leaves that had already died
+                    // on their own (daemon exit, PTY closed).
                     let leaves = app.workspaces[i].leaves();
                     for leaf_id in leaves {
-                        app.sessions.retain(|s| s.id != leaf_id);
-                    }
-                    app.workspaces.remove(i);
-                    if app.workspaces.is_empty() {
-                        app.spawn_local_terminal(ctx.clone(), None);
-                    } else {
-                        if app.active_workspace_idx >= app.workspaces.len() {
-                            app.active_workspace_idx = app.workspaces.len() - 1;
-                        }
-                        if let Some(ws) = app.workspaces.get(app.active_workspace_idx) {
-                            app.active_session_id = ws.root.first_leaf();
+                        if app.sessions.iter().any(|s| s.id == leaf_id) {
+                            app.close_session(leaf_id, ctx.clone());
                         }
                     }
+                    app.reconcile_workspaces(ctx.clone());
                     app.persist_sessions();
                 }
             });

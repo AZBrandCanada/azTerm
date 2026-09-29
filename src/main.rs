@@ -1208,6 +1208,51 @@ impl AppState {
         }
     }
 
+    /// Self-heal the workspace tree: drop leaves whose sessions no
+    /// longer exist (daemon death, PTY exit, race during close),
+    /// collapse single-child splits, drop empty workspaces, fix
+    /// active indices, and spawn a fresh shell if the user has
+    /// nothing left. Cheap; safe to call every frame.
+    pub fn reconcile_workspaces(&mut self, ctx: egui::Context) -> bool {
+        let live: std::collections::HashSet<usize> =
+            self.sessions.iter().map(|s| s.id).collect();
+
+        let before_lens: Vec<usize> =
+            self.workspaces.iter().map(|w| w.root.leaves().len()).collect();
+        let before_count = self.workspaces.len();
+
+        for ws in &mut self.workspaces {
+            ws.root.prune(&live);
+            if let Some(m) = ws.maximized_session {
+                if !live.contains(&m) {
+                    ws.maximized_session = None;
+                }
+            }
+        }
+        self.workspaces.retain(|ws| ws.root.contains_live(&live));
+
+        let after_lens: Vec<usize> =
+            self.workspaces.iter().map(|w| w.root.leaves().len()).collect();
+        let changed = before_lens != after_lens || before_count != self.workspaces.len();
+
+        if self.workspaces.is_empty() {
+            if self.settings.open_default_tab {
+                self.spawn_local_terminal(ctx, None);
+            }
+            return true;
+        }
+
+        if self.active_workspace_idx >= self.workspaces.len() {
+            self.active_workspace_idx = self.workspaces.len() - 1;
+        }
+        let cur = &self.workspaces[self.active_workspace_idx];
+        if !cur.root.leaves().contains(&self.active_session_id) {
+            self.active_session_id = cur.root.first_leaf();
+        }
+
+        changed
+    }
+
     pub fn close_session(&mut self, session_id: usize, ctx: egui::Context) {
         if let Some(s) = self.sessions.iter().find(|s| s.id == session_id) {
             if let SessionType::Ssh { profile_id } = &s.session_type {
@@ -1713,6 +1758,15 @@ impl eframe::App for AppState {
 
         for s in &mut self.sessions {
             s.poll_updates();
+        }
+
+        // Reconcile every frame: catches daemon deaths, PTY exits, and
+        // any drift where a workspace still lists a leaf whose session
+        // has been dropped. Fixes stale "(N Panes)" tab labels and the
+        // "can't close tab" symptom that comes from a tree with
+        // phantom leaves.
+        if self.reconcile_workspaces(ctx.clone()) {
+            self.persist_sessions();
         }
 
         if let Some(ref rx) = self.update_rx {

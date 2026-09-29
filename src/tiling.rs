@@ -106,6 +106,36 @@ impl TileNode {
         self.split_leaf_with_node(target_id, TileNode::Leaf(new_session_id), dir, insert_after, split_id)
     }
 
+    /// Does any leaf in this subtree refer to a live session?
+    pub fn contains_live(&self, live: &std::collections::HashSet<usize>) -> bool {
+        match self {
+            TileNode::Leaf(id) => live.contains(id),
+            TileNode::Split { first, second, .. } => {
+                first.contains_live(live) || second.contains_live(live)
+            }
+        }
+    }
+
+    /// Remove leaves that don't refer to a live session, collapsing
+    /// single-child splits left behind. If the whole subtree is dead
+    /// it is left intact — the caller detects that via contains_live
+    /// and drops the workspace.
+    pub fn prune(&mut self, live: &std::collections::HashSet<usize>) {
+        if let TileNode::Split { first, second, .. } = self {
+            first.prune(live);
+            second.prune(live);
+            let fd = !first.contains_live(live);
+            let sd = !second.contains_live(live);
+            if fd && sd {
+                // Both dead. Leave as-is; workspace filter drops us.
+            } else if fd {
+                *self = *second.clone();
+            } else if sd {
+                *self = *first.clone();
+            }
+        }
+    }
+
     pub fn remove_leaf(&mut self, target_id: usize) -> bool {
         match self {
             TileNode::Leaf(_) => false,
