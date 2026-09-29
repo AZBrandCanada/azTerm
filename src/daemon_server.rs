@@ -411,6 +411,17 @@ fn create_local(
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let child_pid = child.process_id();
 
+    // Reaper thread: portable-pty's Child handle must be wait()ed on,
+    // or the kernel keeps a zombie entry for every shell/SSH the
+    // daemon has ever spawned. We hand the handle to a thread that
+    // blocks until the child exits — whether that's a normal shell
+    // exit, EOF on the PTY, or SIGHUP from DaemonSession::kill_child
+    // — then reaps it.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let master = Arc::new(Mutex::new(pair.master));
@@ -482,6 +493,17 @@ fn create_ssh(
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let child_pid = child.process_id();
+
+    // Reaper thread: portable-pty's Child handle must be wait()ed on,
+    // or the kernel keeps a zombie entry for every shell/SSH the
+    // daemon has ever spawned. We hand the handle to a thread that
+    // blocks until the child exits — whether that's a normal shell
+    // exit, EOF on the PTY, or SIGHUP from DaemonSession::kill_child
+    // — then reaps it.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
