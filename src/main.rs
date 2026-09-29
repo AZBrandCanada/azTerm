@@ -330,6 +330,10 @@ pub struct AppState {
     pub update_rx: Option<Receiver<UpdateCheckResult>>,
     pub is_checking_update: bool,
     pub show_update_modal: bool,
+    /// Set when the user toggles off "Keep Sessions Running in
+    /// Background" while daemon-backed sessions exist. Renders a
+    /// confirmation modal; confirming calls `disable_daemon()`.
+    pub show_disable_daemon_modal: bool,
     pub install_method: InstallMethod,
 
     pub show_profile_modal: bool,
@@ -443,6 +447,7 @@ impl AppState {
             update_rx: None,
             is_checking_update: false,
             show_update_modal: false,
+            show_disable_daemon_modal: false,
             install_method,
 
             show_profile_modal: false,
@@ -1584,6 +1589,39 @@ impl AppState {
         }
     }
 
+    /// Turn off the background daemon at runtime. Kills every session
+    /// the daemon owns, exits the daemon process, and drops our client
+    /// handle. After this call, new sessions spawn in-process via the
+    /// legacy path. Used by the "Keep Sessions Running in Background"
+    /// toggle in Settings → Terminal Interaction.
+    pub fn disable_daemon(&mut self, ctx: egui::Context) {
+        // 1. Tell the daemon to die. It SIGHUPs every child, unlinks
+        //    its socket, and exits.
+        if let Some(ref daemon) = self.daemon {
+            daemon.shutdown();
+        }
+
+        // 2. Drop our client handle. Subsequent close_session() calls
+        //    will skip the daemon-kill path entirely (dead socket).
+        self.daemon = None;
+
+        // 3. Close every daemon-backed GUI session. close_session prunes
+        //    the tile tree, removes scrollback files, and spawns a fresh
+        //    local shell if that was the last workspace. Since
+        //    `self.daemon` is None, its internal daemon.kill() is skipped.
+        let ids: Vec<usize> = self
+            .sessions
+            .iter()
+            .filter(|s| s.is_daemon())
+            .map(|s| s.id)
+            .collect();
+        for id in ids {
+            self.close_session(id, ctx.clone());
+        }
+
+        self.set_toast("Background daemon stopped. New sessions will run in-process.");
+    }
+
     pub fn open_create_profile_modal(&mut self) {
         self.editing_profile_id = None;
         self.new_ssh_name = "My Server".to_string();
@@ -1836,6 +1874,10 @@ impl eframe::App for AppState {
 
         if self.ssh_auth_modal.is_some() {
             ui::modals::render_ssh_auth_modal(self, ctx);
+        }
+
+        if self.show_disable_daemon_modal {
+            ui::modals::render_disable_daemon_modal(self, ctx);
         }
 
         self.sftp.render_transfer_history_window(ctx, &self.theme);

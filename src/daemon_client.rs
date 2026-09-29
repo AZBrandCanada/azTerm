@@ -107,6 +107,15 @@ impl DaemonClient {
         let _ = self.send(&Request::Kill { id });
     }
 
+    /// Tell the daemon to kill every session and exit. Fire-and-forget:
+    /// the daemon closes the socket as it exits, so waiting for a reply
+    /// would race with the shutdown. We don't need confirmation.
+    pub fn shutdown(&self) {
+        if let Ok(mut s) = self.ctrl.lock() {
+            let _ = write_msg(&mut *s, &Request::Shutdown);
+        }
+    }
+
     pub fn attach(&self, id: u64, cols: u16, rows: u16) -> Result<AttachedSession, String> {
         let path = socket_path();
         let stream = UnixStream::connect(&path).map_err(|e| e.to_string())?;

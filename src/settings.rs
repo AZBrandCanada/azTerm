@@ -132,7 +132,9 @@ pub struct AppSettings {
     /// When true, PTYs are owned by a background azterm-daemon process
     /// so shells and SSH connections survive window closes. When false,
     /// sessions live entirely in the GUI process (the pre-daemon
-    /// behavior). Toggling requires an app restart to take effect.
+    /// behavior). Turning this OFF at runtime stops the daemon and
+    /// kills every daemon-backed session; turning it ON takes effect
+    /// on the next launch.
     #[serde(default = "default_true")]
     pub use_daemon: bool,
 }

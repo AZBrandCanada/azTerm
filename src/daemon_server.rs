@@ -183,6 +183,25 @@ fn handle_client(mut stream: UnixStream, shared: Shared) -> std::io::Result<()> 
                 write_msg(&mut stream, &Response::Ok)?;
             }
 
+            Request::Shutdown => {
+                // Fire-and-forget from the GUI: kill every child,
+                // unlink the socket so a later try_connect() sees
+                // "no daemon", then exit. The kernel releases the
+                // singleton flock on exit, so a fresh daemon can
+                // start immediately if the user toggles the setting
+                // back on.
+                let victims: Vec<_> = {
+                    let mut sh = shared.lock().unwrap();
+                    sh.drain().map(|(_, s)| s).collect()
+                };
+                for s in &victims {
+                    *s.alive.lock().unwrap() = false;
+                    s.kill_child();
+                }
+                let _ = std::fs::remove_file(crate::daemon::socket_path());
+                std::process::exit(0);
+            }
+
             Request::Attach { id, cols, rows } => {
                 let sess = {
                     let sh = shared.lock().unwrap();

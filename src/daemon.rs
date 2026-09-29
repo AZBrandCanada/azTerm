@@ -79,6 +79,12 @@ pub enum Request {
         cols: u16,
         rows: u16,
     },
+    /// Kill every session and exit the daemon process. Sent by the GUI
+    /// when the user turns off "Keep Sessions Running in Background".
+    /// The daemon SIGHUPs every child, unlinks its socket, and calls
+    /// std::process::exit(0) — the kernel releases the singleton flock
+    /// automatically, so a later launch can start a fresh daemon.
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

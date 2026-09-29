@@ -4,6 +4,78 @@ use crate::{AppState, InstallMethod};
 use eframe::egui;
 use std::io::Write;
 
+pub fn render_disable_daemon_modal(app: &mut AppState, ctx: &egui::Context) {
+    if !app.show_disable_daemon_modal {
+        return;
+    }
+
+    let session_count = app.sessions.iter().filter(|s| s.is_daemon()).count();
+    let mut confirm = false;
+    let mut cancel = false;
+
+    egui::Window::new("Disable Background Sessions?")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(480.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "You have {} background session{} running.",
+                        session_count,
+                        if session_count == 1 { "" } else { "s" }
+                    ))
+                    .strong()
+                    .size(15.0)
+                    .color(app.theme.danger_color()),
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    "Turning off \"Keep Sessions Running in Background\" will terminate every shell, SSH connection, and running command currently owned by the background daemon. This cannot be undone.",
+                );
+                ui.add_space(8.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Future sessions will run inside the AZTerm window and will close when the app quits.",
+                    )
+                    .small()
+                    .color(app.theme.text_muted_color()),
+                );
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if crate::modern::button_danger(
+                        ui,
+                        &app.theme,
+                        "Disable and Kill Sessions",
+                    )
+                    .clicked()
+                    {
+                        confirm = true;
+                    }
+                    if crate::modern::button(ui, &app.theme, "Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+
+    if confirm {
+        app.disable_daemon(ctx.clone());
+        app.show_disable_daemon_modal = false;
+    }
+    if cancel {
+        // The toggle already flipped use_daemon to false before the
+        // modal opened. Restore it so "Cancel" actually means
+        // "keep the daemon on".
+        app.settings.use_daemon = true;
+        app.settings.save();
+        app.show_disable_daemon_modal = false;
+    }
+}
+
 pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
     if let Some(ref new_tag) = app.available_update.clone() {
         egui::Window::new("AZTerm Update Available")
