@@ -746,7 +746,7 @@ impl AppState {
                             working_dir: info.target.clone(),
                         }
                     };
-                    if let Some(s) = TerminalSession::new_daemon(
+                    if let Some(mut s) = TerminalSession::new_daemon(
                         id,
                         info.title.clone(),
                         session_type,
@@ -756,6 +756,10 @@ impl AppState {
                         info.cols,
                         info.rows,
                     ) {
+                        s.recovery_note = Some((
+                            format!("\u{2713} Reattached to live daemon session #{} \u{2014} process still running", info.id),
+                            (100, 220, 140),
+                        ));
                         self.sessions.push(s);
                         if id >= self.next_tab_id {
                             self.next_tab_id = id + 1;

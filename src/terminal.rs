@@ -220,6 +220,8 @@ pub struct TerminalSession {
 
     /// Raw PTY output bytes captured for restore-on-reopen. Bounded ring
     /// trimmed at HISTORY_MAX, aligned to the next ESC.
+    pub recovery_note: Option<(String, (u8, u8, u8))>,
+
     pub history_buf: Vec<u8>,
     /// Set true whenever history_buf grows; the caller clears it after
     /// writing to disk. Lets persist_sessions skip unchanged sessions.
@@ -332,6 +334,7 @@ impl TerminalSession {
             tui_drag_direction: None,
             history_buf: Vec::new(),
             history_dirty: false,
+            recovery_note: None,
         }
     }
 
@@ -432,6 +435,7 @@ impl TerminalSession {
             tui_drag_direction: None,
             history_buf: Vec::new(),
             history_dirty: false,
+            recovery_note: None,
         })
     }
 
@@ -660,6 +664,7 @@ impl TerminalSession {
     }
 
     pub fn send_input(&mut self, text: &str) {
+        if self.recovery_note.is_some() { self.recovery_note = None; }
         if self.scroll_offset > 0 && !self.parser.screen().alternate_screen() {
             self.set_view_scroll(0);
         }

@@ -597,6 +597,20 @@ pub fn render_single_pane(
 
         ui.set_clip_rect(prev_clip_body);
 
+        if let Some((ref msg, (r, g, b))) = session.recovery_note {
+            let col = egui::Color32::from_rgb(r, g, b);
+            let font = egui::FontId::proportional(11.5);
+            let tw = ui.painter().layout_no_wrap(msg.clone(), font.clone(), col).size().x;
+            let chip = egui::Rect::from_min_size(
+                body_rect.min + egui::vec2(6.0, 6.0),
+                egui::vec2((tw + 18.0).min((body_rect.width() - 12.0).max(60.0)), 20.0),
+            );
+            ui.painter().rect_filled(chip, egui::Rounding::same(4.0), egui::Color32::from_black_alpha(200));
+            ui.painter().rect_stroke(chip, egui::Rounding::same(4.0), egui::Stroke::new(1.0_f32, col));
+            ui.painter().text(chip.left_center() + egui::vec2(9.0, 0.0),
+                egui::Align2::LEFT_CENTER, msg, font, col);
+        }
+
         if pane_clicked {
             *active_session_id = session.id;
             ui.ctx().request_repaint();
