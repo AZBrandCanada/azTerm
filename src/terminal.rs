@@ -1278,13 +1278,36 @@ impl TerminalSession {
         let font_size = settings.terminal_font_size.clamp(6.0, 32.0);
         let font_id = egui::FontId::monospace(font_size);
 
-        let probe = ui.painter().layout_no_wrap(
-            "WWWWWWWWWW".to_string(),
-            font_id.clone(),
-            egui::Color32::WHITE,
-        );
-        let char_width = (probe.size().x / 10.0).max(1.0);
-        let row_height = (probe.size().y * 1.05).max(1.0);
+        // Measure the per-cell advance width by laying out a sample row
+        // using the exact same structure the render loop below uses: one
+        // TextFormat run per cell, no wrapping. This is what egui's text
+        // layout will actually do for the real row, so the mouse-to-cell
+        // mapping stays aligned with the glyphs the user sees.
+        //
+        // The previous approach ("WWWWWWWWWW" laid out and divided by 10)
+        // produced a per-cell width that disagreed with the real row
+        // layout: the two paths round glyph advances differently, and the
+        // error accumulated across the width of the terminal. That's why
+        // the selection highlight drifted away from the cursor, and why
+        // the drift got larger or smaller when font size or app zoom
+        // changed.
+        const SAMPLE_CELLS: usize = 100;
+        let mut sample_job = egui::text::LayoutJob::default();
+        sample_job.wrap.max_width = f32::INFINITY;
+        for _ in 0..SAMPLE_CELLS {
+            sample_job.append(
+                "M",
+                0.0,
+                egui::TextFormat {
+                    font_id: font_id.clone(),
+                    color: egui::Color32::WHITE,
+                    ..Default::default()
+                },
+            );
+        }
+        let sample_galley = ui.painter().layout_job(sample_job);
+        let char_width = (sample_galley.size().x / SAMPLE_CELLS as f32).max(1.0);
+        let row_height = (sample_galley.size().y * 1.05).max(1.0);
 
         let in_alternate = self.parser.screen().alternate_screen();
         let has_mouse =

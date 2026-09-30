@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.5.1"
+VERSION="0.5.2"
 TAG="v${VERSION}"
 REPO="AZBrandCanada/azTerm"
 
@@ -56,16 +56,12 @@ if command -v gh >/dev/null 2>&1; then
   [ -n "$DEB_ASSET" ] && ASSETS+=("$DEB_ASSET")
 
   NOTES=$(cat <<'NOTE'
-## AZTerm v0.3.2
+## AZTerm v0.5.2
 
 ### Fixed
-- **Arrow keys, Tab and Escape now work inside full-screen TUIs** (nano, vim, htop, less, mc, emacs -nw, ...). Previously egui was treating arrow keys as focus-navigation, so keystrokes never reached the PTY. The terminal widget now locks all four navigation key categories to itself while it has focus.
+- **Highlight on select wasnt ratio'd properly
 
-### Under the hood
-- Added `debug_mode` trace coverage across PTY, SSH, SFTP and layout operations. Leave it on if you hit a freeze or crash — the last line in `~/.config/azterm/debug.log` tells you what was running.
-- Panic hook writes the message and a full backtrace to the same log.
-
-Full changelog: https://github.com/AZBrandCanada/azTerm/compare/v0.3.1...v0.3.2
+Full changelog: https://github.com/AZBrandCanada/azTerm/compare/v0.5.1...v0.5.2
 NOTE
 )
 

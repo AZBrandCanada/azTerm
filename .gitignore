@@ -22,3 +22,4 @@ fix_arrow_keys.sh
 fix_debug_derive.sh
 release.sh
 revert_installer_clipboard_deps.sh
+src/terminal.rs.bak
