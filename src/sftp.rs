@@ -341,6 +341,171 @@ pub fn fit_filename_to_width(
     best
 }
 
+
+// ---------------------------------------------------------------------------
+// External editor integration (right-click → Open in Editor / VS Code)
+// ---------------------------------------------------------------------------
+
+/// Is `bin` on PATH? Uses `command -v` (POSIX) so we don't depend on `which`.
+fn command_exists(bin: &str) -> bool {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {}", bin))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Pick an editor binary. `prefer_vscode` restricts to the VS Code family.
+/// Otherwise we honour $EDITOR / $VISUAL, then fall back to common GUI and
+/// terminal editors.
+fn find_editor_binary(prefer_vscode: bool) -> Option<String> {
+    if prefer_vscode {
+        for bin in ["code", "codium", "code-insiders", "cursor"] {
+            if command_exists(bin) {
+                return Some(bin.to_string());
+            }
+        }
+        return None;
+    }
+    for var in ["EDITOR", "VISUAL"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim().to_string();
+            if !v.is_empty() {
+                let first = v.split_whitespace().next().unwrap_or(v.as_str()).to_string();
+                if command_exists(&first) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    for bin in ["code", "codium", "xdg-open", "nano", "vim", "vi"] {
+        if command_exists(bin) {
+            return Some(bin.to_string());
+        }
+    }
+    None
+}
+
+/// Spawn `editor` on `path`. `remote` is only consulted for the VS Code
+/// family, where we can hand off to Remote-SSH for a true remote edit.
+fn launch_editor_with(
+    path: &Path,
+    prefer_vscode: bool,
+    remote: Option<(&SshProfile, &str)>,
+) -> Result<(), String> {
+    let editor = find_editor_binary(prefer_vscode).ok_or_else(|| {
+        if prefer_vscode {
+            "VS Code not found on PATH (looked for code, codium, code-insiders, cursor)"
+                .to_string()
+        } else {
+            "No editor found. Set $EDITOR or install VS Code / nano / vim.".to_string()
+        }
+    })?;
+
+    // VS Code + remote: use Remote-SSH so saves round-trip to the server.
+    if prefer_vscode {
+        if let Some((profile, remote_path)) = remote {
+            let target = format!("ssh-remote+{}@{}", profile.username, profile.host);
+            let mut cmd = Command::new(&editor);
+            cmd.arg("--remote").arg(target).arg(remote_path);
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+            // Fall through to local-temp launch if Remote-SSH spawn failed.
+        }
+    }
+
+    // Split $EDITOR-style strings ("code --wait") into argv.
+    let mut parts = editor.split_whitespace();
+    let bin = parts.next().unwrap_or(&editor);
+    let mut cmd = Command::new(bin);
+    for a in parts {
+        cmd.arg(a);
+    }
+    cmd.arg(path);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .map_err(|e| format!("Failed to launch {}: {}", editor, e))?;
+    Ok(())
+}
+
+/// Open `dir/name` in the user's preferred editor.
+///
+/// Local files are launched directly. Remote files: "Open in VS Code" uses
+/// the Remote-SSH protocol so the file stays on the server; the generic
+/// "Open in Editor" streams the file to a temp location first, which means
+/// edits there do NOT sync back automatically.
+pub fn open_in_editor_at(
+    target: &SftpTarget,
+    dir: &str,
+    name: &str,
+    prefer_vscode: bool,
+) -> Result<(), String> {
+    match target {
+        SftpTarget::Local => {
+            let path = PathBuf::from(dir).join(name);
+            if !path.exists() {
+                return Err(format!("File not found: {}", path.display()));
+            }
+            launch_editor_with(&path, prefer_vscode, None)
+        }
+        SftpTarget::RemoteSsh(profile) => {
+            let remote_path = if dir.ends_with('/') {
+                format!("{}{}", dir, name)
+            } else {
+                format!("{}/{}", dir, name)
+            };
+
+            // Try true remote editing first when VS Code is requested.
+            if prefer_vscode && find_editor_binary(true).is_some() {
+                if launch_editor_with(
+                    Path::new(&remote_path),
+                    true,
+                    Some((profile, &remote_path)),
+                )
+                .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+
+            // Fall back: download to a temp file and open locally.
+            let temp_dir = std::env::temp_dir().join("azterm_editor");
+            let _ = fs::create_dir_all(&temp_dir);
+            let local_path = temp_dir.join(name);
+
+            let escaped = remote_path.replace('\'', "'\\''");
+            let mut cmd = build_ssh_base_command(profile);
+            cmd.arg(format!("cat '{}'", escaped));
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = cmd.spawn().map_err(|e| format!("SSH spawn failed: {}", e))?;
+            {
+                let stdout = child.stdout.as_mut().ok_or("No stdout from SSH")?;
+                let mut file = fs::File::create(&local_path)
+                    .map_err(|e| format!("Cannot create temp file: {}", e))?;
+                std::io::copy(stdout, &mut file)
+                    .map_err(|e| format!("Failed to write temp file: {}", e))?;
+            }
+            let status = child.wait().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("Failed to fetch remote file: {}", remote_path));
+            }
+
+            launch_editor_with(&local_path, false, None)
+        }
+    }
+}
+
 impl PaneBrowser {
     pub fn new(id: impl Into<String>, target: SftpTarget) -> Self {
         let id = id.into();
@@ -1209,6 +1374,7 @@ impl PaneBrowser {
 
                 let mut toggled_item: Option<(String, bool)> = None;
                 let mut nav_to: Option<String> = None;
+                let mut editor_req: Option<(String, bool)> = None;
                 let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift);
                 let font_id = egui::TextStyle::Body.resolve(ui.style());
 
@@ -1266,7 +1432,18 @@ impl PaneBrowser {
                                 ));
 
                                 row_resp.context_menu(|ui| {
-                                    ui.set_min_width(135.0);
+                                    ui.set_min_width(165.0);
+                                    if !entry.is_dir {
+                                        if ui.button("Open in Editor").clicked() {
+                                            editor_req = Some((entry.name.clone(), false));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Open in VS Code").clicked() {
+                                            editor_req = Some((entry.name.clone(), true));
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                    }
                                     if ui.button("+ New Folder").clicked() {
                                         self.show_create_dir_modal = true;
                                         self.new_dir_name = "new_folder".to_string();
@@ -1353,6 +1530,17 @@ impl PaneBrowser {
                     });
 
                 self.scroll_to_selected = false;
+
+                if let Some((name, use_vscode)) = editor_req {
+                    if let Err(e) = open_in_editor_at(
+                        &self.target,
+                        &self.current_path,
+                        &name,
+                        use_vscode,
+                    ) {
+                        self.error_message = Some(e);
+                    }
+                }
 
                 if let Some((item, multi)) = toggled_item {
                     if multi {
