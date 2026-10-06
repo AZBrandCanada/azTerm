@@ -6,6 +6,14 @@ use crate::{AppState, SettingsCategory};
 use eframe::egui;
 
 pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::Ui) {
+    // Reset the "which previews do we want loaded" set every frame.
+    // The UI font combo repopulates it while its popup is open, with
+    // only the items currently inside the scroll viewport. If the
+    // popup isn't open (or we're on a different Settings tab), the
+    // set stays empty and any preview families get dropped from the
+    // atlas on the next frame.
+    app.preview_fonts_wanted.clear();
+
     ui.columns(2, |columns| {
         columns[0].set_max_width(210.0);
         columns[0].vertical(|ui| {
@@ -151,6 +159,13 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                             let font_list: Vec<crate::fonts::FontEntry> =
                                 app.cached_fonts.clone().unwrap_or_default();
 
+                            // (Preview-atlas repaint scheduling lives
+                            // in AppState::update, right after the
+                            // CentralPanel render — that way it also
+                            // fires on the first frame the popup is
+                            // open, before this function has had a
+                            // chance to populate preview_fonts_wanted.)
+
                             // ===== UI Font =====
                             ui.horizontal(|ui| {
                                 ui.label(
@@ -173,6 +188,35 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                     .width(260.0)
                                     .selected_text(current_label)
                                     .show_ui(ui, |ui| {
+                                        // Fixed-width popup so items
+                                        // with wider glyphs don't
+                                        // resize it mid-interaction.
+                                        ui.set_min_width(260.0);
+                                        ui.set_max_width(260.0);
+
+                                        // Which preview indices are
+                                        // wanted this frame (only the
+                                        // items inside the scroll
+                                        // viewport, plus a small
+                                        // buffer). Populated as we
+                                        // iterate, then written to
+                                        // app.preview_fonts_wanted.
+                                        let mut wanted: Vec<(usize, std::path::PathBuf)> =
+                                            Vec::new();
+
+                                        // Row height estimate for the
+                                        // pre-load buffer.
+                                        let row_h =
+                                            ui.spacing().interact_size.y.max(14.0);
+                                        // Vertical buffer in pixels —
+                                        // one row above and one below
+                                        // the visible window, so a
+                                        // single scroll notch doesn't
+                                        // flash plain text on the
+                                        // newly-revealed rows.
+                                        let buffer = row_h;
+
+                                        // Default (egui) row.
                                         if ui
                                             .selectable_label(
                                                 app.settings.ui_font_path.is_empty(),
@@ -183,24 +227,79 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                             app.settings.ui_font_path = String::new();
                                             app.settings.save();
                                         }
-                                        for font in font_list.iter() {
-                                            let path_str = font.path.to_string_lossy().to_string();
-                                            let is_selected = app.settings.ui_font_path == path_str;
+
+                                        for (idx, font) in font_list.iter().enumerate() {
+                                            // Is this row's allocated
+                                            // space inside (or within
+                                            // buffer of) the scroll
+                                            // viewport?
+                                            let row_rect = egui::Rect::from_min_size(
+                                                ui.cursor().min,
+                                                egui::vec2(
+                                                    ui.available_width(),
+                                                    row_h,
+                                                ),
+                                            );
+                                            let visible = ui.is_rect_visible(
+                                                row_rect.expand2(egui::vec2(0.0, buffer)),
+                                            );
+                                            if visible {
+                                                wanted.push((idx, font.path.clone()));
+                                            }
+
+                                            let path_str =
+                                                font.path.to_string_lossy().to_string();
+                                            let is_selected =
+                                                app.settings.ui_font_path == path_str;
+
+                                            // Render this item in its own
+                                            // typeface if the atlas
+                                            // already has the family.
+                                            // (On the very first frame
+                                            // after the popup opens the
+                                            // preview may not be loaded
+                                            // yet — the next frame has
+                                            // it. Imperceptible.)
+                                            let already_loaded = app
+                                                .preview_fonts_loaded
+                                                .iter()
+                                                .any(|(i, _)| *i == idx);
+                                            let label = if already_loaded {
+                                                let family =
+                                                    crate::fonts::preview_family_name(idx);
+                                                egui::RichText::new(&font.family)
+                                                    .font(egui::FontId::new(
+                                                        14.0,
+                                                        egui::FontFamily::Name(
+                                                            family.into(),
+                                                        ),
+                                                    ))
+                                            } else {
+                                                egui::RichText::new(&font.family)
+                                            };
+
                                             if ui
-                                                .selectable_label(
-                                                    is_selected,
-                                                    egui::RichText::new(&font.family),
-                                                )
+                                                .selectable_label(is_selected, label)
                                                 .clicked()
                                             {
                                                 app.settings.ui_font_path = path_str;
                                                 app.settings.save();
                                             }
                                         }
+
+                                        app.preview_fonts_wanted = wanted;
                                     });
 
                                 if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
                                     app.cached_fonts = None;
+                                    // Font indices are positional — a
+                                    // rescan can reorder the list, so
+                                    // every cached preview mapping is
+                                    // now stale. Drop them all so the
+                                    // next frame's apply_to_egui
+                                    // rebuilds from scratch.
+                                    app.preview_fonts_loaded.clear();
+                                    app.preview_fonts_in_flight = None;
                                 }
                                 if ui.button("Use Default").clicked() {
                                     app.settings.ui_font_path = String::new();

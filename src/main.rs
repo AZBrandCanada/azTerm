@@ -320,6 +320,25 @@ pub struct AppState {
     /// Cache of installed fonts, populated lazily by the Settings picker.
     pub cached_fonts: Option<Vec<fonts::FontEntry>>,
 
+    /// Preview families that are provably in the CURRENT egui atlas.
+    /// The renderer is only allowed to reference families in this
+    /// list — referencing any other `FontFamily::Name` panics inside
+    /// epaint. Lags `preview_fonts_in_flight` by one frame because
+    /// `Context::set_fonts()` rebuilds the atlas between passes, not
+    /// within a pass.
+    pub preview_fonts_loaded: Vec<(usize, std::path::PathBuf)>,
+    /// What render_settings_view wants loaded for the NEXT frame.
+    /// Cleared at the top of every settings render pass and
+    /// repopulated only if the UI font combo popup is open — so
+    /// entries here track exactly the fonts currently on screen in
+    /// the dropdown, nothing else.
+    pub preview_fonts_wanted: Vec<(usize, std::path::PathBuf)>,
+    /// Set by update() immediately after calling set_fonts(). Promoted
+    /// to `preview_fonts_loaded` at the top of the NEXT frame, at
+    /// which point egui has actually rebuilt the atlas with those
+    /// families and it is safe for the renderer to reference them.
+    pub preview_fonts_in_flight: Option<Vec<(usize, std::path::PathBuf)>>,
+
     pub available_update: Option<String>,
     pub update_rx: Option<Receiver<UpdateCheckResult>>,
     pub is_checking_update: bool,
@@ -370,7 +389,7 @@ impl AppState {
 
         // Apply the user's chosen UI font. Terminal font is fixed to
         // the built-in fallback chain — see src/fonts.rs.
-        fonts::apply_to_egui(&cc.egui_ctx, &settings.ui_font_path);
+        let _ = fonts::apply_to_egui(&cc.egui_ctx, &settings.ui_font_path, &[]);
         let applied_ui_font_init = settings.ui_font_path.clone();
 
         // Daemon: if enabled, ensure a background process is running
@@ -426,6 +445,9 @@ impl AppState {
 
             applied_ui_font_path: Some(applied_ui_font_init),
             cached_fonts: None,
+            preview_fonts_loaded: Vec::new(),
+            preview_fonts_wanted: Vec::new(),
+            preview_fonts_in_flight: None,
 
             available_update: initial_available_update,
             update_rx: None,
@@ -2070,14 +2092,28 @@ impl eframe::App for AppState {
         // as the rest of the UI. Cheap: mutates the style in place.
         self.theme.apply_to_egui(ctx);
 
-        // If the user picked a different UI font in Settings, rebuild
-        // egui's font atlas. This is the only place we call set_fonts()
-        // after startup — it's expensive (full atlas rebuild) so we
-        // guard it behind a path comparison.
+        // Promote last frame's in-flight preview set. By the time we
+        // run again, egui has rebuilt the atlas at the start of this
+        // pass with whatever we handed to set_fonts last frame — so
+        // those families are now safe for the renderer to reference.
+        if let Some(in_flight) = self.preview_fonts_in_flight.take() {
+            self.preview_fonts_loaded = in_flight;
+        }
+
+        // Rebuild the atlas if the user's UI font changed, or if the
+        // Settings dropdown wants a different preview set than what
+        // the current atlas holds.
         let ui_changed = self.applied_ui_font_path.as_deref()
             != Some(self.settings.ui_font_path.as_str());
-        if ui_changed {
-            fonts::apply_to_egui(ctx, &self.settings.ui_font_path);
+        let previews_changed = self.preview_fonts_wanted != self.preview_fonts_loaded;
+
+        if ui_changed || previews_changed {
+            let loaded_now = fonts::apply_to_egui(
+                ctx,
+                &self.settings.ui_font_path,
+                &self.preview_fonts_wanted,
+            );
+            self.preview_fonts_in_flight = Some(loaded_now);
             self.applied_ui_font_path = Some(self.settings.ui_font_path.clone());
         }
 
@@ -2221,6 +2257,24 @@ impl eframe::App for AppState {
                     }
                 }
             });
+
+        // If we left the Settings view this frame, drop any preview
+        // families the font dropdown had requested. Otherwise they
+        // would linger in the atlas for the rest of the session.
+        if self.active_view != ActiveView::Settings {
+            self.preview_fonts_wanted.clear();
+        }
+
+        // If the wanted preview set isn't yet in the atlas (or is
+        // still in flight), ask for another frame so the rebuild lands
+        // without waiting for user input.
+        let have = self
+            .preview_fonts_in_flight
+            .as_ref()
+            .unwrap_or(&self.preview_fonts_loaded);
+        if self.preview_fonts_wanted != *have {
+            ctx.request_repaint();
+        }
     }
 }
 

@@ -29,6 +29,14 @@ pub struct FontEntry {
     pub is_mono: bool,
 }
 
+/// Stable egui family name for the "currently loaded as preview" entry
+/// at `idx` in the caller's font list. Callers pass the *original list
+/// index* (not the position within a narrowed slice) so previews remain
+/// keyed correctly no matter how many fonts are loaded in a given frame.
+pub fn preview_family_name(idx: usize) -> String {
+    format!("azterm_font_preview_{}", idx)
+}
+
 /// Whitelist check: does this byte buffer start with a magic number
 /// that epaint's font parser accepts?
 ///
@@ -203,7 +211,11 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
 ///
 /// Every load goes through `is_loadable_font()`. A bad file is skipped
 /// silently; the built-in fallback is used instead of panicking.
-pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str) {
+pub fn apply_to_egui(
+    ctx: &egui::Context,
+    ui_font_path: &str,
+    previews: &[(usize, PathBuf)],
+) -> Vec<(usize, PathBuf)> {
     let mut fonts = egui::FontDefinitions::default();
 
     // ---- UI font (Proportional family) --------------------------------
@@ -219,10 +231,9 @@ pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str) {
     }
 
     // ---- Terminal font (Monospace family) -----------------------------
-    // Fixed to the built-in fallback chain. No preview font families
-    // are registered any more either — loading every installed font
-    // into egui's atlas made the Settings tab crawl on systems with
-    // hundreds of fonts.
+    // Fixed to the built-in fallback chain. Not user-selectable any
+    // more — arbitrary monospace fonts broke cell alignment and
+    // copy/paste geometry.
     if let Some(fb) = default_mono_font_path() {
         let _ = try_register_font(
             &mut fonts,
@@ -232,7 +243,35 @@ pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str) {
         );
     }
 
+    // ---- Bounded preview families -------------------------------------
+    // Only fonts the caller explicitly asked for get loaded. In
+    // Settings, the caller passes just the entries currently inside
+    // the dropdown's scroll viewport (plus a one-row buffer). This
+    // keeps the atlas small even with hundreds of installed fonts,
+    // while still letting each visible list item render in its own
+    // typeface for live comparison.
+    let mut actually_loaded: Vec<(usize, PathBuf)> = Vec::new();
+    for (idx, path) in previews {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        if !is_loadable_font(&data) {
+            continue;
+        }
+        let data_key = format!("preview_data_{}", idx);
+        fonts
+            .font_data
+            .insert(data_key.clone(), egui::FontData::from_owned(data));
+        fonts.families.insert(
+            egui::FontFamily::Name(preview_family_name(*idx).into()),
+            vec![data_key],
+        );
+        actually_loaded.push((*idx, path.clone()));
+    }
+
     ctx.set_fonts(fonts);
+    actually_loaded
 }
 
 fn try_register_font(
