@@ -236,6 +236,22 @@ fn handle_client(mut stream: UnixStream, shared: Shared) -> std::io::Result<()> 
                     )?;
                 }
 
+                // If the child process already exited while this client
+                // was disconnected (e.g. SSH timed out, user typed
+                // 'exit', server dropped the connection), do NOT enter
+                // the streaming loop. The reader thread that would feed
+                // subscribers has already exited, so the loop would hang
+                // forever and the client would never learn the session
+                // is dead. Send Closed immediately so the GUI flips the
+                // tile to "session ended" and shows the Reconnect
+                // overlay.
+                let alive_now =
+                    *sess.alive.lock().unwrap_or_else(|e| e.into_inner());
+                if !alive_now {
+                    write_msg(&mut stream, &Response::Closed)?;
+                    return Ok(());
+                }
+
                 stream_output(stream, sess)?;
                 return Ok(());
             }

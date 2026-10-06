@@ -761,10 +761,50 @@ impl AppState {
                         info.cols,
                         info.rows,
                     ) {
-                        s.recovery_note = Some((
-                            format!("\u{2713} Reattached  #{}  ", info.id),
-                            (100, 220, 140),
-                        ));
+                        // The daemon already knows whether the child
+                        // process exited while the GUI was closed
+                        // (SSH timeout, remote reboot, user typed
+                        // 'exit' elsewhere, etc.). Use that flag
+                        // immediately: without it, the tile looks
+                        // alive but every keystroke is swallowed and
+                        // the Reconnect overlay never appears — the
+                        // "restart AZTerm and the tab is frozen"
+                        // symptom.
+                        //
+                        // The client-side reader thread only ever
+                        // SETS is_dead to true (never back to false),
+                        // so this assignment is safe even if the
+                        // daemon later streams more output.
+                        if !info.alive {
+                            s.is_dead.store(true, std::sync::atomic::Ordering::Relaxed);
+                            crate::dbg_log!(
+                                "reattach_dead id={} title={:?} kind={}",
+                                info.id,
+                                info.title,
+                                info.kind
+                            );
+                        } else {
+                            crate::dbg_log!(
+                                "reattach_alive id={} title={:?} kind={}",
+                                info.id,
+                                info.title,
+                                info.kind
+                            );
+                        }
+                        s.recovery_note = Some(if info.alive {
+                            (
+                                format!("\u{2713} Reattached  #{}  ", info.id),
+                                (100, 220, 140),
+                            )
+                        } else {
+                            (
+                                format!(
+                                    "\u{26A0} Disconnected  #{} — press any key or click Reconnect  ",
+                                    info.id
+                                ),
+                                (255, 180, 80),
+                            )
+                        });
                         self.sessions.push(s);
                         if id >= self.next_tab_id {
                             self.next_tab_id = id + 1;
@@ -1989,6 +2029,12 @@ impl AppState {
                 }
             } else if ctx.input(|i| i.key_pressed(egui::Key::W)) {
                 self.close_session(self.active_session_id, ctx.clone());
+            } else if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+                // Force-revive the active session. Useful when the
+                // auto-detection hasn't fired yet (e.g. an SSH link
+                // that is half-dead but hasn't produced EOF).
+                self.set_toast("Reconnecting active session...");
+                self.reconnect_session(self.active_session_id, ctx.clone());
             }
         }
 
