@@ -29,24 +29,6 @@ pub struct FontEntry {
     pub is_mono: bool,
 }
 
-pub const PREVIEW_LIMIT: usize = 400;
-
-pub fn has_preview(idx: usize) -> bool {
-    idx < PREVIEW_LIMIT
-}
-
-pub fn preview_family_name(idx: usize) -> String {
-    format!("azterm_font_preview_{}", idx)
-}
-
-#[allow(dead_code)]
-pub fn preview_family_for_path(fonts: &[FontEntry], path: &str) -> Option<String> {
-    fonts
-        .iter()
-        .position(|f| f.path.to_string_lossy() == path)
-        .map(preview_family_name)
-}
-
 /// Whitelist check: does this byte buffer start with a magic number
 /// that epaint's font parser accepts?
 ///
@@ -221,15 +203,12 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
 ///
 /// Every load goes through `is_loadable_font()`. A bad file is skipped
 /// silently; the built-in fallback is used instead of panicking.
-pub fn apply_to_egui(
-    ctx: &egui::Context,
-    ui_font_path: &str,
-    terminal_font_path: &str,
-    preview_fonts: &[FontEntry],
-) {
+pub fn apply_to_egui(ctx: &egui::Context, ui_font_path: &str) {
     let mut fonts = egui::FontDefinitions::default();
 
     // ---- UI font (Proportional family) --------------------------------
+    // Users can still pick this one; it only affects labels, buttons,
+    // and window chrome, never terminal cells.
     if !ui_font_path.trim().is_empty() {
         try_register_font(
             &mut fonts,
@@ -240,49 +219,16 @@ pub fn apply_to_egui(
     }
 
     // ---- Terminal font (Monospace family) -----------------------------
-    let primary_mono = if terminal_font_path.trim().is_empty() {
-        default_mono_font_path()
-    } else {
-        Some(terminal_font_path.to_string())
-    };
-
-    let registered = match &primary_mono {
-        Some(p) => try_register_font(
+    // Fixed to the built-in fallback chain. No preview font families
+    // are registered any more either — loading every installed font
+    // into egui's atlas made the Settings tab crawl on systems with
+    // hundreds of fonts.
+    if let Some(fb) = default_mono_font_path() {
+        let _ = try_register_font(
             &mut fonts,
             "azterm_terminal_font",
-            p,
+            &fb,
             Some(egui::FontFamily::Monospace),
-        ),
-        None => false,
-    };
-
-    if !registered {
-        if let Some(fb) = default_mono_font_path() {
-            let _ = try_register_font(
-                &mut fonts,
-                "azterm_terminal_font",
-                &fb,
-                Some(egui::FontFamily::Monospace),
-            );
-        }
-    }
-
-    // ---- Preview families --------------------------------------------
-    for (idx, entry) in preview_fonts.iter().enumerate().take(PREVIEW_LIMIT) {
-        let data = match std::fs::read(&entry.path) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        if !is_loadable_font(&data) {
-            continue;
-        }
-        let data_key = format!("preview_data_{}", idx);
-        fonts
-            .font_data
-            .insert(data_key.clone(), egui::FontData::from_owned(data));
-        fonts.families.insert(
-            egui::FontFamily::Name(preview_family_name(idx).into()),
-            vec![data_key],
         );
     }
 

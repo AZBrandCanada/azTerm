@@ -201,7 +201,21 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn load() -> Self {
-        Database::load_settings().unwrap_or_default()
+        let mut s = Database::load_settings().unwrap_or_default();
+
+        // Migration: terminal_font_path is no longer user-configurable.
+        // User-selectable monospace fonts broke cell alignment, cursor
+        // math, and copy/paste geometry — different fonts round glyph
+        // advances differently, so the grid the mouse maps against no
+        // longer matched the glyphs on screen. Clear any legacy value
+        // and persist it, so a user who picked a font on an older
+        // build can't load a broken terminal after updating.
+        if !s.terminal_font_path.is_empty() {
+            s.terminal_font_path.clear();
+            s.save();
+        }
+
+        s
     }
 
     pub fn save(&self) {

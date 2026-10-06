@@ -183,24 +183,16 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
                                             app.settings.ui_font_path = String::new();
                                             app.settings.save();
                                         }
-                                        for (idx, font) in font_list.iter().enumerate() {
+                                        for font in font_list.iter() {
                                             let path_str = font.path.to_string_lossy().to_string();
                                             let is_selected = app.settings.ui_font_path == path_str;
-                                            // Render each item in its own typeface
-                                            // when the preview family is available.
-                                            let label = if app.preview_fonts_loaded
-                                                && crate::fonts::has_preview(idx)
+                                            if ui
+                                                .selectable_label(
+                                                    is_selected,
+                                                    egui::RichText::new(&font.family),
+                                                )
+                                                .clicked()
                                             {
-                                                let family = crate::fonts::preview_family_name(idx);
-                                                let fid = egui::FontId::new(
-                                                    14.0,
-                                                    egui::FontFamily::Name(family.into()),
-                                                );
-                                                egui::RichText::new(&font.family).font(fid)
-                                            } else {
-                                                egui::RichText::new(&font.family)
-                                            };
-                                            if ui.selectable_label(is_selected, label).clicked() {
                                                 app.settings.ui_font_path = path_str;
                                                 app.settings.save();
                                             }
@@ -209,7 +201,6 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                                 if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
                                     app.cached_fonts = None;
-                                    app.preview_fonts_loaded = false;
                                 }
                                 if ui.button("Use Default").clicked() {
                                     app.settings.ui_font_path = String::new();
@@ -219,77 +210,14 @@ pub fn render_settings_view(app: &mut AppState, ctx: &egui::Context, ui: &mut eg
 
                             ui.add_space(6.0);
 
-                            // ===== Terminal Font =====
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Terminal Font:")
-                                        .strong()
-                                        .color(app.theme.text_primary_color()),
-                                );
-
-                                let current_label = if app.settings.terminal_font_path.is_empty() {
-                                    "Default (system monospace)".to_string()
-                                } else {
-                                    font_list
-                                        .iter()
-                                        .find(|f| f.path.to_string_lossy() == app.settings.terminal_font_path)
-                                        .map(|f| f.family.clone())
-                                        .unwrap_or_else(|| "(missing font)".to_string())
-                                };
-
-                                egui::ComboBox::from_id_source("terminal_font_combo")
-                                    .width(260.0)
-                                    .selected_text(current_label)
-                                    .show_ui(ui, |ui| {
-                                        if ui
-                                            .selectable_label(
-                                                app.settings.terminal_font_path.is_empty(),
-                                                "Default (system monospace)",
-                                            )
-                                            .clicked()
-                                        {
-                                            app.settings.terminal_font_path = String::new();
-                                            app.settings.save();
-                                        }
-                                        for (idx, font) in font_list.iter().enumerate() {
-                                            // Terminal cells are a fixed grid; only
-                                            // monospaced fonts render correctly. Hide
-                                            // proportional fonts from this dropdown.
-                                            if !font.is_mono {
-                                                continue;
-                                            }
-                                            let path_str = font.path.to_string_lossy().to_string();
-                                            let is_selected = app.settings.terminal_font_path == path_str;
-                                            let label = if app.preview_fonts_loaded
-                                                && crate::fonts::has_preview(idx)
-                                            {
-                                                let family = crate::fonts::preview_family_name(idx);
-                                                let fid = egui::FontId::new(
-                                                    14.0,
-                                                    egui::FontFamily::Name(family.into()),
-                                                );
-                                                egui::RichText::new(&font.family).font(fid)
-                                            } else {
-                                                egui::RichText::new(&font.family)
-                                            };
-                                            if ui.selectable_label(is_selected, label).clicked() {
-                                                app.settings.terminal_font_path = path_str;
-                                                app.settings.save();
-                                            }
-                                        }
-                                    });
-
-                                if ui.button("↻").on_hover_text("Rescan installed fonts").clicked() {
-                                    app.cached_fonts = None;
-                                    app.preview_fonts_loaded = false;
-                                }
-                                if ui.button("Use Default").clicked() {
-                                    app.settings.terminal_font_path = String::new();
-                                    app.settings.save();
-                                }
-                            });
-
-                            ui.add_space(6.0);
+                            // Terminal font is no longer user-selectable.
+                            // Arbitrary monospace fonts broke cell
+                            // alignment, cursor math, and copy/paste
+                            // geometry because different fonts round
+                            // glyph advances differently. It is now
+                            // fixed to the built-in fallback chain (see
+                            // src/fonts.rs). Font size is still tunable
+                            // below.
 
                             // ===== Terminal Font Size =====
                             ui.horizontal(|ui| {
