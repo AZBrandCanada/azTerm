@@ -19,6 +19,7 @@ use std::thread;
 //     hard timeout, writes are fire-and-forget.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Hard upper bound on a single clipboard read. If arboard does not
@@ -226,6 +227,17 @@ pub struct TerminalSession {
     /// Set true whenever history_buf grows; the caller clears it after
     /// writing to disk. Lets persist_sessions skip unchanged sessions.
     pub history_dirty: bool,
+
+    /// Set true by the PTY reader thread when it observes EOF — i.e.
+    /// the shell, SSH connection, or child process has exited. The UI
+    /// uses this to offer a one-click reconnect instead of forcing the
+    /// user to close and re-open the whole tab.
+    pub is_dead: std::sync::Arc<AtomicBool>,
+    /// Flipped to true when the user interacts with a dead session
+    /// (types any key, or clicks the Reconnect overlay button).
+    /// `render_single_pane` checks this after `render()` returns and
+    /// emits `PaneAction::Reconnect` for the app layer to handle.
+    pub reconnect_requested: bool,
 }
 
 impl TerminalSession {
@@ -274,6 +286,8 @@ impl TerminalSession {
         let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) =
             sync_channel(4096);
 
+        let is_dead = std::sync::Arc::new(AtomicBool::new(false));
+
         // Dedicated writer thread. The UI never blocks on pty writes — it
         // just hands bytes to this thread. Prevents UI freezes when SSH's
         // stdin buffer backs up on a stalled connection.
@@ -290,18 +304,23 @@ impl TerminalSession {
             }
         });
 
-        thread::spawn(move || {
-            let mut buf = [0u8; 16384];
-            while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 {
-                    break;
+        {
+            let is_dead = is_dead.clone();
+            thread::spawn(move || {
+                let mut buf = [0u8; 16384];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
                 }
-                if tx.send(buf[..n].to_vec()).is_err() {
-                    break;
-                }
+                is_dead.store(true, Ordering::Relaxed);
                 ctx.request_repaint();
-            }
-        });
+            });
+        }
 
         let initial_dir = match &session_type {
             SessionType::Local { working_dir } => Some(working_dir.clone()),
@@ -335,6 +354,8 @@ impl TerminalSession {
             history_buf: Vec::new(),
             history_dirty: false,
             recovery_note: None,
+            is_dead,
+            reconnect_requested: false,
         }
     }
 
@@ -369,10 +390,13 @@ impl TerminalSession {
 
         let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(512);
 
+        let is_dead = std::sync::Arc::new(AtomicBool::new(false));
+
         {
             let tx = tx.clone();
             let out_rx = attach.out_rx;
             let ctx2 = ctx.clone();
+            let is_dead = is_dead.clone();
             thread::spawn(move || {
                 while let Ok(bytes) = out_rx.recv() {
                     if bytes.is_empty() {
@@ -384,6 +408,8 @@ impl TerminalSession {
                     }
                     ctx2.request_repaint();
                 }
+                is_dead.store(true, Ordering::Relaxed);
+                ctx2.request_repaint();
             });
         }
 
@@ -436,7 +462,17 @@ impl TerminalSession {
             history_buf: Vec::new(),
             history_dirty: false,
             recovery_note: None,
+            is_dead,
+            reconnect_requested: false,
         })
+    }
+
+    /// True once the child process on the other end of this PTY has
+    /// exited and the reader thread has seen EOF. The UI uses this to
+    /// show a Reconnect overlay and to short-circuit keyboard input
+    /// into a reconnect request.
+    pub fn session_ended(&self) -> bool {
+        self.is_dead.load(Ordering::Relaxed)
     }
 
     pub fn detect_current_working_dir(&self, ssh_user: Option<&str>) -> Option<String> {
@@ -979,6 +1015,25 @@ impl TerminalSession {
         settings: &AppSettings,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
+        // Dead-session short circuit: any key press requests a
+        // reconnect. Matches the muscle memory of just hitting Enter
+        // to retry, without the user having to close and re-open the
+        // whole tab.
+        if self.session_ended() {
+            let any_key = ctx.input(|i| {
+                i.events.iter().any(|e| matches!(
+                    e,
+                    egui::Event::Key { pressed: true, .. }
+                        | egui::Event::Text(_)
+                        | egui::Event::Paste(_)
+                ))
+            });
+            if any_key {
+                self.reconnect_requested = true;
+            }
+            return;
+        }
+
         // If egui already produced an Event::Paste this frame, do NOT also send
         // the raw 0x16 (Ctrl+V / readline quoted-insert) — that double-input
         // corrupts pasted scripts and leaves readline in a weird state.
@@ -1983,6 +2038,68 @@ impl TerminalSession {
                     self.id,
                     self.tui_drag_frames.len()
                 );
+            }
+        }
+
+        // Dead-session overlay: a big centered "Reconnect" button plus
+        // a "press any key" hint. Painted on top of the frozen terminal
+        // contents so the user can revive the shell / SSH connection
+        // without losing the tile position or scrollback.
+        if self.session_ended() {
+            let overlay_rect = grid_rect;
+            ui.painter().rect_filled(
+                overlay_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(
+                    theme.bg_main[0],
+                    theme.bg_main[1],
+                    theme.bg_main[2],
+                    205,
+                ),
+            );
+
+            let btn_w = 230.0_f32;
+            let btn_h = 46.0_f32;
+            let btn_rect = egui::Rect::from_center_size(
+                overlay_rect.center(),
+                egui::vec2(btn_w, btn_h),
+            );
+            let btn_id = ui.id().with(self.id).with("term_reconnect_btn");
+            let btn_resp = ui.interact(btn_rect, btn_id, egui::Sense::click());
+            let hovered = btn_resp.hovered();
+            let fill = if hovered {
+                theme.accent_hover_color()
+            } else {
+                theme.accent_color()
+            };
+            ui.painter().rect_filled(btn_rect, 6.0, fill);
+            ui.painter().rect_stroke(
+                btn_rect,
+                6.0,
+                egui::Stroke::new(1.5_f32, theme.on_accent_color()),
+            );
+            ui.painter().text(
+                btn_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Reconnect Session",
+                egui::FontId::proportional(15.0),
+                theme.on_accent_color(),
+            );
+
+            ui.painter().text(
+                btn_rect.center() + egui::vec2(0.0, 34.0),
+                egui::Align2::CENTER_CENTER,
+                "or press any key",
+                egui::FontId::proportional(11.5),
+                theme.text_muted_color(),
+            );
+
+            if btn_resp.clicked() {
+                self.reconnect_requested = true;
+                user_clicked_pane = true;
+            }
+            if hovered {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
         }
 

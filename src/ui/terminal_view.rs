@@ -243,6 +243,9 @@ pub fn render_terminal_workspace(app: &mut AppState, ctx: &egui::Context, ui: &m
             PaneAction::LayoutChanged => {
                 app.persist_sessions();
             }
+            PaneAction::Reconnect(id) => {
+                app.reconnect_session(id, ctx.clone());
+            }
         }
     }
 

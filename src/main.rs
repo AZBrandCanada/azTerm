@@ -1435,6 +1435,80 @@ impl AppState {
         changed
     }
 
+    /// Revive a dead session: tear down the exhausted PTY / daemon
+    /// attachment and spawn a fresh shell or SSH connection under the
+    /// SAME session id, so the tile tree and workspace layout keep
+    /// working without any further bookkeeping.
+    ///
+    /// Called when the user presses any key inside a dead pane, or
+    /// clicks the Reconnect overlay button.
+    pub fn reconnect_session(&mut self, session_id: usize, ctx: egui::Context) {
+        let info = self
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| (s.title.clone(), s.session_type.clone()));
+        let (title, session_type) = match info {
+            Some(i) => i,
+            None => return,
+        };
+
+        // If this was daemon-backed, tell the daemon to drop the stale
+        // session so the id is free for immediate reuse. Any attached
+        // streaming socket closes as a side effect; the old
+        // TerminalSession is about to be dropped anyway.
+        if let Some(ref daemon) = self.daemon {
+            let was_daemon = self
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .map(|s| s.is_daemon())
+                .unwrap_or(false);
+            if was_daemon {
+                daemon.kill(session_id as u64);
+            }
+        }
+
+        self.sessions.retain(|s| s.id != session_id);
+        Database::delete_scrollback(session_id);
+
+        // Respawn with the same id and title so the tile tree keeps
+        // pointing at a live session.
+        match session_type {
+            SessionType::Local { working_dir } => {
+                self.create_local_session_with_id(
+                    session_id,
+                    ctx,
+                    Some(working_dir),
+                    Some(title),
+                );
+            }
+            SessionType::Ssh { profile_id } => {
+                if let Some(profile) = self
+                    .ssh_store
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == profile_id)
+                    .cloned()
+                {
+                    self.create_ssh_session_with_id(
+                        &profile,
+                        session_id,
+                        ctx,
+                        Some(title),
+                    );
+                } else {
+                    self.set_toast(format!(
+                        "Cannot reconnect: SSH profile '{}' no longer exists",
+                        profile_id
+                    ));
+                }
+            }
+        }
+
+        self.active_session_id = session_id;
+    }
+
     pub fn close_session(&mut self, session_id: usize, ctx: egui::Context) {
         if let Some(s) = self.sessions.iter().find(|s| s.id == session_id) {
             if let SessionType::Ssh { profile_id } = &s.session_type {

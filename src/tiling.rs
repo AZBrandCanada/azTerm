@@ -290,6 +290,10 @@ pub enum PaneAction {
     /// Emitted once when a divider drag finishes, so the caller can
     /// persist the new ratio to the DB.
     LayoutChanged,
+    /// User asked to revive a dead session (typed a key into it, or
+    /// clicked the Reconnect overlay button). The app layer tears down
+    /// the old PTY and respawns a fresh one under the same session id.
+    Reconnect(usize),
 }
 
 pub fn render_tile_tree(
@@ -626,6 +630,14 @@ pub fn render_single_pane(
         });
 
         ui.set_clip_rect(prev_clip_body);
+
+        // Dead-session reconnect: if the render path (keyboard shortcut
+        // or overlay button) requested a reconnect, forward it to the
+        // app layer. Reset the flag so we only fire once per request.
+        if session.reconnect_requested {
+            session.reconnect_requested = false;
+            actions.push(PaneAction::Reconnect(session.id));
+        }
 
         if let Some((ref msg, (r, g, b))) = session.recovery_note {
             let col = egui::Color32::from_rgb(r, g, b);
