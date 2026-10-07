@@ -2,54 +2,45 @@
 //
 // System font discovery + egui application.
 //
-// Terminal cells are laid out on a fixed grid: every glyph occupies one
-// cell of identical width. That only works if the chosen font is
-// monospaced. We detect monospace-ness via fontconfig's `spacing`
-// property (90 = mono, 100 = proportional) and expose it as
-// `FontEntry::is_mono` so the Terminal Font dropdown can filter
-// accordingly. Selecting a proportional font there would produce
-// "text only fills half the pane" artifacts.
+// The terminal font (Monospace family) is EMBEDDED into the binary
+// via include_bytes!. This guarantees Braille glyphs (U+2800–U+28FF),
+// box-drawing, and Nerd Font icons render identically no matter how
+// AZTerm is installed (AppImage, .deb, Flatpak, cargo install,
+// manual build). No system font dependency, no fontconfig lookup,
+// no "works on my machine".
 //
-// Additionally, epaint PANICS on any file it can't parse as plain
-// TrueType/OpenType, so every byte buffer handed to `FontData::from_owned`
-// is validated against a magic-byte whitelist first.
+// The UI font (Proportional family) is still user-selectable and
+// loaded from disk — it only affects chrome (labels, buttons, nav),
+// never terminal cells, so a missing/broken UI font is a cosmetic
+// issue, not a correctness one.
 
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// -- Embedded terminal font ------------------------------------------------
+//
+// JetBrainsMono Nerd Font includes the full Braille block, all
+// Powerline/box-drawing glyphs, and the Nerd Font icon set.
+//
+// To update: drop the new .ttf into src/fonts/ and rebuild.
+const TERMINAL_FONT_REGULAR: &[u8] =
+    include_bytes!("fonts/JetBrainsMonoNerdFont-Regular.ttf");
+
+const EMBEDDED_FONT_KEY_REGULAR: &str = "azterm_terminal_font";
+
 #[derive(Debug, Clone)]
 pub struct FontEntry {
     pub family: String,
     pub path: PathBuf,
-    /// True if fontconfig reports `spacing=90` (monospaced). Terminal
-    /// sessions require a monospaced font; the Terminal Font dropdown
-    /// uses this flag to hide non-mono entries.
     pub is_mono: bool,
 }
 
-/// Stable egui family name for the "currently loaded as preview" entry
-/// at `idx` in the caller's font list. Callers pass the *original list
-/// index* (not the position within a narrowed slice) so previews remain
-/// keyed correctly no matter how many fonts are loaded in a given frame.
 pub fn preview_family_name(idx: usize) -> String {
     format!("azterm_font_preview_{}", idx)
 }
 
-/// Whitelist check: does this byte buffer start with a magic number
-/// that epaint's font parser accepts?
-///
-/// Accepts:
-///   * `00 01 00 00` — TrueType
-///   * `74 72 75 65` — "true" — Apple TrueType
-///   * `4F 54 54 4F` — "OTTO" — OpenType/CFF
-///
-/// Rejects (these panic inside epaint if passed through):
-///   * `74 74 63 66` — "ttcf" — TrueType Collection (.ttc)
-///   * `77 4F 46 46` — "wOFF" — WOFF
-///   * `77 4F 46 32` — "wOF2" — WOFF2
-///   * Anything else (truncated, corrupt, etc.)
 pub fn is_loadable_font(data: &[u8]) -> bool {
     if data.len() < 4 {
         return false;
@@ -60,7 +51,6 @@ pub fn is_loadable_font(data: &[u8]) -> bool {
     )
 }
 
-/// Read the first 4 bytes of a file and check the font magic number.
 fn file_looks_loadable(path: &Path) -> bool {
     use std::io::Read;
     let mut f = match std::fs::File::open(path) {
@@ -71,8 +61,6 @@ fn file_looks_loadable(path: &Path) -> bool {
     f.read_exact(&mut buf).is_ok() && is_loadable_font(&buf)
 }
 
-/// Enumerate installed fonts. Prefers fontconfig (`fc-list`); falls back
-/// to walking the standard font directories if fontconfig is missing.
 pub fn list_system_fonts() -> Vec<FontEntry> {
     let mono_families = mono_family_set();
     let mut entries = list_via_fc_list(&mono_families).unwrap_or_default();
@@ -84,8 +72,6 @@ pub fn list_system_fonts() -> Vec<FontEntry> {
     entries
 }
 
-/// Ask fontconfig for the set of monospaced family names. `spacing=90`
-/// is the standard fontconfig value for "monospace".
 fn mono_family_set() -> HashSet<String> {
     let mut set = HashSet::new();
     let out = match Command::new("fc-list")
@@ -149,9 +135,6 @@ fn list_via_fc_list(mono_families: &HashSet<String>) -> Option<Vec<FontEntry>> {
 }
 
 fn list_via_dir_scan() -> Vec<FontEntry> {
-    // Directory scan can't reliably determine monospace-ness without
-    // parsing font files. Heuristic: anything with "mono" in the name
-    // is treated as monospace, everything else as proportional.
     let mut roots: Vec<PathBuf> = vec![
         PathBuf::from("/usr/share/fonts"),
         PathBuf::from("/usr/local/share/fonts"),
@@ -207,10 +190,6 @@ fn walk_fonts(dir: &Path, out: &mut Vec<FontEntry>) {
     }
 }
 
-/// Apply UI + terminal font selections to egui.
-///
-/// Every load goes through `is_loadable_font()`. A bad file is skipped
-/// silently; the built-in fallback is used instead of panicking.
 pub fn apply_to_egui(
     ctx: &egui::Context,
     ui_font_path: &str,
@@ -219,8 +198,6 @@ pub fn apply_to_egui(
     let mut fonts = egui::FontDefinitions::default();
 
     // ---- UI font (Proportional family) --------------------------------
-    // Users can still pick this one; it only affects labels, buttons,
-    // and window chrome, never terminal cells.
     if !ui_font_path.trim().is_empty() {
         try_register_font(
             &mut fonts,
@@ -231,25 +208,16 @@ pub fn apply_to_egui(
     }
 
     // ---- Terminal font (Monospace family) -----------------------------
-    // Fixed to the built-in fallback chain. Not user-selectable any
-    // more — arbitrary monospace fonts broke cell alignment and
-    // copy/paste geometry.
-    if let Some(fb) = default_mono_font_path() {
-        let _ = try_register_font(
-            &mut fonts,
-            "azterm_terminal_font",
-            &fb,
-            Some(egui::FontFamily::Monospace),
-        );
+    // EMBEDDED. Always available, always has Braille.
+    fonts.font_data.insert(
+        EMBEDDED_FONT_KEY_REGULAR.to_owned(),
+        egui::FontData::from_static(TERMINAL_FONT_REGULAR),
+    );
+    if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        list.insert(0, EMBEDDED_FONT_KEY_REGULAR.to_owned());
     }
 
     // ---- Bounded preview families -------------------------------------
-    // Only fonts the caller explicitly asked for get loaded. In
-    // Settings, the caller passes just the entries currently inside
-    // the dropdown's scroll viewport (plus a one-row buffer). This
-    // keeps the atlas small even with hundreds of installed fonts,
-    // while still letting each visible list item render in its own
-    // typeface for live comparison.
     let mut actually_loaded: Vec<(usize, PathBuf)> = Vec::new();
     for (idx, path) in previews {
         let data = match std::fs::read(path) {
@@ -303,29 +271,4 @@ fn try_register_font(
         }
     }
     true
-}
-
-fn default_mono_font_path() -> Option<String> {
-    let candidates = [
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/TTF/JetBrainsMono-Regular.ttf",
-        "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
-        "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Regular.ttf",
-        "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
-        "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
-        "/usr/share/fonts/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
-        "/usr/share/fonts/truetype/nerd-fonts/SymbolsNerdFontMono-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/TTF/LiberationMono-Regular.ttf",
-    ];
-    for p in candidates {
-        if Path::new(p).exists() && file_looks_loadable(Path::new(p)) {
-            return Some(p.to_string());
-        }
-    }
-    None
 }
