@@ -15,7 +15,7 @@ of xterm mouse protocols.
 
 ### Changed
 
-- **Terminal emulation engine: `vt100` → `alacritty_terminal`.**
+- **Terminal emulation engine: `vt100` → `azterm-parser`.**
   The parser, grid, scrollback ring, and cell model are now handled by
   the same VT state machine that powers Alacritty. This fixes a long
   list of rendering artifacts that were not fixable on top of `vt100`:
@@ -35,7 +35,7 @@ of xterm mouse protocols.
     through the render pipeline.
 
   The engine is vendored as **`azterm-parser`**, a fork of
-  `alacritty_terminal` published under the AZBrand organisation. This
+  `azterm-parser` published under the AZBrand organisation. This
   pins the parser against upstream churn so a future Alacritty release
   cannot silently break AZTerm's rendering.
 
@@ -113,7 +113,7 @@ of xterm mouse protocols.
   fallback chain of hardcoded `/usr/share/fonts/...` paths.
 - The `vt100` dependency and the CBT-rewrite shim
   (`process_bytes_with_cbt`), which is no longer needed —
-  `alacritty_terminal` handles CSI Z correctly.
+  `azterm-parser` handles CSI Z correctly.
 
 ### Notes for packagers
 
