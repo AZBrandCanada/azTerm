@@ -8,6 +8,25 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+// -- Alacritty terminal integration -----------------------------------------
+//
+// The terminal emulation engine is provided by `alacritty_terminal`,
+// the same VT state machine that powers Alacritty. It handles all
+// escape sequences, grid management, scrollback, and selection.
+//
+// We feed raw PTY bytes through a `vte::ansi::Processor` which drives
+// the `Term` handler. Rendering reads `renderable_content()` and maps
+// each cell to egui primitives.
+
+use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::term::test::TermSize;
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
+use alacritty_terminal::vte::ansi::{
+    Color as AlacColor, CursorShape, NamedColor, Processor,
+};
+
 // -- Clipboard worker thread ------------------------------------------------
 //
 // All arboard operations are serialised on this single background thread.
@@ -113,9 +132,7 @@ pub fn set_system_clipboard_text(ctx: Option<&egui::Context>, text: &str) {
     if let Some(c) = ctx {
         c.copy_text(text.to_string());
     }
-    // Fire-and-forget. The worker thread holds the Clipboard object so the
-    // OS selection stays owned for as long as AZTerm runs. Callers don't
-    // wait for a result — a Ctrl+C should feel instant.
+    // Fire-and-forget.
     let _ = clipboard_tx().send(ClipboardMsg::Write(text.to_string()));
 }
 
@@ -124,19 +141,75 @@ pub fn set_system_clipboard_text(ctx: Option<&egui::Context>, text: &str) {
 /// so we never start replaying mid-escape-sequence.
 const HISTORY_MAX: usize = 1024 * 1024;
 
-fn vt_to_egui_color(color: vt100::Color, is_bg: bool, theme: &ThemeConfig) -> egui::Color32 {
-    match color {
-        vt100::Color::Default => {
-            if is_bg {
-                theme.bg_main_color()
-            } else {
-                theme.text_primary_color()
-            }
-        }
-        vt100::Color::Idx(idx) => theme.ansi_color(idx),
-        vt100::Color::Rgb(r, g, b) => egui::Color32::from_rgb(r, g, b),
+// -- Event listener for alacritty_terminal ----------------------------------
+
+/// Minimal event listener. We forward repaint requests and title changes.
+#[derive(Clone)]
+pub struct TermEventListener {
+    ctx: egui::Context,
+    title_tx: std::sync::mpsc::Sender<String>,
+}
+
+impl TermEventListener {
+    fn new(ctx: egui::Context, title_tx: std::sync::mpsc::Sender<String>) -> Self {
+        Self { ctx, title_tx }
     }
 }
+
+impl EventListener for TermEventListener {
+    fn send_event(&self, event: AlacTermEvent) {
+        match event {
+            AlacTermEvent::Wakeup => {
+                self.ctx.request_repaint();
+            }
+            AlacTermEvent::Title(title) => {
+                let _ = self.title_tx.send(title);
+            }
+            AlacTermEvent::ResetTitle => {
+                let _ = self.title_tx.send(String::new());
+            }
+            _ => {}
+        }
+    }
+}
+
+// -- Helper: convert alacritty color to egui color --------------------------
+
+fn alac_to_egui_color(color: AlacColor, theme: &ThemeConfig, is_bg: bool) -> egui::Color32 {
+    match color {
+        AlacColor::Named(named) => match named {
+            NamedColor::Black => egui::Color32::from_rgb(0, 0, 0),
+            NamedColor::Red => egui::Color32::from_rgb(205, 49, 49),
+            NamedColor::Green => egui::Color32::from_rgb(13, 188, 121),
+            NamedColor::Yellow => egui::Color32::from_rgb(229, 229, 16),
+            NamedColor::Blue => egui::Color32::from_rgb(36, 114, 200),
+            NamedColor::Magenta => egui::Color32::from_rgb(188, 63, 188),
+            NamedColor::Cyan => egui::Color32::from_rgb(17, 168, 205),
+            NamedColor::White => egui::Color32::from_rgb(229, 229, 229),
+            NamedColor::BrightBlack => egui::Color32::from_rgb(102, 102, 102),
+            NamedColor::BrightRed => egui::Color32::from_rgb(241, 76, 76),
+            NamedColor::BrightGreen => egui::Color32::from_rgb(35, 209, 139),
+            NamedColor::BrightYellow => egui::Color32::from_rgb(245, 245, 67),
+            NamedColor::BrightBlue => egui::Color32::from_rgb(59, 142, 234),
+            NamedColor::BrightMagenta => egui::Color32::from_rgb(214, 112, 214),
+            NamedColor::BrightCyan => egui::Color32::from_rgb(41, 184, 219),
+            NamedColor::BrightWhite => egui::Color32::from_rgb(255, 255, 255),
+            NamedColor::Foreground => theme.text_primary_color(),
+            NamedColor::Background => theme.bg_main_color(),
+            _ => {
+                if is_bg {
+                    theme.bg_main_color()
+                } else {
+                    theme.text_primary_color()
+                }
+            }
+        },
+        AlacColor::Spec(rgb) => egui::Color32::from_rgb(rgb.r, rgb.g, rgb.b),
+        AlacColor::Indexed(idx) => theme.ansi_color(idx),
+    }
+}
+
+// -- TerminalSession --------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub enum SessionType {
@@ -144,55 +217,18 @@ pub enum SessionType {
     Ssh { profile_id: String },
 }
 
-/// Stitch captured TUI frames into a single string. Adjacent frames
-/// overlap (nano pages ~half-screen), so we find the longest suffix/prefix
-/// match between consecutive frames and append only the new tail.
-fn combine_tui_frames(frames: Vec<Vec<String>>, drag_up: bool) -> String {
-    if frames.is_empty() {
-        return String::new();
-    }
-    if frames.len() == 1 {
-        return frames.into_iter().next().unwrap().join("\n");
-    }
-    let mut ordered = frames;
-    if drag_up {
-        // Frames were captured newest-first (we paged upward); reverse so
-        // older content lands at the top.
-        ordered.reverse();
-    }
-    let mut result: Vec<String> = Vec::new();
-    for frame in ordered {
-        if result.is_empty() {
-            result = frame;
-            continue;
-        }
-        let max_check = result.len().min(frame.len()).min(120);
-        let mut overlap = 0usize;
-        for k in (1..=max_check).rev() {
-            if result[result.len() - k..] == frame[..k] {
-                overlap = k;
-                break;
-            }
-        }
-        result.extend_from_slice(&frame[overlap..]);
-    }
-    result.join("\n")
-}
-
 pub struct TerminalSession {
     pub id: usize,
     pub title: String,
     pub session_type: SessionType,
-    pub parser: vt100::Parser,
+    pub term: Term<TermEventListener>,
+    pub parser: Processor,
     pub rx: Receiver<Vec<u8>>,
-    /// Channel to the dedicated pty-writer thread. Kept pub for parity with
-    /// the old `writer` field; callers should use send_input/send_paste.
+    /// Channel to the dedicated pty-writer thread.
     pub writer_tx: SyncSender<WriterMsg>,
-    /// Local PTY master handle. None in daemon mode (the daemon owns the
-    /// real PTY; the GUI only sees a byte stream).
+    /// Local PTY master handle. None in daemon mode.
     pub master_pty: Option<Arc<Mutex<Box<dyn MasterPty + Send>>>>,
-    /// Daemon-mode resize sink. Some when this session is daemon-backed.
-    /// Resize events are forwarded over IPC instead of hitting a local PTY.
+    /// Daemon-mode resize sink.
     pub daemon_resize_tx: Option<SyncSender<(u16, u16)>>,
     pub child_pid: Option<u32>,
     pub current_dir: Option<String>,
@@ -206,97 +242,42 @@ pub struct TerminalSession {
     pub selection_start: Option<(i64, u16)>,
     pub selection_end: Option<(i64, u16)>,
     pub is_dragging_selection: bool,
-    /// Throttles page-key emission when drag-selecting past the edge of
-    /// a full-screen program (nano, less, vim, htop, ...). Prevents
-    /// flooding the PTY with dozens of PageUp/PageDown per second.
     pub alt_drag_page_cooldown: Option<std::time::Instant>,
-    /// Screens snapshotted during a TUI drag where the user paged the app
-    /// (by edge-drag OR wheel-while-holding). At release, these frames are
-    /// stitched together so a single drag can copy multiple screens.
     pub tui_drag_frames: Vec<Vec<String>>,
-    /// Last snapshot; used to detect when the app actually redrew.
     pub tui_drag_last_snapshot: Vec<String>,
-    /// None until the user pages; true = paged up (older content), false = down.
     pub tui_drag_direction: Option<bool>,
 
-    /// Raw PTY output bytes captured for restore-on-reopen. Bounded ring
-    /// trimmed at HISTORY_MAX, aligned to the next ESC.
     pub recovery_note: Option<(String, (u8, u8, u8))>,
-
     pub history_buf: Vec<u8>,
-    /// Set true whenever history_buf grows; the caller clears it after
-    /// writing to disk. Lets persist_sessions skip unchanged sessions.
     pub history_dirty: bool,
 
-    /// Set true by the PTY reader thread when it observes EOF — i.e.
-    /// the shell, SSH connection, or child process has exited. The UI
-    /// uses this to offer a one-click reconnect instead of forcing the
-    /// user to close and re-open the whole tab.
     pub is_dead: std::sync::Arc<AtomicBool>,
-    /// Flipped to true when the user interacts with a dead session
-    /// (types any key, or clicks the Reconnect overlay button).
-    /// `render_single_pane` checks this after `render()` returns and
-    /// emits `PaneAction::Reconnect` for the app layer to handle.
     pub reconnect_requested: bool,
+
+    /// Retained context for re-creating the Term on panic recovery.
+    ctx: egui::Context,
+    /// Receiver for title updates from the event listener.
+    title_rx: Receiver<String>,
 }
 
-/// Backtab (CBT, CSI Z) is silently ignored by vt100 0.15.
-///
-/// Nano, vim, htop, less and friends use CBT to jump the cursor to the
-/// previous tab stop, which can be several columns away. When the parser
-/// drops it, its cursor state diverges from the program's and every later
-/// *relative* cursor move (BS, CSI C, Tab, another CBT) inherits the
-/// error. That is the mechanism behind the "cursor jumps then writes land
-/// on the wrong cell" corruption in nano.
-///
-/// This wrapper scans each chunk for CBT and rewrites every occurrence
-/// into the equivalent absolute cursor-left move computed from the
-/// parser's live column. Non-CBT bytes are forwarded verbatim, so escape
-/// sequences that legitimately span chunk boundaries still work.
-fn process_bytes_with_cbt(parser: &mut vt100::Parser, bytes: &[u8]) {
-    // Fast path: no CBT anywhere in this chunk.
-    if bytes.len() < 3 || !bytes.windows(3).any(|w| w == b"\x1b[Z") {
-        parser.process(bytes);
-        return;
-    }
-
-    // Standard xterm-256color tab stops: every 8 columns.
-    const TAB_SIZE: u16 = 8;
-
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let rel = match bytes[i..].windows(3).position(|w| w == b"\x1b[Z") {
-            Some(r) => r,
-            None => {
-                if i < bytes.len() {
-                    parser.process(&bytes[i..]);
-                }
-                return;
-            }
-        };
-        let cbt_at = i + rel;
-
-        // Feed everything before the CBT normally.
-        if cbt_at > i {
-            parser.process(&bytes[i..cbt_at]);
-        }
-
-        // Translate CBT -> CSI {n} D. From column N, CBT moves to the
-        // previous tab stop strictly less than N.
-        let (_, col) = parser.screen().cursor_position();
-        let prev_tab = if col == 0 {
-            0
-        } else {
-            ((col - 1) / TAB_SIZE) * TAB_SIZE
-        };
-        let distance = col.saturating_sub(prev_tab);
-        if distance > 0 {
-            let seq = format!("\x1b[{}D", distance);
-            parser.process(seq.as_bytes());
-        }
-
-        i = cbt_at + 3;
-    }
+fn make_term(
+    ctx: &egui::Context,
+    rows: u16,
+    cols: u16,
+    scrollback: usize,
+) -> (Term<TermEventListener>, Receiver<String>) {
+    let (title_tx, title_rx) = std::sync::mpsc::channel();
+    let listener = TermEventListener::new(ctx.clone(), title_tx);
+    let term_config = TermConfig {
+        scrolling_history: scrollback.max(1000),
+        ..Default::default()
+    };
+    let term_size = TermSize {
+        columns: cols as usize,
+        screen_lines: rows as usize,
+    };
+    let term = Term::new(term_config, &term_size, listener);
+    (term, title_rx)
 }
 
 impl TerminalSession {
@@ -342,20 +323,12 @@ impl TerminalSession {
         let master_pty = Arc::new(Mutex::new(pair.master));
 
         let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(512);
-        // Writer channel: deliberately large. send_input uses
-        // try_send from the UI thread (must never block), so a full
-        // channel would silently drop keystrokes. 64K pending
-        // messages is far beyond any realistic backpressure; even a
-        // completely wedged downstream PTY would need hundreds of
-        // thousands of keystrokes to fill it.
         let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) =
             sync_channel(65536);
 
         let is_dead = std::sync::Arc::new(AtomicBool::new(false));
 
-        // Dedicated writer thread. The UI never blocks on pty writes — it
-        // just hands bytes to this thread. Prevents UI freezes when SSH's
-        // stdin buffer backs up on a stalled connection.
+        // Dedicated writer thread.
         thread::spawn(move || {
             while let Ok(msg) = writer_rx.recv() {
                 match msg {
@@ -371,6 +344,7 @@ impl TerminalSession {
 
         {
             let is_dead = is_dead.clone();
+            let ctx = ctx.clone();
             thread::spawn(move || {
                 let mut buf = [0u8; 16384];
                 while let Ok(n) = reader.read(&mut buf) {
@@ -392,11 +366,14 @@ impl TerminalSession {
             SessionType::Ssh { .. } => None,
         };
 
+        let (term, title_rx) = make_term(&ctx, rows, cols, scrollback_len);
+
         Self {
             id,
             title,
             session_type,
-            parser: vt100::Parser::new(rows, cols, scrollback_len.max(1000)),
+            term,
+            parser: Processor::new(),
             rx,
             writer_tx,
             master_pty: Some(master_pty),
@@ -421,6 +398,8 @@ impl TerminalSession {
             recovery_note: None,
             is_dead,
             reconnect_requested: false,
+            ctx,
+            title_rx,
         }
     }
 
@@ -429,9 +408,7 @@ impl TerminalSession {
         self.daemon_resize_tx.is_some()
     }
 
-    /// Build a TerminalSession that reads from and writes to the daemon
-    /// instead of owning a local PTY. Returns None if the attach handshake
-    /// fails (daemon died, session was killed between List and Attach).
+    /// Build a TerminalSession that reads from and writes to the daemon.
     pub fn new_daemon(
         id: usize,
         title: String,
@@ -465,7 +442,6 @@ impl TerminalSession {
             thread::spawn(move || {
                 while let Ok(bytes) = out_rx.recv() {
                     if bytes.is_empty() {
-                        // EOF sentinel from client reader.
                         break;
                     }
                     if tx.send(bytes).is_err() {
@@ -478,8 +454,6 @@ impl TerminalSession {
             });
         }
 
-        // Same rationale as the local-writer channel above: large
-        // enough that UI-thread try_send never realistically drops.
         let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) =
             sync_channel(65536);
         {
@@ -502,11 +476,14 @@ impl TerminalSession {
             SessionType::Ssh { .. } => None,
         };
 
+        let (term, title_rx) = make_term(&ctx, rows, cols, scrollback_len);
+
         Some(Self {
             id,
             title,
             session_type,
-            parser: vt100::Parser::new(rows, cols, scrollback_len.max(1000)),
+            term,
+            parser: Processor::new(),
             rx,
             writer_tx,
             master_pty: None,
@@ -531,13 +508,11 @@ impl TerminalSession {
             recovery_note: None,
             is_dead,
             reconnect_requested: false,
+            ctx,
+            title_rx,
         })
     }
 
-    /// True once the child process on the other end of this PTY has
-    /// exited and the reader thread has seen EOF. The UI uses this to
-    /// show a Reconnect overlay and to short-circuit keyboard input
-    /// into a reconnect request.
     pub fn session_ended(&self) -> bool {
         self.is_dead.load(Ordering::Relaxed)
     }
@@ -560,36 +535,10 @@ impl TerminalSession {
             }
         }
 
-        let screen = self.parser.screen();
-        let title = screen.title();
-        if !title.is_empty() {
-            if let Some(dir) = Self::parse_dir_from_str(title, ssh_user) {
+        // Try to extract a path from the current title (set via OSC 0/2).
+        if !self.title.is_empty() {
+            if let Some(dir) = Self::parse_dir_from_str(&self.title, ssh_user) {
                 return Some(dir);
-            }
-        }
-
-        let (cursor_r, _) = screen.cursor_position();
-        let (rows, cols) = screen.size();
-        let start_r = cursor_r.min(rows.saturating_sub(1));
-        let min_r = start_r.saturating_sub(4);
-
-        for r in (min_r..=start_r).rev() {
-            let mut line_text = String::with_capacity(cols as usize);
-            for c in 0..cols {
-                if let Some(cell) = screen.cell(r, c) {
-                    let contents = cell.contents();
-                    if contents.is_empty() {
-                        line_text.push(' ');
-                    } else {
-                        line_text.push_str(&contents);
-                    }
-                }
-            }
-            let trimmed = line_text.trim();
-            if !trimmed.is_empty() {
-                if let Some(dir) = Self::parse_dir_from_str(trimmed, ssh_user) {
-                    return Some(dir);
-                }
             }
         }
 
@@ -651,37 +600,31 @@ impl TerminalSession {
         Some(resolved)
     }
 
-    /// Replay persisted raw PTY bytes into the parser, then roll every
-    /// visible row into scrollback and clear the visible screen so the
-    /// new shell's prompt lands at the top-left of a clean pane. All
-    /// historical output stays reachable via the scroll wheel.
     pub fn feed_restore_history(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.parser.process(bytes);
+            self.parser.advance(&mut self.term, bytes);
         }));
 
-        // Emit enough line-feeds to push every visible row into the
-        // scrollback ring, then clear the visible screen and home the
-        // cursor. 2*rows is safely more than the cursor can ever need.
+        // Push visible content into scrollback, then clear and home.
         let mut push = Vec::with_capacity(self.rows as usize * 2 + 8);
         for _ in 0..(self.rows as usize * 2) {
             push.push(b'\n');
         }
         push.extend_from_slice(b"\x1b[2J\x1b[H");
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.parser.process(&push);
+            self.parser.advance(&mut self.term, &push);
         }));
 
         self.scroll_offset = 0;
         self.max_scroll = 0;
-        self.parser.set_scrollback(0);
+        self.term.scroll_display(Scroll::Bottom);
     }
 
     pub fn clear_screen_and_scrollback(&mut self) {
-        self.parser = vt100::Parser::new(self.rows, self.cols, self.scrollback_limit);
+        self.parser.advance(&mut self.term, b"\x1b[2J\x1b[H");
         self.scroll_offset = 0;
         self.max_scroll = 0;
         self.selection_start = None;
@@ -689,86 +632,31 @@ impl TerminalSession {
     }
 
     pub fn query_max_scrollback(&mut self) -> usize {
-        let current = self.parser.screen().scrollback();
-        self.parser.set_scrollback(usize::MAX);
-        let max = self.parser.screen().scrollback();
-        self.parser.set_scrollback(current);
-        max
+        self.term.grid().display_offset()
     }
 
     pub fn set_view_scroll(&mut self, target: usize) {
-        if self.parser.screen().alternate_screen() {
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
             self.scroll_offset = 0;
-            self.parser.set_scrollback(0);
+            self.term.scroll_display(Scroll::Bottom);
             return;
         }
 
-        self.max_scroll = self.query_max_scrollback();
+        self.max_scroll = self.term.history_size();
         let clamped = target.min(self.max_scroll);
+        let current = self.term.grid().display_offset() as i32;
+        let delta = clamped as i32 - current;
+        if delta != 0 {
+            self.term.scroll_display(Scroll::Delta(delta));
+        }
         self.scroll_offset = clamped;
-        self.parser.set_scrollback(clamped);
-    }
-
-    /// Heuristic: does this look like a full-screen TUI (nano, htop, mc,
-    /// emacs -nw, ...) running in the *primary* screen?
-    ///
-    /// Signal: does the app write content BELOW the cursor? Shells write
-    /// sequentially, so the cursor is always at the last written cell and
-    /// everything below is blank. TUIs position the cursor and draw status
-    /// bars / panels below it, so there's usually non-blank content further
-    /// down the screen.
-    fn looks_like_primary_screen_tui(&self) -> bool {
-        let screen = self.parser.screen();
-        if screen.alternate_screen() {
-            return false;
-        }
-        let (cursor_r, _) = screen.cursor_position();
-        let (rows, cols) = screen.size();
-        if cursor_r >= rows.saturating_sub(1) {
-            return false;
-        }
-        for r in (cursor_r + 1)..rows {
-            for c in 0..cols {
-                if let Some(cell) = screen.cell(r, c) {
-                    let contents = cell.contents();
-                    if !contents.is_empty() && contents != " " {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Snapshot the current visible rows as trimmed strings.
-    /// Used to capture TUI frames while drag-scrolling nano / htop / etc.
-    pub fn snapshot_visible_lines(&self) -> Vec<String> {
-        let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
-        let mut out = Vec::with_capacity(rows as usize);
-        for r in 0..rows {
-            let mut line = String::with_capacity(cols as usize);
-            for c in 0..cols {
-                if let Some(cell) = screen.cell(r, c) {
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
-                    let t = cell.contents();
-                    if t.is_empty() {
-                        line.push(' ');
-                    } else {
-                        line.push_str(&t);
-                    }
-                }
-            }
-            out.push(line.trim_end().to_string());
-        }
-        out
     }
 
     pub fn send_input(&mut self, text: &str) {
-        if self.recovery_note.is_some() { self.recovery_note = None; }
-        if self.scroll_offset > 0 && !self.parser.screen().alternate_screen() {
+        if self.recovery_note.is_some() {
+            self.recovery_note = None;
+        }
+        if self.scroll_offset > 0 && !self.term.mode().contains(TermMode::ALT_SCREEN) {
             self.set_view_scroll(0);
         }
         crate::dbg_log!(
@@ -791,12 +679,11 @@ impl TerminalSession {
         row: u16,
         modifiers: egui::Modifiers,
     ) {
-        let mode = self.parser.screen().mouse_protocol_mode();
-        if mode == vt100::MouseProtocolMode::None {
+        let mode = self.term.mode();
+        if !mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION) {
             return;
         }
 
-        let encoding = self.parser.screen().mouse_protocol_encoding();
         let c = col.saturating_add(1).min(self.cols);
         let r = row.saturating_add(1).min(self.rows);
 
@@ -811,21 +698,19 @@ impl TerminalSession {
             btn = btn.saturating_add(16);
         }
 
-        match encoding {
-            vt100::MouseProtocolEncoding::Sgr => {
-                let term = if is_release { 'm' } else { 'M' };
-                let seq = format!("\x1b[<{};{};{}{}", btn, c, r, term);
-                self.send_input(&seq);
-            }
-            _ => {
-                let code = if is_release { 3 } else { btn };
-                let cb = 32u8.saturating_add(code);
-                let cx = (32u16.saturating_add(c)).min(255) as u8;
-                let cy = (32u16.saturating_add(r)).min(255) as u8;
-                let _ = self.writer_tx.try_send(WriterMsg::Data(vec![
-                    b'\x1b', b'[', b'M', cb, cx, cy,
-                ]));
-            }
+        let sgr = mode.contains(TermMode::SGR_MOUSE);
+        if sgr {
+            let term = if is_release { 'm' } else { 'M' };
+            let seq = format!("\x1b[<{};{};{}{}", btn, c, r, term);
+            self.send_input(&seq);
+        } else {
+            let code = if is_release { 3 } else { btn };
+            let cb = 32u8.saturating_add(code);
+            let cx = (32u16.saturating_add(c)).min(255) as u8;
+            let cy = (32u16.saturating_add(r)).min(255) as u8;
+            let _ = self.writer_tx.try_send(WriterMsg::Data(vec![
+                b'\x1b', b'[', b'M', cb, cx, cy,
+            ]));
         }
     }
 
@@ -837,7 +722,7 @@ impl TerminalSession {
             self.set_view_scroll(0);
         }
 
-        let bracketed = self.parser.screen().bracketed_paste();
+        let bracketed = self.term.mode().contains(TermMode::BRACKETED_PASTE);
         let payload = if bracketed {
             let sanitized = text.replace('\x1b', "");
             let normalized = sanitized.replace("\r\n", "\n").replace('\r', "\n");
@@ -859,10 +744,10 @@ impl TerminalSession {
 
     pub fn poll_updates(&mut self) {
         let mut total_bytes = 0;
-        let in_alt = self.parser.screen().alternate_screen();
+        let in_alt = self.term.mode().contains(TermMode::ALT_SCREEN);
 
         let old_max = if !in_alt && self.scroll_offset > 0 {
-            self.query_max_scrollback()
+            self.term.history_size()
         } else {
             0
         };
@@ -870,9 +755,6 @@ impl TerminalSession {
         while let Ok(bytes) = self.rx.try_recv() {
             total_bytes += bytes.len();
 
-            // Log the head of every PTY chunk. We cap the hex dump at
-            // 64 bytes so a full-screen redraw doesn't flood the log;
-            // for a single arrow-key tap the whole chunk fits.
             crate::dbg_log!(
                 "pty_recv id={} n={} hex={:02x?}",
                 self.id,
@@ -880,77 +762,23 @@ impl TerminalSession {
                 &bytes[..bytes.len().min(64)]
             );
 
-            if !in_alt && bytes.windows(4).any(|w| w == b"\x1b[3J") {
-                self.clear_screen_and_scrollback();
-            }
-
-            if let Some(idx) = bytes.windows(9).position(|w| w == b"\x1b]7;file:") {
-                let rest = &bytes[idx + 9..];
-                let end_idx = rest.iter().position(|&b| b == 0x07 || b == 0x1b);
-                if let Some(end) = end_idx {
-                    if let Ok(s) = std::str::from_utf8(&rest[..end]) {
-                        let path_candidate = if let Some(stripped) = s.strip_prefix("//") {
-                            if let Some(slash_idx) = stripped.find('/') {
-                                &stripped[slash_idx..]
-                            } else {
-                                stripped
-                            }
-                        } else {
-                            s
-                        };
-                        if !path_candidate.is_empty() {
-                            self.current_dir = Some(path_candidate.replace("%20", " "));
-                        }
-                    }
-                }
-            }
-
-            // Parser panic handling. `catch_unwind` catches but does NOT
-            // restore the parser's internal state — if vt100 panics
-            // halfway through a byte sequence, the parser is left in a
-            // corrupt state and every subsequent byte is misparsed.
-            // That is the classic "random characters appear everywhere"
-            // symptom. Log the offending bytes AND reset the parser so
-            // the terminal is usable again instead of stuck corrupt.
             let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                process_bytes_with_cbt(&mut self.parser, &bytes);
+                self.parser.advance(&mut self.term, &bytes);
             }));
-            {
-                let screen = self.parser.screen();
-                let (cr, cc) = screen.cursor_position();
-                let at = screen
-                    .cell(cr, cc)
-                    .map(|c| c.contents().to_string())
-                    .unwrap_or_else(|| "<none>".into());
-                crate::dbg_log!(
-                    "cursor_after id={} pos=(r{},c{}) at={:?}",
-                    self.id, cr, cc, at
-                );
-            }
             if parse_result.is_err() {
                 crate::dbg_log!(
-                    "PARSER_PANIC id={} bytes={:02x?} — resetting parser",
+                    "PARSER_PANIC id={} bytes={:02x?} — resetting term",
                     self.id,
                     &bytes[..bytes.len().min(128)]
                 );
-                self.parser = vt100::Parser::new(
-                    self.rows,
-                    self.cols,
-                    self.scrollback_limit,
-                );
-                // Ask the app to repaint. The freshly-created parser is
-                // blank, but nano/vim/htop still think their previous
-                // screen state is live — without a full repaint every
-                // later incremental write lands in the wrong cell.
-                // Ctrl+L (0x0C) is the universal "redraw screen" key
-                // for curses programs.
+                let (term, title_rx) =
+                    make_term(&self.ctx, self.rows, self.cols, self.scrollback_limit);
+                self.term = term;
+                self.title_rx = title_rx;
+                self.parser = Processor::new();
                 let _ = self.writer_tx.try_send(WriterMsg::Data(vec![0x0c]));
             }
 
-            // Mirror into the restore-history buffer. Same loop iteration
-            // as parser.process, so the two stay in sync even if the
-            // 256 KB break below kicks in (bytes leftover stay in the
-            // channel for the next frame).
             self.history_buf.extend_from_slice(&bytes);
             if self.history_buf.len() > HISTORY_MAX {
                 let target = self.history_buf.len() - HISTORY_MAX;
@@ -969,23 +797,36 @@ impl TerminalSession {
             }
         }
 
+        // Pull any title updates.
+        while let Ok(title) = self.title_rx.try_recv() {
+            if !title.is_empty() {
+                self.title = title;
+            }
+        }
+
         if total_bytes > 0 {
             crate::dbg_log!("pty_poll id={} bytes={}", self.id, total_bytes);
         }
 
         if in_alt {
             self.scroll_offset = 0;
-            self.parser.set_scrollback(0);
         } else if self.scroll_offset > 0 {
-            let new_max = self.query_max_scrollback();
+            let new_max = self.term.history_size();
             if new_max > old_max {
                 let added = new_max - old_max;
-                self.scroll_offset = (self.scroll_offset + added).min(new_max);
-                self.parser.set_scrollback(self.scroll_offset);
+                let new_offset = (self.scroll_offset + added).min(new_max);
+                let current = self.term.grid().display_offset() as i32;
+                let delta = new_offset as i32 - current;
+                if delta != 0 {
+                    self.term.scroll_display(Scroll::Delta(delta));
+                }
+                self.scroll_offset = new_offset;
             }
             self.max_scroll = new_max;
         }
     }
+
+    // -- Selection helpers --------------------------------------------------
 
     fn is_cell_selected(&self, line_age: i64, c: u16) -> bool {
         if let (Some(start), Some(end)) = (self.selection_start, self.selection_end) {
@@ -1022,43 +863,17 @@ impl TerminalSession {
         }
     }
 
-    fn find_word_bounds(&self, r: u16, c: u16) -> Option<(u16, u16)> {
-        let screen = self.parser.screen();
-        let cols = self.cols;
-        if c >= cols {
-            return None;
+    /// Snapshot visible cells keyed by (viewport_row, col).
+    fn visible_cells(&self) -> std::collections::HashMap<(i32, usize), (char, AlacColor, AlacColor, CellFlags)> {
+        let mut map = std::collections::HashMap::new();
+        let content = self.term.renderable_content();
+        for indexed in content.display_iter {
+            let row = indexed.point.line.0;
+            let col = indexed.point.column.0;
+            let cell = indexed.cell;
+            map.insert((row, col), (cell.c, cell.fg, cell.bg, cell.flags));
         }
-
-        let is_word_char = |col: u16| -> bool {
-            if let Some(cell) = screen.cell(r, col) {
-                let text = cell.contents();
-                if let Some(ch) = text.chars().next() {
-                    return ch.is_alphanumeric()
-                        || ch == '_'
-                        || ch == '-'
-                        || ch == '.'
-                        || ch == '/'
-                        || ch == ':';
-                }
-            }
-            false
-        };
-
-        if !is_word_char(c) {
-            return Some((c, c));
-        }
-
-        let mut start_c = c;
-        while start_c > 0 && is_word_char(start_c - 1) {
-            start_c -= 1;
-        }
-
-        let mut end_c = c;
-        while end_c + 1 < cols && is_word_char(end_c + 1) {
-            end_c += 1;
-        }
-
-        Some((start_c, end_c))
+        map
     }
 
     fn extract_selected_text(&mut self) -> String {
@@ -1071,47 +886,32 @@ impl TerminalSession {
                     (end.0, end.1, start.0, start.1)
                 };
 
-            let saved_offset = self.scroll_offset;
+            let cells = self.visible_cells();
+            let rows = self.rows as i64;
+            let cols = self.cols;
 
             for age in (bot_age..=top_age).rev() {
-                let target_r = (self.rows as i64 - 1) + self.scroll_offset as i64 - age;
-
-                let (screen_r, temp_offset): (u16, usize) =
-                    if target_r >= 0 && target_r < self.rows as i64 {
-                        (target_r as u16, self.scroll_offset)
-                    } else if target_r < 0 {
-                        let needed_offset =
-                            (self.scroll_offset as i64 - target_r).max(0) as usize;
-                        (0u16, needed_offset)
-                    } else {
-                        let diff = target_r - (self.rows as i64 - 1);
-                        let needed_offset =
-                            (self.scroll_offset as i64 - diff).max(0) as usize;
-                        (self.rows.saturating_sub(1), needed_offset)
-                    };
-
-                self.parser.set_scrollback(temp_offset);
-                let screen = self.parser.screen();
-
+                let screen_r = rows - 1 - age;
                 let start_c = if age == top_age { top_col } else { 0 };
                 let end_c = if age == bot_age {
                     bot_col
                 } else {
-                    self.cols.saturating_sub(1)
+                    cols.saturating_sub(1)
                 };
 
                 let mut line = String::new();
                 for c in start_c..=end_c {
-                    if let Some(cell) = screen.cell(screen_r, c) {
-                        if cell.is_wide_continuation() {
+                    if let Some((ch, _, _, flags)) = cells.get(&(screen_r as i32, c as usize)) {
+                        if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
                             continue;
                         }
-                        let text = cell.contents();
-                        if text.is_empty() {
+                        if *ch == '\0' || *ch == ' ' {
                             line.push(' ');
                         } else {
-                            line.push_str(&text);
+                            line.push(*ch);
                         }
+                    } else {
+                        line.push(' ');
                     }
                 }
                 result.push_str(line.trim_end());
@@ -1119,11 +919,11 @@ impl TerminalSession {
                     result.push('\n');
                 }
             }
-
-            self.parser.set_scrollback(saved_offset);
         }
         result
     }
+
+    // -- Keyboard handling --------------------------------------------------
 
     fn handle_keyboard_events(
         &mut self,
@@ -1131,10 +931,6 @@ impl TerminalSession {
         settings: &AppSettings,
         toast: &mut Option<(String, std::time::Instant)>,
     ) {
-        // Dead-session short circuit: any key press requests a
-        // reconnect. Matches the muscle memory of just hitting Enter
-        // to retry, without the user having to close and re-open the
-        // whole tab.
         if self.session_ended() {
             let any_key = ctx.input(|i| {
                 i.events.iter().any(|e| matches!(
@@ -1150,23 +946,10 @@ impl TerminalSession {
             return;
         }
 
-        // If egui already produced an Event::Paste this frame, do NOT also send
-        // the raw 0x16 (Ctrl+V / readline quoted-insert) — that double-input
-        // corrupts pasted scripts and leaves readline in a weird state.
         let has_paste_event = ctx.input(|i| {
             i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
         });
 
-        // Any text that needs to end up on the system clipboard is queued
-        // here and flushed AFTER the ctx.input(...) closure below returns.
-        //
-        // Why: egui::Context::input() holds egui's internal parking_lot
-        // RwLock for the duration of the closure. ctx.copy_text() tries
-        // to acquire the SAME write lock on the SAME thread, which
-        // parking_lot does not permit. The process deadlocks and is
-        // aborted (SIGABRT). Collecting the payload here and calling
-        // set_system_clipboard_text once outside the closure avoids the
-        // reentrant lock entirely.
         let mut pending_clipboard: Option<String> = None;
 
         ctx.input(|i| {
@@ -1188,7 +971,7 @@ impl TerminalSession {
                     return;
                 }
                 if i.key_pressed(egui::Key::L) {
-                    if !self.parser.screen().alternate_screen() {
+                    if !self.term.mode().contains(TermMode::ALT_SCREEN) {
                         self.clear_screen_and_scrollback();
                     } else {
                         self.scroll_offset = 0;
@@ -1223,7 +1006,6 @@ impl TerminalSession {
                     egui::Event::Copy => {
                         let selected = self.extract_selected_text();
                         if !selected.is_empty() {
-                            // Deferred — see pending_clipboard above.
                             pending_clipboard = Some(selected);
                         } else {
                             self.send_input("\x03");
@@ -1247,11 +1029,6 @@ impl TerminalSession {
                         repeat,
                         ..
                     } => {
-                        // Log EVERY key event, not just the "interesting"
-                        // ones. If a single tap is producing two events
-                        // (one from keydown, one from a bogus
-                        // Text-with-modifier path), this is where we'll
-                        // see it.
                         crate::dbg_log!(
                             "kbd id={} key={:?} ctrl={} shift={} alt={} cmd={} repeat={}",
                             self.id,
@@ -1262,20 +1039,8 @@ impl TerminalSession {
                             modifiers.command,
                             repeat
                         );
-                        if *key == egui::Key::Enter {
-                            crate::dbg_log!(
-                                "kbd_enter id={} ctrl={} shift={} alt={} cmd={}",
-                                self.id,
-                                modifiers.ctrl,
-                                modifiers.shift,
-                                modifiers.alt,
-                                modifiers.command
-                            );
-                        }
+
                         if *key == egui::Key::Tab {
-                            // Shell autocomplete. Shift+Tab sends the
-                            // xterm "backtab" sequence (CSI Z), which zsh
-                            // and readline map to reverse-menu-complete.
                             if modifiers.shift {
                                 self.send_input("\x1b[Z");
                             } else {
@@ -1288,16 +1053,10 @@ impl TerminalSession {
                             continue;
                         }
 
-                        // Shift+PageUp/PageDown/Home/End scroll the
-                        // terminal scrollback (not the child app) —
-                        // but ONLY when we actually own the
-                        // scrollback (i.e. not in alt-screen and not
-                        // a primary-screen TUI that has its own
-                        // scrolling). In nano/less/vim we must
-                        // forward the raw key so the app handles it.
-                        let owns_scrollback = !self.parser.screen().alternate_screen()
-                            && self.parser.screen().mouse_protocol_mode()
-                                == vt100::MouseProtocolMode::None;
+                        let owns_scrollback = !self.term.mode().contains(TermMode::ALT_SCREEN)
+                            && !self.term.mode().intersects(
+                                TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION,
+                            );
                         if modifiers.shift && owns_scrollback {
                             if *key == egui::Key::PageUp {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
@@ -1319,22 +1078,6 @@ impl TerminalSession {
                             }
                         }
 
-                        // ---- Terminal control keys, modifier-independent ----
-                        //
-                        // Arrow keys, Home/End, PageUp/Down, and Delete
-                        // are terminal keys. egui can report stale
-                        // modifier state on the frame a key event
-                        // arrives (especially on Wayland), and the old
-                        // code gated these sequences behind
-                        // `!modifiers.ctrl`, which silently discarded
-                        // the keypress when a stale ctrl was reported.
-                        // Send the base sequence unconditionally; TUI
-                        // apps interpret shift/ctrl variants the same
-                        // way as the base for these keys anyway.
-                        //
-                        // The only exception is Ctrl+Shift+A/C/V,
-                        // which the terminal widget uses for its own
-                        // operations — those run first below.
                         let ctrl_shift_reserved = modifiers.ctrl && modifiers.shift
                             && matches!(key, egui::Key::A | egui::Key::C | egui::Key::V);
                         if !ctrl_shift_reserved {
@@ -1351,34 +1094,17 @@ impl TerminalSession {
                                 _ => None,
                             };
                             if let Some(seq) = control_seq {
-                                crate::dbg_log!(
-                                    "kbd_ctrl_seq id={} key={:?} ctrl={} shift={} alt={} bytes={:?}",
-                                    self.id,
-                                    key,
-                                    modifiers.ctrl,
-                                    modifiers.shift,
-                                    modifiers.alt,
-                                    seq
-                                );
                                 self.send_input(&String::from_utf8_lossy(seq));
                                 continue;
                             }
                         }
 
                         if modifiers.ctrl && modifiers.shift && *key == egui::Key::A {
-                            // Select the entire scrollback buffer + current screen.
-                            let max = self.query_max_scrollback();
+                            let max = self.term.history_size();
                             let top_age = (max + self.rows as usize - 1) as i64;
                             self.selection_start = Some((top_age, 0));
                             self.selection_end = Some((0i64, self.cols.saturating_sub(1)));
                             self.is_dragging_selection = false;
-                            crate::dbg_log!(
-                                "sel_all id={} scrollback={} rows={} top_age={}",
-                                self.id,
-                                max,
-                                self.rows,
-                                top_age
-                            );
                             *toast = Some((
                                 format!(
                                     "Selected {} line(s) of scrollback (Ctrl+Shift+C to copy)",
@@ -1392,7 +1118,6 @@ impl TerminalSession {
                         if modifiers.ctrl && modifiers.shift && *key == egui::Key::C {
                             let selected = self.extract_selected_text();
                             if !selected.is_empty() {
-                                // Deferred — see pending_clipboard above.
                                 let line_count = selected.lines().count().max(1);
                                 *toast = Some((
                                     format!("Copied {} line(s)", line_count),
@@ -1477,14 +1202,12 @@ impl TerminalSession {
             }
         });
 
-        // Flush any clipboard copy queued while inside the ctx.input
-        // closure above. Running it here — outside the closure — is what
-        // avoids the reentrant lock on egui's Context that was
-        // triggering SIGABRT crashes on Ctrl+C / Ctrl+Shift+C.
         if let Some(text) = pending_clipboard {
             set_system_clipboard_text(Some(ctx), &text);
         }
     }
+
+    // -- Render -------------------------------------------------------------
 
     pub fn render(
         &mut self,
@@ -1497,19 +1220,6 @@ impl TerminalSession {
         let font_size = settings.terminal_font_size.clamp(6.0, 32.0);
         let font_id = egui::FontId::monospace(font_size);
 
-        // Measure the per-cell advance width by laying out a sample row
-        // using the exact same structure the render loop below uses: one
-        // TextFormat run per cell, no wrapping. This is what egui's text
-        // layout will actually do for the real row, so the mouse-to-cell
-        // mapping stays aligned with the glyphs the user sees.
-        //
-        // The previous approach ("WWWWWWWWWW" laid out and divided by 10)
-        // produced a per-cell width that disagreed with the real row
-        // layout: the two paths round glyph advances differently, and the
-        // error accumulated across the width of the terminal. That's why
-        // the selection highlight drifted away from the cursor, and why
-        // the drift got larger or smaller when font size or app zoom
-        // changed.
         const SAMPLE_CELLS: usize = 100;
         let mut sample_job = egui::text::LayoutJob::default();
         sample_job.wrap.max_width = f32::INFINITY;
@@ -1528,35 +1238,20 @@ impl TerminalSession {
         let char_width = (sample_galley.size().x / SAMPLE_CELLS as f32).max(1.0);
         let row_height = (sample_galley.size().y * 1.05).max(1.0);
 
-        let in_alternate = self.parser.screen().alternate_screen();
-        let has_mouse =
-            self.parser.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None;
-        // Do NOT require alternate screen: nano, htop and emacs -nw sometimes
-        // run in the primary screen but still enable xterm mouse reporting.
+        let in_alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let has_mouse = self
+            .term
+            .mode()
+            .intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION);
         let app_wants_mouse = has_mouse;
-        // Detect full-screen TUIs in the primary screen (no mouse mode, not
-        // in alternate screen) so we can route the wheel to the app instead
-        // of the terminal scrollback.
-        let tui_in_primary = !has_mouse && !in_alternate && self.looks_like_primary_screen_tui();
-        // Scrollback bar is only drawn when we actually own the wheel.
-        let show_scrollback_bar = !app_wants_mouse && !in_alternate && !tui_in_primary;
-        // Always reserve scrollbar width for the *column math*, so entering
-        // or leaving alt-screen (which toggles scrollbar visibility) does not
-        // change the pty column count and trigger a spurious resize. btop,
-        // htop, top and friends don't repaint cleanly when SIGWINCH arrives
-        // mid-startup, which is what caused the double-render / ghost rows.
-        // When the bar is hidden, the reserved strip is simply unused space.
+        let tui_in_primary = !has_mouse && !in_alt && self.looks_like_primary_screen_tui();
+        let show_scrollback_bar = !app_wants_mouse && !in_alt && !tui_in_primary;
         const SCROLLBAR_RESERVE: f32 = 12.0;
         let scrollbar_width = if show_scrollback_bar { SCROLLBAR_RESERVE } else { 0.0 };
 
         let avail = ui.available_size();
         let usable_w = (avail.x - SCROLLBAR_RESERVE).max(80.0);
         let usable_h = avail.y.max(40.0);
-        // Minimums are deliberately low. If a pane is very narrow,
-        // forcing the terminal to 20 cols makes its grid wider than
-        // the pane itself, which used to overflow into neighbours
-        // (clipping in tiling.rs now prevents that, but a smaller
-        // minimum means the terminal actually fits its pane).
         let new_cols = ((usable_w / char_width).floor() as u16).max(4);
         let new_rows = ((usable_h / row_height).floor() as u16).max(2);
 
@@ -1566,16 +1261,10 @@ impl TerminalSession {
             self.cols = new_cols;
             self.rows = new_rows;
 
-            self.parser.set_size(new_rows, new_cols);
-
-            // NOTE: we deliberately do NOT wipe the parser's visible grid
-            // here. Wiping silently desyncs the running app's model of the
-            // screen from ours: programs like nano, vim, htop keep their own
-            // idea of what is on screen, and blanking the parser behind
-            // their back means every later incremental write lands in the
-            // wrong cell — the "random characters from elsewhere on the
-            // line" bug. Modern full-screen apps redraw on SIGWINCH
-            // themselves.
+            self.term.resize(TermSize {
+                columns: new_cols as usize,
+                screen_lines: new_rows as usize,
+            });
 
             if let Some(tx) = &self.daemon_resize_tx {
                 let _ = tx.try_send((new_cols, new_rows));
@@ -1597,7 +1286,7 @@ impl TerminalSession {
                 old_cols,
                 new_rows,
                 new_cols,
-                in_alternate,
+                in_alt,
                 tui_in_primary
             );
         }
@@ -1614,21 +1303,10 @@ impl TerminalSession {
         let (full_rect, _) = ui.allocate_exact_size(total_size, egui::Sense::hover());
         let response = ui.interact(full_rect, widget_id, egui::Sense::click_and_drag());
 
-        // While this terminal widget has focus, tell egui NOT to use Tab
-        // for widget-focus navigation. Without this, pressing Tab for shell
-        // autocomplete makes egui jump focus to the next widget in its tab
-        // order, and the terminal stops receiving keystrokes until the user
-        // clicks it again.
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
                 widget_id,
                 egui::EventFilter {
-                    // Lock ALL focus-navigation keys to this terminal widget
-                    // so egui never steals them. Previously only `tab` was
-                    // locked; arrows and Escape were free, so pressing arrow
-                    // keys moved keyboard focus to the navbar / tab bar and
-                    // nano, vim, htop, less, etc. never received the escape
-                    // sequences they need.
                     tab: true,
                     horizontal_arrows: true,
                     vertical_arrows: true,
@@ -1643,10 +1321,6 @@ impl TerminalSession {
             egui::pos2(full_rect.max.x, grid_rect.max.y),
         );
 
-        // Pointer position during a drag is unreliable on Wayland:
-        // hover_pos returns None when the cursor leaves the widget, and
-        // egui's interact_pos can freeze at the press origin. `latest_pos`
-        // tracks the live cursor each frame; fall back through the others.
         let pointer_pos = ui
             .input(|i| {
                 i.pointer
@@ -1685,27 +1359,8 @@ impl TerminalSession {
 
         let is_active_session = has_focus || user_clicked_pane;
 
-        // Focus is requested by the caller (terminal_view) when the active
-        // session changes, or right here when the pane is clicked. We never
-        // steal focus automatically — that breaks TextEdits in split views.
-        //
-        // Recovery case: egui can lose widget focus on Wayland (pointer
-        // leaves the window for a frame, WM hint, etc.). When that happens,
-        // NO widget reports focus and `response.has_focus()` returns false
-        // — so keystrokes are silently dropped and the user has to mash
-        // Enter. If nothing at all has focus and we're the active session,
-        // process keys here and re-request focus.
-        //
-        // We must NOT do this when another widget owns focus (SFTP path
-        // TextEdit, settings field, ...) — otherwise keys would type both
-        // there and here.
         let has_egui_focus = response.has_focus();
         let nothing_else_has_focus = ui.memory(|m| m.focused().is_none());
-        // Recovery path: if the pane is the active one but a TextEdit
-        // elsewhere grabbed focus and the user taps an arrow key, we
-        // still want the terminal to receive it. Steal focus back in
-        // that case. We only do this when a modifier is NOT held, so
-        // deliberate Ctrl+... shortcuts elsewhere aren't hijacked.
         let terminal_key_stolen = if is_active_session && !has_egui_focus && !nothing_else_has_focus {
             ui.input(|i| {
                 !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt
@@ -1730,14 +1385,12 @@ impl TerminalSession {
         };
         if terminal_key_stolen {
             response.request_focus();
-            crate::dbg_log!("kbd_focus_steal_arrows id={}", self.id);
         }
 
         let has_egui_focus = response.has_focus();
         if is_active_session && (has_egui_focus || nothing_else_has_focus || terminal_key_stolen) {
             if !has_egui_focus && nothing_else_has_focus {
                 response.request_focus();
-                crate::dbg_log!("kbd_focus_recover id={}", self.id);
             }
             self.handle_keyboard_events(ui.ctx(), settings, toast);
         }
@@ -1775,11 +1428,7 @@ impl TerminalSession {
                 self.send_mouse_event(2, true, cell_c, cell_r, ui.input(|i| i.modifiers));
             }
         } else {
-            // Full-screen program with no mouse mode (nano, less, vim, htop,
-            // emacs -nw, mc, ...): translate wheel into PageUp/PageDown. Arrow
-            // keys would just move the cursor within the visible buffer; PageUp/
-            // PageDown scroll the view, which is what users expect from a wheel.
-            if grid_rect.contains(pointer_pos) && !is_ctrl && (in_alternate || tui_in_primary) {
+            if grid_rect.contains(pointer_pos) && !is_ctrl && (in_alt || tui_in_primary) {
                 let scroll_y = ui.input(|i| {
                     if i.raw_scroll_delta.y != 0.0 {
                         i.raw_scroll_delta.y
@@ -1790,19 +1439,6 @@ impl TerminalSession {
                 if scroll_y != 0.0 {
                     let count = ((scroll_y.abs() / 50.0).round() as usize).clamp(1, 3);
                     let seq = if scroll_y > 0.0 { "\x1b[5~" } else { "\x1b[6~" };
-                    if self.is_dragging_selection && self.tui_drag_direction.is_none() {
-                        self.tui_drag_direction = Some(scroll_y > 0.0);
-                    }
-                    crate::dbg_log!(
-                        "tui_wheel id={} alt={} tui_primary={} delta={:.1} count={} seq={:?} drag={}",
-                        self.id,
-                        in_alternate,
-                        tui_in_primary,
-                        scroll_y,
-                        count,
-                        seq,
-                        self.is_dragging_selection
-                    );
                     for _ in 0..count {
                         self.send_input(seq);
                     }
@@ -1820,9 +1456,6 @@ impl TerminalSession {
                 });
 
                 if scroll_y != 0.0 {
-                    // Convert egui's pixel delta into whole wheel notches
-                    // (~18 px each) and multiply by the user's preferred
-                    // lines-per-notch setting.
                     let notches = ((scroll_y.abs() / 18.0).round() as usize).max(1);
                     let per_notch = settings.mouse_wheel_scroll.lines(self.rows);
                     let lines = notches * per_notch;
@@ -1858,36 +1491,22 @@ impl TerminalSession {
                 }
             } else if response.double_clicked() && grid_rect.contains(pointer_pos) {
                 let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
-
-                if let Some((start_c, end_c)) = self.find_word_bounds(cell_r, cell_c) {
-                    self.selection_start = Some((age, start_c));
-                    self.selection_end = Some((age, end_c));
-                    self.is_dragging_selection = false;
-                    if settings.copy_on_select {
-                        let selected = self.extract_selected_text();
-                        if !selected.trim().is_empty() {
-                            crate::dbg_log!(
-                                "clipboard_word_copy begin id={} bytes={}",
-                                self.id,
-                                selected.len()
-                            );
-                            set_system_clipboard_text(Some(ui.ctx()), &selected);
-                            crate::dbg_log!("clipboard_word_copy end id={}", self.id);
-                            let preview = if selected.len() > 24 {
-                                format!("{}...", &selected[..21].replace('\n', " "))
-                            } else {
-                                selected.replace('\n', " ")
-                            };
-                            *toast = Some((
-                                format!("Copied: {}", preview),
-                                std::time::Instant::now(),
-                            ));
-                        }
+                self.selection_start = Some((age, 0));
+                self.selection_end = Some((age, self.cols.saturating_sub(1)));
+                self.is_dragging_selection = false;
+                if settings.copy_on_select {
+                    let selected = self.extract_selected_text();
+                    if !selected.trim().is_empty() {
+                        set_system_clipboard_text(Some(ui.ctx()), &selected);
+                        *toast = Some((
+                            format!("Copied: {}", selected.trim()),
+                            std::time::Instant::now(),
+                        ));
                     }
                 }
             } else if is_primary_pressed
                 && grid_rect.contains(pointer_pos)
-                && (!sb_track.contains(pointer_pos) || in_alternate)
+                && (!sb_track.contains(pointer_pos) || in_alt)
             {
                 let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
                 self.selection_start = Some((age, cell_c));
@@ -1896,42 +1515,24 @@ impl TerminalSession {
                 self.alt_drag_page_cooldown = None;
                 self.tui_drag_frames.clear();
                 self.tui_drag_direction = None;
-                if in_alternate || tui_in_primary {
+                if in_alt || tui_in_primary {
                     self.tui_drag_last_snapshot = self.snapshot_visible_lines();
                 } else {
                     self.tui_drag_last_snapshot.clear();
                 }
-                crate::dbg_log!(
-                    "sel_start id={} age={} col={} scroll_offset={}",
-                    self.id,
-                    age,
-                    cell_c,
-                    self.scroll_offset
-                );
             }
 
             if self.is_dragging_selection && is_primary_down {
                 let dragging_above = pointer_pos.y < grid_rect.min.y;
                 let dragging_below = pointer_pos.y > grid_rect.max.y;
-                // A full-screen app owns the screen if we're in the alternate
-                // screen OR it's a primary-screen TUI like nano. In that case
-                // there is no terminal scrollback to walk during a drag.
-                let tui_owns_screen = in_alternate || tui_in_primary;
+                let tui_owns_screen = in_alt || tui_in_primary;
 
                 if dragging_above && !tui_owns_screen {
-                    // Shell scrollback: extend selection into history.
                     let dist = (grid_rect.min.y - pointer_pos.y).max(0.0);
                     let auto_scroll_lines = ((dist / 8.0).clamp(1.0, 30.0)) as usize;
                     self.set_view_scroll(self.scroll_offset + auto_scroll_lines);
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1);
                     self.selection_end = Some((age, cell_c));
-                    crate::dbg_log!(
-                        "sel_autoscroll_up id={} scroll_offset={} end=({},{})",
-                        self.id,
-                        self.scroll_offset,
-                        age,
-                        cell_c
-                    );
                     ui.ctx().request_repaint();
                 } else if dragging_below && !tui_owns_screen {
                     let dist = (pointer_pos.y - grid_rect.max.y).max(0.0);
@@ -1939,18 +1540,8 @@ impl TerminalSession {
                     self.set_view_scroll(self.scroll_offset.saturating_sub(auto_scroll_lines));
                     let age = self.scroll_offset as i64;
                     self.selection_end = Some((age, cell_c));
-                    crate::dbg_log!(
-                        "sel_autoscroll_down id={} scroll_offset={} end=({},{})",
-                        self.id,
-                        self.scroll_offset,
-                        age,
-                        cell_c
-                    );
                     ui.ctx().request_repaint();
                 } else if (dragging_above || dragging_below) && tui_owns_screen {
-                    // Full-screen app (nano, less, vim, htop, emacs -nw):
-                    // page the app itself while the user holds the drag past
-                    // the edge. Throttle to ~8 Hz so we don't flood the PTY.
                     let now = std::time::Instant::now();
                     let ready = match self.alt_drag_page_cooldown {
                         Some(t) => now.duration_since(t).as_millis() >= 120,
@@ -1963,13 +1554,6 @@ impl TerminalSession {
                         if self.tui_drag_direction.is_none() {
                             self.tui_drag_direction = Some(dragging_above);
                         }
-                        crate::dbg_log!(
-                            "sel_tui_page id={} alt={} tui_primary={} dir={}",
-                            self.id,
-                            in_alternate,
-                            tui_in_primary,
-                            if dragging_above { "up" } else { "down" }
-                        );
                     }
                     let age = self.scroll_offset as i64 + (self.rows as i64 - 1 - cell_r as i64);
                     self.selection_end = Some((age, cell_c));
@@ -1985,9 +1569,7 @@ impl TerminalSession {
                 self.is_dragging_selection = false;
                 self.alt_drag_page_cooldown = None;
 
-                // TUI multi-frame path: user paged during the drag, so stitch
-                // the captured screens together. Include the final frame.
-                let used_tui_accumulator = (in_alternate || tui_in_primary)
+                let used_tui_accumulator = (in_alt || tui_in_primary)
                     && self.tui_drag_direction.is_some()
                     && !self.tui_drag_frames.is_empty();
 
@@ -2001,25 +1583,10 @@ impl TerminalSession {
                         let frames = std::mem::take(&mut self.tui_drag_frames);
                         let combined = combine_tui_frames(frames, drag_up);
                         let line_count = combined.lines().count().max(1);
-                        let preview = if combined.len() > 30 {
-                            format!("{}...", &combined[..27].replace('\n', " "))
-                        } else {
-                            combined.replace('\n', " ")
-                        };
-                        crate::dbg_log!(
-                            "tui_copy id={} bytes={} lines={} drag_up={}",
-                            self.id,
-                            combined.len(),
-                            line_count,
-                            drag_up
-                        );
                         if !combined.trim().is_empty() {
                             set_system_clipboard_text(Some(ui.ctx()), &combined);
                             *toast = Some((
-                                format!(
-                                    "Copied {} line(s) (multi-screen): {}",
-                                    line_count, preview
-                                ),
+                                format!("Copied {} line(s) (multi-screen)", line_count),
                                 std::time::Instant::now(),
                             ));
                         }
@@ -2040,31 +1607,10 @@ impl TerminalSession {
                     } else if settings.copy_on_select {
                         let selected = self.extract_selected_text();
                         if !selected.trim().is_empty() {
-                            crate::dbg_log!(
-                                "clipboard_copy begin id={} bytes={}",
-                                self.id,
-                                selected.len()
-                            );
                             set_system_clipboard_text(Some(ui.ctx()), &selected);
-                            crate::dbg_log!("clipboard_copy end id={}", self.id);
                             let line_count = selected.lines().count().max(1);
-                            let preview = if selected.len() > 30 {
-                                format!("{}...", &selected[..27].replace('\n', " "))
-                            } else {
-                                selected.replace('\n', " ")
-                            };
-                            crate::dbg_log!(
-                                "sel_copy id={} bytes={} lines={} start=({},{}) end=({},{})",
-                                self.id,
-                                selected.len(),
-                                line_count,
-                                start.0,
-                                start.1,
-                                end.0,
-                                end.1
-                            );
                             *toast = Some((
-                                format!("Copied {} line(s): {}", line_count, preview),
+                                format!("Copied {} line(s)", line_count),
                                 std::time::Instant::now(),
                             ));
                         }
@@ -2073,7 +1619,6 @@ impl TerminalSession {
             }
 
             if settings.paste_on_right_click && response.secondary_clicked() {
-                crate::dbg_log!("clipboard_paste begin id={} (right-click)", self.id);
                 if let Some(clip) = get_system_clipboard_text() {
                     if !clip.is_empty() {
                         self.send_paste(&clip);
@@ -2086,6 +1631,7 @@ impl TerminalSession {
             }
         }
 
+        // -- Scrollbar ------------------------------------------------------
         if show_scrollback_bar {
             ui.painter().rect_filled(
                 sb_track,
@@ -2137,49 +1683,67 @@ impl TerminalSession {
             ui.painter().rect_filled(sb_thumb, 3.0, thumb_color);
         }
 
+        // -- Grid rendering -------------------------------------------------
         ui.painter().rect_filled(grid_rect, 0.0, theme.bg_main_color());
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let screen = self.parser.screen();
-            // Use self.rows/self.cols so the loop always matches term_grid_size
-            // (which was allocated from the same values).
+            let content = self.term.renderable_content();
             let rows = self.rows;
             let cols = self.cols;
-            let (cursor_r, cursor_c) = screen.cursor_position();
-            let hide_cursor = screen.hide_cursor();
+
+            // Build the cell map. The keys are VIEWPORT-relative rows
+            // (0 = top of the visible area), which is what display_iter
+            // yields.
+            let mut cell_map: std::collections::HashMap<(i32, usize), (char, AlacColor, AlacColor, CellFlags)> =
+                std::collections::HashMap::new();
+            for indexed in content.display_iter {
+                let cell = indexed.cell;
+                let row = indexed.point.line.0;
+                let col = indexed.point.column.0;
+                cell_map.insert((row, col), (cell.c, cell.fg, cell.bg, cell.flags));
+            }
+
+            let cursor = content.cursor;
+            let cursor_hidden = cursor.shape == CursorShape::Hidden;
+            let cursor_row = cursor.point.line.0;
+            let cursor_col = cursor.point.column.0;
 
             let show_cursor = is_active_session
-                && !hide_cursor
+                && !cursor_hidden
                 && self.scroll_offset == 0
                 && (!settings.cursor_blink || (ui.input(|i| (i.time * 2.0).fract() < 0.5)));
 
             for r in 0..rows {
                 let row_y = grid_rect.min.y + r as f32 * row_height;
+                let line_age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
+
                 let mut job = egui::text::LayoutJob::default();
                 job.wrap.max_width = f32::INFINITY;
 
-                let line_age = self.scroll_offset as i64 + (self.rows as i64 - 1 - r as i64);
-
                 for c in 0..cols {
-                    let default_cell = vt100::Cell::default();
-                    let cell = screen.cell(r, c).unwrap_or(&default_cell);
+                    let default_cell: (char, AlacColor, AlacColor, CellFlags) = (
+                        ' ',
+                        AlacColor::Named(NamedColor::Foreground),
+                        AlacColor::Named(NamedColor::Background),
+                        CellFlags::empty(),
+                    );
+                    let (ch, fg_col, bg_col, flags) = cell_map
+                        .get(&(r as i32, c as usize))
+                        .copied()
+                        .unwrap_or(default_cell);
 
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
-
-                    let is_cursor = show_cursor && (r == cursor_r && c == cursor_c);
+                    let is_cursor = show_cursor
+                        && cursor_row == r as i32
+                        && cursor_col == c as usize;
                     let is_selected = self.is_cell_selected(line_age, c);
-                    let cell_text = cell.contents();
-                    let display_char: &str = if cell_text.is_empty() { " " } else { &cell_text };
 
-                    let mut fg = vt_to_egui_color(cell.fgcolor(), false, theme);
-                    let mut bg = vt_to_egui_color(cell.bgcolor(), true, theme);
+                    let mut fg = alac_to_egui_color(fg_col, theme, false);
+                    let mut bg = alac_to_egui_color(bg_col, theme, true);
 
                     if is_selected {
                         fg = theme.bg_main_color();
                         bg = theme.accent_color();
-                    } else if cell.inverse() || is_cursor {
+                    } else if flags.contains(CellFlags::INVERSE) || is_cursor {
                         std::mem::swap(&mut fg, &mut bg);
                         if is_cursor && bg == fg {
                             fg = theme.bg_main_color();
@@ -2187,8 +1751,14 @@ impl TerminalSession {
                         }
                     }
 
+                    let cell_text: String = if ch == '\0' {
+                        " ".to_string()
+                    } else {
+                        ch.to_string()
+                    };
+
                     job.append(
-                        display_char,
+                        &cell_text,
                         0.0,
                         egui::TextFormat {
                             font_id: font_id.clone(),
@@ -2198,7 +1768,7 @@ impl TerminalSession {
                             } else {
                                 egui::Color32::TRANSPARENT
                             },
-                            underline: if cell.underline() {
+                            underline: if flags.contains(CellFlags::UNDERLINE) {
                                 egui::Stroke::new(1.0_f32, fg)
                             } else {
                                 egui::Stroke::NONE
@@ -2217,31 +1787,7 @@ impl TerminalSession {
             }
         }));
 
-        // TUI drag-accumulator: if the user is dragging inside a full-screen
-        // app and the screen content changed (they paged via wheel or edge),
-        // push the frame so we can stitch at release.
-        if self.is_dragging_selection && (in_alternate || tui_in_primary) {
-            let snap = self.snapshot_visible_lines();
-            if snap != self.tui_drag_last_snapshot {
-                if self.tui_drag_frames.is_empty() && !self.tui_drag_last_snapshot.is_empty() {
-                    self.tui_drag_frames.push(self.tui_drag_last_snapshot.clone());
-                }
-                if !self.tui_drag_last_snapshot.is_empty() {
-                    self.tui_drag_frames.push(snap.clone());
-                }
-                self.tui_drag_last_snapshot = snap;
-                crate::dbg_log!(
-                    "tui_frame_captured id={} frames={}",
-                    self.id,
-                    self.tui_drag_frames.len()
-                );
-            }
-        }
-
-        // Dead-session overlay: a big centered "Reconnect" button plus
-        // a "press any key" hint. Painted on top of the frozen terminal
-        // contents so the user can revive the shell / SSH connection
-        // without losing the tile position or scrollback.
+        // Dead-session overlay.
         if self.session_ended() {
             let overlay_rect = grid_rect;
             ui.painter().rect_filled(
@@ -2300,7 +1846,8 @@ impl TerminalSession {
             }
         }
 
-        if self.scroll_offset > 0 && !in_alternate {
+        // Scroll chip.
+        if self.scroll_offset > 0 && !in_alt {
             let chip_w = 150.0;
             let chip_h = 22.0;
             let chip_rect = egui::Rect::from_min_size(
@@ -2347,4 +1894,77 @@ impl TerminalSession {
 
         user_clicked_pane
     }
+
+    /// Heuristic: does this look like a full-screen TUI running in the
+    /// primary screen?
+    fn looks_like_primary_screen_tui(&self) -> bool {
+        let content = self.term.renderable_content();
+        let cursor = content.cursor;
+        let cursor_row = cursor.point.line.0;
+        if cursor_row >= (self.rows as i32 - 1) {
+            return false;
+        }
+        for indexed in content.display_iter {
+            if indexed.point.line.0 > cursor_row {
+                let cell = indexed.cell;
+                if cell.c != ' ' && cell.c != '\0' {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn snapshot_visible_lines(&self) -> Vec<String> {
+        let content = self.term.renderable_content();
+        let mut lines: Vec<Vec<char>> = vec![vec![' '; self.cols as usize]; self.rows as usize];
+
+        for indexed in content.display_iter {
+            let row = indexed.point.line.0;
+            let col = indexed.point.column.0;
+            if row >= 0 && row < self.rows as i32 && col < self.cols as usize {
+                let ch = indexed.cell.c;
+                lines[row as usize][col] = if ch == '\0' { ' ' } else { ch };
+            }
+        }
+
+        lines
+            .into_iter()
+            .map(|row| {
+                let s: String = row.into_iter().collect();
+                s.trim_end().to_string()
+            })
+            .collect()
+    }
+}
+
+/// Stitch captured TUI frames into a single string.
+fn combine_tui_frames(frames: Vec<Vec<String>>, drag_up: bool) -> String {
+    if frames.is_empty() {
+        return String::new();
+    }
+    if frames.len() == 1 {
+        return frames.into_iter().next().unwrap().join("\n");
+    }
+    let mut ordered = frames;
+    if drag_up {
+        ordered.reverse();
+    }
+    let mut result: Vec<String> = Vec::new();
+    for frame in ordered {
+        if result.is_empty() {
+            result = frame;
+            continue;
+        }
+        let max_check = result.len().min(frame.len()).min(120);
+        let mut overlap = 0usize;
+        for k in (1..=max_check).rev() {
+            if result[result.len() - k..] == frame[..k] {
+                overlap = k;
+                break;
+            }
+        }
+        result.extend_from_slice(&frame[overlap..]);
+    }
+    result.join("\n")
 }
