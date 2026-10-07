@@ -18,12 +18,12 @@ use std::thread;
 // the `Term` handler. Rendering reads `renderable_content()` and maps
 // each cell to egui primitives.
 
-use alacritty_terminal::event::{Event as AlacTermEvent, EventListener};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
-use alacritty_terminal::vte::ansi::{
+use azterm_parser::event::{Event as AlacTermEvent, EventListener};
+use azterm_parser::grid::{Dimensions, Scroll};
+use azterm_parser::term::cell::Flags as CellFlags;
+use azterm_parser::term::test::TermSize;
+use azterm_parser::term::{Config as TermConfig, Term, TermMode};
+use azterm_parser::vte::ansi::{
     Color as AlacColor, CursorShape, NamedColor, Processor,
 };
 
