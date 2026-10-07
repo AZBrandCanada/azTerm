@@ -22,6 +22,108 @@ use std::time::Duration;
 
 const REPLAY_LIMIT: usize = 512 * 1024;
 
+/// Tracks important DEC private mode toggles as raw PTY bytes flow
+/// through the daemon. On client attach, we send a short preamble
+/// re-applying the current modes BEFORE the replay buffer. Without
+/// this, the replay can miss the initial `\x1b[?1049h` / `\x1b[?1006h`
+/// that a TUI (btop, htop, vim) sent at startup — the buffer is
+/// trimmed from the front once REPLAY_LIMIT is exceeded, so those
+/// sequences fall off and never reach the GUI's fresh Term. Result:
+/// alt-screen and mouse reporting are off in the reattached session,
+/// which is exactly the "clicking btop's refresh button does nothing"
+/// symptom.
+///
+/// We scan for CSI `?<num>h` / `?<num>l` sequences. Simple pattern
+/// match, not a full parser, but it catches every mode a TUI needs.
+#[derive(Default, Clone)]
+struct ModeState {
+    alt_screen: bool,
+    app_cursor: bool,
+    app_keypad: bool,
+    mouse_click: bool,
+    mouse_drag: bool,
+    mouse_motion: bool,
+    sgr_mouse: bool,
+    bracketed_paste: bool,
+    hide_cursor: bool,
+}
+
+impl ModeState {
+    fn observe(&mut self, bytes: &[u8]) {
+        let mut i = 0usize;
+        while i + 3 < bytes.len() {
+            if bytes[i] == 0x1b && bytes[i + 1] == b'[' && bytes[i + 2] == b'?' {
+                let mut j = i + 3;
+                let mut num: u32 = 0;
+                let mut digits = 0u32;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    num = num.saturating_mul(10)
+                        .saturating_add((bytes[j] - b'0') as u32);
+                    j += 1;
+                    digits += 1;
+                }
+                if digits > 0 && j < bytes.len() {
+                    let set = match bytes[j] {
+                        b'h' => Some(true),
+                        b'l' => Some(false),
+                        _ => None,
+                    };
+                    if let Some(set) = set {
+                        match num {
+                            1049 | 1047 | 47 => self.alt_screen = set,
+                            1000 => self.mouse_click = set,
+                            1002 => self.mouse_drag = set,
+                            1003 => self.mouse_motion = set,
+                            1006 => self.sgr_mouse = set,
+                            2004 => self.bracketed_paste = set,
+                            1 => self.app_cursor = set,
+                            66 => self.app_keypad = set,
+                            25 => self.hide_cursor = !set,
+                            _ => {}
+                        }
+                    }
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn preamble(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.alt_screen {
+            out.extend_from_slice(b"\x1b[?1049h");
+        }
+        if self.app_cursor {
+            out.extend_from_slice(b"\x1b[?1h");
+        }
+        if self.app_keypad {
+            out.extend_from_slice(b"\x1b=");
+        }
+        if self.mouse_click {
+            out.extend_from_slice(b"\x1b[?1000h");
+        }
+        if self.mouse_drag {
+            out.extend_from_slice(b"\x1b[?1002h");
+        }
+        if self.mouse_motion {
+            out.extend_from_slice(b"\x1b[?1003h");
+        }
+        if self.sgr_mouse {
+            out.extend_from_slice(b"\x1b[?1006h");
+        }
+        if self.bracketed_paste {
+            out.extend_from_slice(b"\x1b[?2004h");
+        }
+        if self.hide_cursor {
+            out.extend_from_slice(b"\x1b[?25l");
+        }
+        out
+    }
+}
+
+
 struct DaemonSession {
     id: u64,
     title: String,
@@ -35,6 +137,7 @@ struct DaemonSession {
     replay: Arc<Mutex<VecDeque<u8>>>,
     subscribers: Arc<Mutex<Vec<SyncSender<Vec<u8>>>>>,
     alive: Arc<Mutex<bool>>,
+    modes: Arc<Mutex<ModeState>>,
 }
 
 impl DaemonSession {
@@ -222,7 +325,30 @@ fn handle_client(mut stream: UnixStream, shared: Shared) -> std::io::Result<()> 
                 sess.resize(cols, rows);
                 write_msg(&mut stream, &Response::Attached { id })?;
 
-                // Replay scrollback first.
+                // Mode preamble first: re-apply the current DEC
+                // private modes (alt screen, mouse reporting, etc.).
+                // The replay buffer is a rolling window, so the
+                // initial mode-setting sequences a TUI emits at
+                // startup may have been trimmed. Without this, a
+                // fresh Term on reattach has no idea it should be in
+                // alt screen or accept mouse clicks.
+                {
+                    let preamble = sess
+                        .modes
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .preamble();
+                    if !preamble.is_empty() {
+                        write_msg(
+                            &mut stream,
+                            &Response::Output {
+                                bytes_b64: b64_encode(&preamble),
+                            },
+                        )?;
+                    }
+                }
+
+                // Replay scrollback next.
                 let replay_bytes: Vec<u8> = {
                     let r = sess.replay.lock().unwrap();
                     r.iter().copied().collect()
@@ -382,6 +508,7 @@ fn spawn_session_workers(
     let replay = Arc::new(Mutex::new(VecDeque::<u8>::new()));
     let subscribers = Arc::new(Mutex::new(Vec::<SyncSender<Vec<u8>>>::new()));
     let alive = Arc::new(Mutex::new(true));
+    let modes = Arc::new(Mutex::new(ModeState::default()));
 
     let sess = Arc::new(DaemonSession {
         id,
@@ -396,11 +523,13 @@ fn spawn_session_workers(
         replay: replay.clone(),
         subscribers: subscribers.clone(),
         alive: alive.clone(),
+        modes: modes.clone(),
     });
 
     let replay_r = replay.clone();
     let subs_r = subscribers.clone();
     let alive_r = alive.clone();
+    let modes_r = modes.clone();
 
     thread::spawn(move || {
         let mut buf = [0u8; 16384];
@@ -409,6 +538,9 @@ fn spawn_session_workers(
                 Ok(0) => break,
                 Ok(n) => {
                     let bytes = buf[..n].to_vec();
+                    if let Ok(mut m) = modes_r.lock() {
+                        m.observe(&bytes);
+                    }
                     {
                         let mut r = replay_r.lock().unwrap();
                         r.extend(bytes.iter().copied());

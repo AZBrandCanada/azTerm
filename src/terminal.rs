@@ -680,7 +680,11 @@ impl TerminalSession {
         modifiers: egui::Modifiers,
     ) {
         let mode = self.term.mode();
-        if !mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION) {
+        if !mode.intersects(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_DRAG
+                | TermMode::MOUSE_MOTION,
+        ) {
             return;
         }
 
@@ -1055,7 +1059,9 @@ impl TerminalSession {
 
                         let owns_scrollback = !self.term.mode().contains(TermMode::ALT_SCREEN)
                             && !self.term.mode().intersects(
-                                TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION,
+                                TermMode::MOUSE_REPORT_CLICK
+                                    | TermMode::MOUSE_DRAG
+                                    | TermMode::MOUSE_MOTION,
                             );
                         if modifiers.shift && owns_scrollback {
                             if *key == egui::Key::PageUp {
@@ -1220,7 +1226,44 @@ impl TerminalSession {
         let font_size = settings.terminal_font_size.clamp(6.0, 32.0);
         let font_id = egui::FontId::monospace(font_size);
 
+        // One-shot proof-of-life: fires the first time render() runs
+        // for this session. If this never appears in the log, render()
+        // is not being called and the problem is upstream.
+        {
+            let life_key = ui.id().with(self.id).with("render_life_diag");
+            let seen: bool = ui.memory(|m| m.data.get_temp(life_key).unwrap_or(false));
+            if !seen {
+                ui.memory_mut(|m| m.data.insert_temp(life_key, true));
+                crate::dbg_log!("render_called id={} rows={} cols={}", self.id, self.rows, self.cols);
+            }
+        }
+
         const SAMPLE_CELLS: usize = 100;
+
+        // Diagnostic: dump the actual TermMode bitflags every ~2s so
+        // we can see which mouse modes btop has enabled. Anchored here
+        // because we already proved render() reaches this point
+        // (render_called fires).
+        {
+            let diag_key = ui.id().with(self.id).with("mouse_mode_diag_v2");
+            let last: Option<f64> = ui.memory(|m| m.data.get_temp(diag_key));
+            let now = ui.input(|i| i.time);
+            if last.map_or(true, |t| now - t > 2.0) {
+                ui.memory_mut(|m| m.data.insert_temp(diag_key, now));
+                let tm = self.term.mode();
+                crate::dbg_log!(
+                    "mouse_mode id={} alt={} click={} drag={} motion={} sgr={} utf8={} bits={:#x}",
+                    self.id,
+                    tm.contains(TermMode::ALT_SCREEN),
+                    tm.contains(TermMode::MOUSE_REPORT_CLICK),
+                    tm.contains(TermMode::MOUSE_DRAG),
+                    tm.contains(TermMode::MOUSE_MOTION),
+                    tm.contains(TermMode::SGR_MOUSE),
+                    tm.contains(TermMode::UTF8_MOUSE),
+                    tm.bits(),
+                );
+            }
+        }
         let mut sample_job = egui::text::LayoutJob::default();
         sample_job.wrap.max_width = f32::INFINITY;
         for _ in 0..SAMPLE_CELLS {
@@ -1239,10 +1282,21 @@ impl TerminalSession {
         let row_height = (sample_galley.size().y * 1.05).max(1.0);
 
         let in_alt = self.term.mode().contains(TermMode::ALT_SCREEN);
+        let mode_has_motion = self.term.mode().contains(TermMode::MOUSE_MOTION);
+        // 1002 (MOUSE_DRAG) is a superset of 1000 (MOUSE_REPORT_CLICK):
+        // it reports press/release AND motion-while-held. Many modern
+        // TUIs (btop, neovim with mouse=a, helix) enable 1002 instead
+        // of 1000. If we only check for CLICK|MOTION, we miss them
+        // entirely and fall into the text-selection branch — which is
+        // why clicking btop's refresh-interval button did nothing.
         let has_mouse = self
             .term
             .mode()
-            .intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_MOTION);
+            .intersects(
+                TermMode::MOUSE_REPORT_CLICK
+                    | TermMode::MOUSE_DRAG
+                    | TermMode::MOUSE_MOTION,
+            );
         let app_wants_mouse = has_mouse;
         let tui_in_primary = !has_mouse && !in_alt && self.looks_like_primary_screen_tui();
         let show_scrollback_bar = !app_wants_mouse && !in_alt && !tui_in_primary;
@@ -1414,6 +1468,38 @@ impl TerminalSession {
                         ui.input(|i| i.modifiers),
                     );
                     ui.ctx().request_repaint();
+                }
+            }
+
+            // Mouse motion forwarding. btop (and other TUIs that use
+            // SGR mouse mode with motion tracking) needs to see the
+            // pointer position BEFORE a click lands, so it can
+            // highlight the button under the cursor and route the
+            // click to the right element. htop tolerates missing
+            // motion because its clicks are coordinate-based; btop
+            // does not — without this, clicking btop's refresh-
+            // interval button does nothing.
+            //
+            // Throttled by CELL, not by pixel: we only emit a motion
+            // event when the pointer crosses into a new grid cell.
+            // Otherwise a slow drag would flood the PTY with hundreds
+            // of events per second.
+            if mode_has_motion {
+                let motion_cell = (cell_r, cell_c);
+                let motion_key = widget_id.with("last_motion_cell");
+                let last_cell: Option<(u16, u16)> =
+                    ui.memory(|m| m.data.get_temp(motion_key));
+                if last_cell != Some(motion_cell) {
+                    ui.memory_mut(|m| m.data.insert_temp(motion_key, motion_cell));
+                    // Button code 35 = motion, no button held.
+                    // (32 = motion flag, 3 = "no button".)
+                    self.send_mouse_event(
+                        35,
+                        false,
+                        cell_c,
+                        cell_r,
+                        ui.input(|i| i.modifiers),
+                    );
                 }
             }
 

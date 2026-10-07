@@ -37,7 +37,7 @@ pub const DEFAULT_ROWS: u16 = 40;
 ///      to attach to a v2 daemon: the fix is invisible on the
 ///      wire, so the only way to guarantee users get it is to
 ///      force a fresh daemon on next launch.
-pub const PROTO_VERSION: u32 = 3;
+pub const PROTO_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {

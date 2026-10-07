@@ -1,165 +1,129 @@
 # Changelog
 
-All notable changes to AZTerm are documented here. This project adheres to
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to AZTerm are documented here.
 
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1] - 2026-09-24
+## [0.6.0] - 2026-10-07
 
-### Fixed
-- **Keystrokes could be silently dropped when the terminal lost egui
-  focus.** On Wayland, egui occasionally drops widget focus for a frame
-  (pointer briefly leaves the window, WM hint, etc.), and the terminal
-  was gated strictly on `response.has_focus()`. When nothing else had
-  focus, every keystroke — most noticeably Enter after a `cd` — was
-  discarded, so users had to mash the key or click the pane to type
-  again. The terminal now re-requests focus and processes the current
-  frame's events when it detects that no widget owns focus. This does
-  not affect split-view layouts: if an SFTP path field or settings
-  field owns focus, the terminal stays out of the way.
-- **Tab for shell autocomplete stole focus and made the terminal
-  unresponsive.** egui's built-in Tab navigation moved focus to the
-  next widget in the tab order whenever Tab was pressed, so `cd <Tab>`
-  autocomplete worked but subsequent typing went to the wrong widget
-  until the user clicked back into the terminal. Terminal panes now
-  install an `EventFilter` focus-lock (`tab: true`) so egui does not
-  consume Tab; the terminal handles Tab itself and sends a raw `\t`
-  byte to the PTY. Shift+Tab sends `ESC [ Z` (xterm backtab), which
-  zsh and readline map to reverse-menu-complete.
-- Removed the Tab interceptor from `handle_terminal_shortcuts` in
-  `main.rs`. It was consuming Tab events before the focused terminal
-  widget could see them, which is what caused the focus handoff in the
-  first place.
+This release replaces the terminal emulation engine and hardens session
+reattachment. TUIs that previously rendered incorrectly (btop, helix,
+neovim's floating windows, anything using Braille graphs or Nerd Font
+icons) now behave correctly, and mouse input works across the full set
+of xterm mouse protocols.
 
 ### Changed
-- Added a `kbd_enter` diagnostic log line (enabled only in debug mode)
-  that records the modifier state of every Enter keypress. Useful for
-  isolating future input regressions without adding temporary prints.
 
+- **Terminal emulation engine: `vt100` → `alacritty_terminal`.**
+  The parser, grid, scrollback ring, and cell model are now handled by
+  the same VT state machine that powers Alacritty. This fixes a long
+  list of rendering artifacts that were not fixable on top of `vt100`:
 
-## [0.3.0] - 2026-09-24
+  - **btop** now renders its CPU/GPU/mem/net Braille graphs at correct
+    cell width and alignment. Previously the Braille block glyphs were
+    dropped or misaligned, and columns drifted out of sync with the
+    data cells.
+  - **vim / neovim** floating windows, `:terminal` splits, and status
+    line rendering are correct.
+  - **helix, micro, mc, lazygit** and other TUIs that use newer escape
+    sequences (CSI Z backtab, DECSCUSR cursor shape, synchronized
+    output mode 2026) now render without cursor drift.
+  - Wide-character (CJK) and combining-character cell widths are
+    correct.
+  - Underline, inverse, and wide-char-spacer flags are preserved
+    through the render pipeline.
 
-### Added
-- **Debug logging mode** with a configurable log path (Settings →
-  Application & System). Writes timestamped traces of PTY, SSH, SFTP,
-  TUI wheel, resize and selection events. Rotates at 20 MB to `.old`.
-  A panic hook appends the panic message and a full backtrace to the
-  same file, so crashes are captured even when the terminal never
-  returns to the shell.
-- **Mouse Wheel Scroll Amount** setting (Settings → Terminal
-  Interaction). Choose 1 / 3 / 5 / 10 lines, Half page, or Full page
-  per wheel notch. Page sizes adapt live to the terminal height.
-  Persisted in SQLite alongside the rest of the settings.
-- **Ctrl+Shift+A** in a terminal selects the entire scrollback buffer;
-  **Ctrl+Shift+C** copies the selection with a line-count toast.
+  The engine is vendored as **`azterm-parser`**, a fork of
+  `alacritty_terminal` published under the AZBrand organisation. This
+  pins the parser against upstream churn so a future Alacritty release
+  cannot silently break AZTerm's rendering.
+
+- **Terminal font is now embedded into the binary.**
+  `JetBrainsMono Nerd Font Regular` is compiled in via `include_bytes!`
+  and registered as the primary Monospace family. This guarantees that
+  Braille glyphs (U+2800–U+28FF), box-drawing characters, Powerline
+  separators, and the Nerd Font icon set render identically regardless
+  of how AZTerm is installed (AppImage, `.deb`, Flatpak, `cargo
+  install`, or manual build). No system font dependency, no `fc-list`
+  lookup, no "works on my machine". The `default_mono_font_path()`
+  filesystem search has been removed. Terminal font size is still
+  user-configurable; terminal font *family* selection remains locked
+  to the embedded face, for the same reason as before (arbitrary
+  monospace fonts break cell alignment and copy/paste geometry).
 
 ### Fixed
-- **Pasted shell scripts no longer corrupt their formatting.** Ctrl+V
-  was sending both egui's `Event::Paste` and a raw `0x16` (SYN /
-  readline `quoted-insert`) byte to the PTY, which swallowed the next
-  character as a literal. Bracketed paste and normal paste now arrive
-  cleanly.
-- **Random UI freezes during active SSH sessions.** The pty writer was
-  a synchronous `Arc<Mutex<Box<dyn Write>>>` on the UI thread. When
-  SSH's stdin buffer backed up (slow network, stalled remote process,
-  dead ControlMaster), `write_all` blocked and froze the app. Writes
-  now go through a dedicated writer thread with a bounded channel;
-  the UI never blocks on the pty.
-- **SFTP split-view path field could not receive keyboard input.** The
-  terminal was auto-requesting egui focus every frame whenever no
-  widget held it, starving the SFTP path `TextEdit`. Focus is now
-  handed off exactly once per session change.
-- **btop / top rendered ghost rows when opening.** Entering
-  alt-screen flipped scrollbar visibility, which changed the pty
-  column count and fired SIGWINCH mid-startup. The full-screen paint
-  raced the resize and left stale cells. Scrollbar width is now
-  always reserved in the column math; entering or leaving alt-screen
-  no longer changes the terminal size.
-- **Shell startup banners (zsh fastfetch / p10k) were missing on new
-  tabs.** An unconditional parser-clear on the initial 40x120 → real
-  size resize was wiping the banner before it could render. The clear
-  now only runs for alt-screen / detected TUIs.
-- **Nano / less / vim / htop could not be scrolled with the mouse
-  wheel.** In alt-screen or a detected primary-screen TUI, wheel
-  events are translated to PageUp / PageDown. If the app enables
-  xterm mouse mode, real SGR mouse events are forwarded instead.
-- **Drag-select past the pane edge did not autoscroll in nano.**
-  Wayland's `hover_pos` returns `None` while dragging outside the
-  widget, so the edge check never fired. Pointer position now falls
-  through `latest_pos → hover_pos → interact_pos`.
-- **Multi-screen drag-copy from full-screen apps.** When you drag or
-  wheel past the edge while a TUI owns the screen, AZTerm now
-  snapshots each redraw and stitches the frames together at release
-  using the longest suffix/prefix overlap. A single drag from nano
-  can copy hundreds of lines even though the visual highlight only
-  spans one frame.
-- **SSH auth modal could consume unbounded memory.** Server output is
-  capped at 64 KB; older text is trimmed on a UTF-8 boundary.
-- **Stale-socket cleanup and sudo verification blocked the UI
-  thread.** Both now run on worker threads, so a slow or dead SSH
-  connection can't freeze the app while probing.
-- **Ctrl+Shift+PageUp / Ctrl+Shift+PageDown / Ctrl+Shift+Home /
-  Ctrl+Shift+End** now scroll the terminal scrollback by a full page
-  and jump to the oldest / newest retained line.
 
-### Changed
-- `SftpSudoPrompt` no longer derives `Clone` (it holds a
-  `Receiver<bool>` for async password verification).
-- `TerminalSession::widget_id` provides a stable egui widget id for
-  focus tracking.
-- `terminal.rs` render loop uses `self.rows` / `self.cols` instead of
-  vt100's reported size, eliminating a class of grid-size mismatch
-  panics.
+- **Mouse input in btop (and any TUI using xterm mode 1002).**
+  The terminal previously checked only for `MOUSE_REPORT_CLICK` (mode
+  1000) and `MOUSE_MOTION` (mode 1003) when deciding whether to
+  forward mouse events to the child process. Mode 1002 (`MOUSE_DRAG`)
+  is a superset of 1000 — it reports press, release, *and* motion
+  while a button is held — and is what btop, neovim with `mouse=a`,
+  and helix enable. Because 1002 wasn't in the check, AZTerm treated
+  those sessions as text-selection-only and btop's top-bar buttons
+  (including the refresh-interval `+` / `-` control) never received
+  clicks. All three call sites — the render-time `has_mouse` check,
+  the `send_mouse_event` guard, and the `owns_scrollback` check used
+  for keyboard routing — now accept mode 1002.
+
+- **Mouse motion events are now forwarded to TUIs.**
+  `btop` and other SGR-mode TUIs need to see pointer motion over a
+  widget *before* a click lands, so they can highlight the target
+  element and route the click correctly. AZTerm now emits `CSI <35;
+  C; R M` (motion, no button) whenever the pointer crosses into a new
+  grid cell — throttled by cell, not pixel, to avoid flooding the
+  PTY. When a button is held during motion, the held-button motion
+  code (`CSI <32; C; R M`) is sent instead, matching what xterm and
+  Alacritty emit.
+
+- **Session reattach restores terminal modes.**
+  The daemon now observes DEC private mode toggles as raw PTY bytes
+  pass through it (alt-screen 1049/1047/47, application cursor 1,
+  application keypad 66, mouse 1000/1002/1003/1006, bracketed paste
+  2004, cursor visibility 25) and replays a short mode preamble to
+  every new client *before* the replay buffer. Previously, a long-
+  running TUI like btop would enable alt-screen and mouse reporting
+  once at startup, then never re-send them — and once the replay
+  buffer's rolling window trimmed those initial bytes off the front,
+  reattaching to the session produced a `Term` with the wrong mode
+  bits. Reattached btop sessions would render but ignore clicks, and
+  arrow keys would escape to the GUI instead of the app. Now the
+  daemon sends `\x1b[?1049h \x1b[?1002h \x1b[?1006h` (whatever is
+  currently active) as a preamble, so a fresh `Term` starts in the
+  correct state regardless of how much of the buffer was trimmed.
+
+  The daemon wire protocol was bumped to `PROTO_VERSION = 4` to
+  force a clean restart of any pre-existing daemon on first launch
+  after upgrade. Live sessions on the old daemon are terminated once
+  and only once; thereafter the new daemon takes over.
+
+- **Parser panic recovery is now safe.**
+  If the VT parser panics mid-sequence (which `catch_unwind` catches
+  but does not repair), AZTerm now rebuilds the `Term`, resets the
+  parser, and sends `Ctrl+L` to the child process so curses
+  applications redraw from a clean slate. Previously the parser could
+  be left in a corrupt state and every subsequent byte was misparsed,
+  producing the classic "random characters appear everywhere"
+  symptom.
 
 ### Removed
-- Unused `AtomicBool` / `Ordering` import in `sftp.rs`.
-- Unused `safe_parent` / `safe_folder` bindings in the local→remote
-  folder upload path.
 
-## [0.2.9] - 2026-09-24
+- The `default_mono_font_path()` system-font search and the associated
+  fallback chain of hardcoded `/usr/share/fonts/...` paths.
+- The `vt100` dependency and the CBT-rewrite shim
+  (`process_bytes_with_cbt`), which is no longer needed —
+  `alacritty_terminal` handles CSI Z correctly.
 
-### Fixed
-- **Paste no longer corrupts formatting in scripts.** Previously, pasting via
-  `Ctrl+V` sent both egui's `Event::Paste` *and* a raw `0x16` (SYN /
-  readline `quoted-insert`) byte to the PTY, which caused readline to swallow
-  the next character as a literal. Multi-line shell scripts and here-docs now
-  paste intact and execute correctly.
-- **Random UI freezes during active SSH sessions.** The pty writer was a
-  synchronous `Arc<Mutex<Box<dyn Write>>>` held by the UI thread — when SSH's
-  stdin buffer backed up (slow network, stalled remote process, dead
-  ControlMaster), `write_all` blocked and froze the whole app. Writes now go
-  through a dedicated writer thread with a bounded channel; the UI never
-  blocks on the pty.
-- **SFTP path field in the split-view drawer accepted no keyboard input.**
-  The terminal was auto-requesting egui focus every frame whenever no widget
-  held it, which starved the SFTP path `TextEdit` in the side-by-side
-  layout. Focus is now handed off exactly once per session change and is no
-  longer stolen automatically.
-- **Nano / less / vim could not be scrolled with the mouse wheel.** In the
-  alternate screen with no mouse-tracking mode active, wheel events are now
-  translated into Up/Down arrow keystrokes (matching xterm behavior).
-- **SSH auth modal could consume unbounded memory.** Server output is now
-  capped at 64 KB; older text is trimmed from the front on a UTF-8 boundary.
-- **Stale-socket cleanup blocked the UI thread.** `ssh -O check` calls that
-  could stall up to 10 s on a dead `ControlMaster` are now dispatched to a
-  worker thread when opening a session, closing a session, and opening the
-  SSH auth modal.
-- **Sudo password verification blocked the UI thread while holding the
-  prompt mutex.** Verification now runs on a worker thread; the button
-  shows a "Verifying credentials..." state and the modal remains responsive.
+### Notes for packagers
 
-### Changed
-- Terminal focus is now tracked via a stable widget id
-  (`TerminalSession::widget_id`) and requested once per session switch,
-  rather than re-asserted every frame.
-- The `SftpSudoPrompt` struct no longer derives `Clone` (it now holds a
-  `Receiver<bool>` for async verification).
+- `Cargo.toml` now depends on `azterm-parser = "0.1"` (published to
+  crates.io) instead of `vt100 = "0.15"`.
+- Two `.ttf` files (`JetBrainsMonoNerdFont-Regular.ttf`, ~2.5 MB) are
+  embedded via `include_bytes!` and will be compiled into the release
+  binary. This increases the binary size by roughly the font's
+  compressed contribution (~1.3 MB after LTO / strip).
+- No new runtime system dependencies. Nerd Font, Braille, and icon
+  rendering no longer require any font to be installed on the host.
 
-### Removed
-- Dead `AtomicBool` / `Ordering` import in `sftp.rs`.
-- Unused `safe_parent` / `safe_folder` bindings in the local→remote folder
-  upload path.
-
-## [0.2.8] - Earlier
-
-- Initial public preview release.
+[0.6.0]: https://github.com/AZBrandCanada/azTerm/releases/tag/v0.6.0
