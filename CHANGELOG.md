@@ -35,7 +35,7 @@ of xterm mouse protocols.
     through the render pipeline.
 
   The engine is vendored as **`azterm-parser`**, a fork of
-  `azterm-parser` published under the AZBrand organisation. This
+  `alacritty_terminal` published under the AZBrand organisation. This
   pins the parser against upstream churn so a future Alacritty release
   cannot silently break AZTerm's rendering.
 
