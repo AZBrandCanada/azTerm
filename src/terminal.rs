@@ -240,6 +240,65 @@ pub struct TerminalSession {
     pub reconnect_requested: bool,
 }
 
+/// Backtab (CBT, CSI Z) is silently ignored by vt100 0.15.
+///
+/// Nano, vim, htop, less and friends use CBT to jump the cursor to the
+/// previous tab stop, which can be several columns away. When the parser
+/// drops it, its cursor state diverges from the program's and every later
+/// *relative* cursor move (BS, CSI C, Tab, another CBT) inherits the
+/// error. That is the mechanism behind the "cursor jumps then writes land
+/// on the wrong cell" corruption in nano.
+///
+/// This wrapper scans each chunk for CBT and rewrites every occurrence
+/// into the equivalent absolute cursor-left move computed from the
+/// parser's live column. Non-CBT bytes are forwarded verbatim, so escape
+/// sequences that legitimately span chunk boundaries still work.
+fn process_bytes_with_cbt(parser: &mut vt100::Parser, bytes: &[u8]) {
+    // Fast path: no CBT anywhere in this chunk.
+    if bytes.len() < 3 || !bytes.windows(3).any(|w| w == b"\x1b[Z") {
+        parser.process(bytes);
+        return;
+    }
+
+    // Standard xterm-256color tab stops: every 8 columns.
+    const TAB_SIZE: u16 = 8;
+
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let rel = match bytes[i..].windows(3).position(|w| w == b"\x1b[Z") {
+            Some(r) => r,
+            None => {
+                if i < bytes.len() {
+                    parser.process(&bytes[i..]);
+                }
+                return;
+            }
+        };
+        let cbt_at = i + rel;
+
+        // Feed everything before the CBT normally.
+        if cbt_at > i {
+            parser.process(&bytes[i..cbt_at]);
+        }
+
+        // Translate CBT -> CSI {n} D. From column N, CBT moves to the
+        // previous tab stop strictly less than N.
+        let (_, col) = parser.screen().cursor_position();
+        let prev_tab = if col == 0 {
+            0
+        } else {
+            ((col - 1) / TAB_SIZE) * TAB_SIZE
+        };
+        let distance = col.saturating_sub(prev_tab);
+        if distance > 0 {
+            let seq = format!("\x1b[{}D", distance);
+            parser.process(seq.as_bytes());
+        }
+
+        i = cbt_at + 3;
+    }
+}
+
 impl TerminalSession {
     /// Stable widget id used for keyboard focus tracking.
     pub fn widget_id(session_id: usize) -> egui::Id {
@@ -283,8 +342,14 @@ impl TerminalSession {
         let master_pty = Arc::new(Mutex::new(pair.master));
 
         let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(512);
+        // Writer channel: deliberately large. send_input uses
+        // try_send from the UI thread (must never block), so a full
+        // channel would silently drop keystrokes. 64K pending
+        // messages is far beyond any realistic backpressure; even a
+        // completely wedged downstream PTY would need hundreds of
+        // thousands of keystrokes to fill it.
         let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) =
-            sync_channel(4096);
+            sync_channel(65536);
 
         let is_dead = std::sync::Arc::new(AtomicBool::new(false));
 
@@ -413,8 +478,10 @@ impl TerminalSession {
             });
         }
 
+        // Same rationale as the local-writer channel above: large
+        // enough that UI-thread try_send never realistically drops.
         let (writer_tx, writer_rx): (SyncSender<WriterMsg>, Receiver<WriterMsg>) =
-            sync_channel(4096);
+            sync_channel(65536);
         {
             let in_tx = attach.in_tx;
             thread::spawn(move || {
@@ -705,9 +772,10 @@ impl TerminalSession {
             self.set_view_scroll(0);
         }
         crate::dbg_log!(
-            "pty_send_input id={} bytes={} preview={:?}",
+            "pty_send_input id={} bytes={} hex={:02x?} preview={:?}",
             self.id,
             text.len(),
+            text.as_bytes(),
             &text.chars().take(48).collect::<String>()
         );
         let _ = self
@@ -802,6 +870,16 @@ impl TerminalSession {
         while let Ok(bytes) = self.rx.try_recv() {
             total_bytes += bytes.len();
 
+            // Log the head of every PTY chunk. We cap the hex dump at
+            // 64 bytes so a full-screen redraw doesn't flood the log;
+            // for a single arrow-key tap the whole chunk fits.
+            crate::dbg_log!(
+                "pty_recv id={} n={} hex={:02x?}",
+                self.id,
+                bytes.len(),
+                &bytes[..bytes.len().min(64)]
+            );
+
             if !in_alt && bytes.windows(4).any(|w| w == b"\x1b[3J") {
                 self.clear_screen_and_scrollback();
             }
@@ -827,9 +905,47 @@ impl TerminalSession {
                 }
             }
 
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.parser.process(&bytes);
+            // Parser panic handling. `catch_unwind` catches but does NOT
+            // restore the parser's internal state — if vt100 panics
+            // halfway through a byte sequence, the parser is left in a
+            // corrupt state and every subsequent byte is misparsed.
+            // That is the classic "random characters appear everywhere"
+            // symptom. Log the offending bytes AND reset the parser so
+            // the terminal is usable again instead of stuck corrupt.
+            let parse_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                process_bytes_with_cbt(&mut self.parser, &bytes);
             }));
+            {
+                let screen = self.parser.screen();
+                let (cr, cc) = screen.cursor_position();
+                let at = screen
+                    .cell(cr, cc)
+                    .map(|c| c.contents().to_string())
+                    .unwrap_or_else(|| "<none>".into());
+                crate::dbg_log!(
+                    "cursor_after id={} pos=(r{},c{}) at={:?}",
+                    self.id, cr, cc, at
+                );
+            }
+            if parse_result.is_err() {
+                crate::dbg_log!(
+                    "PARSER_PANIC id={} bytes={:02x?} — resetting parser",
+                    self.id,
+                    &bytes[..bytes.len().min(128)]
+                );
+                self.parser = vt100::Parser::new(
+                    self.rows,
+                    self.cols,
+                    self.scrollback_limit,
+                );
+                // Ask the app to repaint. The freshly-created parser is
+                // blank, but nano/vim/htop still think their previous
+                // screen state is live — without a full repaint every
+                // later incremental write lands in the wrong cell.
+                // Ctrl+L (0x0C) is the universal "redraw screen" key
+                // for curses programs.
+                let _ = self.writer_tx.try_send(WriterMsg::Data(vec![0x0c]));
+            }
 
             // Mirror into the restore-history buffer. Same loop iteration
             // as parser.process, so the two stay in sync even if the
@@ -1128,32 +1244,24 @@ impl TerminalSession {
                         key,
                         pressed: true,
                         modifiers,
+                        repeat,
                         ..
                     } => {
-                        if matches!(
+                        // Log EVERY key event, not just the "interesting"
+                        // ones. If a single tap is producing two events
+                        // (one from keydown, one from a bogus
+                        // Text-with-modifier path), this is where we'll
+                        // see it.
+                        crate::dbg_log!(
+                            "kbd id={} key={:?} ctrl={} shift={} alt={} cmd={} repeat={}",
+                            self.id,
                             key,
-                            egui::Key::ArrowUp
-                                | egui::Key::ArrowDown
-                                | egui::Key::ArrowLeft
-                                | egui::Key::ArrowRight
-                                | egui::Key::Tab
-                                | egui::Key::Escape
-                                | egui::Key::Enter
-                                | egui::Key::Backspace
-                                | egui::Key::PageUp
-                                | egui::Key::PageDown
-                                | egui::Key::Home
-                                | egui::Key::End
-                        ) {
-                            crate::dbg_log!(
-                                "kbd id={} key={:?} ctrl={} shift={} alt={}",
-                                self.id,
-                                key,
-                                modifiers.ctrl,
-                                modifiers.shift,
-                                modifiers.alt
-                            );
-                        }
+                            modifiers.ctrl,
+                            modifiers.shift,
+                            modifiers.alt,
+                            modifiers.command,
+                            repeat
+                        );
                         if *key == egui::Key::Enter {
                             crate::dbg_log!(
                                 "kbd_enter id={} ctrl={} shift={} alt={} cmd={}",
@@ -1180,7 +1288,17 @@ impl TerminalSession {
                             continue;
                         }
 
-                        if modifiers.shift {
+                        // Shift+PageUp/PageDown/Home/End scroll the
+                        // terminal scrollback (not the child app) —
+                        // but ONLY when we actually own the
+                        // scrollback (i.e. not in alt-screen and not
+                        // a primary-screen TUI that has its own
+                        // scrolling). In nano/less/vim we must
+                        // forward the raw key so the app handles it.
+                        let owns_scrollback = !self.parser.screen().alternate_screen()
+                            && self.parser.screen().mouse_protocol_mode()
+                                == vt100::MouseProtocolMode::None;
+                        if modifiers.shift && owns_scrollback {
                             if *key == egui::Key::PageUp {
                                 let jump = (self.rows.saturating_sub(2) as usize).max(1);
                                 self.set_view_scroll(self.scroll_offset + jump);
@@ -1197,6 +1315,52 @@ impl TerminalSession {
                             }
                             if *key == egui::Key::End {
                                 self.set_view_scroll(0);
+                                continue;
+                            }
+                        }
+
+                        // ---- Terminal control keys, modifier-independent ----
+                        //
+                        // Arrow keys, Home/End, PageUp/Down, and Delete
+                        // are terminal keys. egui can report stale
+                        // modifier state on the frame a key event
+                        // arrives (especially on Wayland), and the old
+                        // code gated these sequences behind
+                        // `!modifiers.ctrl`, which silently discarded
+                        // the keypress when a stale ctrl was reported.
+                        // Send the base sequence unconditionally; TUI
+                        // apps interpret shift/ctrl variants the same
+                        // way as the base for these keys anyway.
+                        //
+                        // The only exception is Ctrl+Shift+A/C/V,
+                        // which the terminal widget uses for its own
+                        // operations — those run first below.
+                        let ctrl_shift_reserved = modifiers.ctrl && modifiers.shift
+                            && matches!(key, egui::Key::A | egui::Key::C | egui::Key::V);
+                        if !ctrl_shift_reserved {
+                            let control_seq: Option<&[u8]> = match key {
+                                egui::Key::ArrowUp => Some(b"\x1b[A"),
+                                egui::Key::ArrowDown => Some(b"\x1b[B"),
+                                egui::Key::ArrowRight => Some(b"\x1b[C"),
+                                egui::Key::ArrowLeft => Some(b"\x1b[D"),
+                                egui::Key::Home => Some(b"\x1b[H"),
+                                egui::Key::End => Some(b"\x1b[F"),
+                                egui::Key::PageUp => Some(b"\x1b[5~"),
+                                egui::Key::PageDown => Some(b"\x1b[6~"),
+                                egui::Key::Delete => Some(b"\x1b[3~"),
+                                _ => None,
+                            };
+                            if let Some(seq) = control_seq {
+                                crate::dbg_log!(
+                                    "kbd_ctrl_seq id={} key={:?} ctrl={} shift={} alt={} bytes={:?}",
+                                    self.id,
+                                    key,
+                                    modifiers.ctrl,
+                                    modifiers.shift,
+                                    modifiers.alt,
+                                    seq
+                                );
+                                self.send_input(&String::from_utf8_lossy(seq));
                                 continue;
                             }
                         }
@@ -1404,14 +1568,14 @@ impl TerminalSession {
 
             self.parser.set_size(new_rows, new_cols);
 
-            // Full-screen apps (top, btop, htop, nano, ...) don't always
-            // repaint every cell after SIGWINCH, leaving ghost rows from the
-            // previous size. Wipe the parser's visible grid — the app is
-            // redrawn by SIGWINCH immediately, and shells redraw their prompt
-            // via readline, so a brief blank frame is imperceptible.
-            if in_alternate || tui_in_primary {
-                self.parser.process(b"\x1b[2J\x1b[H");
-            }
+            // NOTE: we deliberately do NOT wipe the parser's visible grid
+            // here. Wiping silently desyncs the running app's model of the
+            // screen from ours: programs like nano, vim, htop keep their own
+            // idea of what is on screen, and blanking the parser behind
+            // their back means every later incremental write lands in the
+            // wrong cell — the "random characters from elsewhere on the
+            // line" bug. Modern full-screen apps redraw on SIGWINCH
+            // themselves.
 
             if let Some(tx) = &self.daemon_resize_tx {
                 let _ = tx.try_send((new_cols, new_rows));
@@ -1537,7 +1701,40 @@ impl TerminalSession {
         // there and here.
         let has_egui_focus = response.has_focus();
         let nothing_else_has_focus = ui.memory(|m| m.focused().is_none());
-        if is_active_session && (has_egui_focus || nothing_else_has_focus) {
+        // Recovery path: if the pane is the active one but a TextEdit
+        // elsewhere grabbed focus and the user taps an arrow key, we
+        // still want the terminal to receive it. Steal focus back in
+        // that case. We only do this when a modifier is NOT held, so
+        // deliberate Ctrl+... shortcuts elsewhere aren't hijacked.
+        let terminal_key_stolen = if is_active_session && !has_egui_focus && !nothing_else_has_focus {
+            ui.input(|i| {
+                !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt
+                    && i.events.iter().any(|e| matches!(
+                        e,
+                        egui::Event::Key {
+                            key: egui::Key::ArrowUp
+                                | egui::Key::ArrowDown
+                                | egui::Key::ArrowLeft
+                                | egui::Key::ArrowRight
+                                | egui::Key::Home
+                                | egui::Key::End
+                                | egui::Key::PageUp
+                                | egui::Key::PageDown,
+                            pressed: true,
+                            ..
+                        }
+                    ))
+            })
+        } else {
+            false
+        };
+        if terminal_key_stolen {
+            response.request_focus();
+            crate::dbg_log!("kbd_focus_steal_arrows id={}", self.id);
+        }
+
+        let has_egui_focus = response.has_focus();
+        if is_active_session && (has_egui_focus || nothing_else_has_focus || terminal_key_stolen) {
             if !has_egui_focus && nothing_else_has_focus {
                 response.request_focus();
                 crate::dbg_log!("kbd_focus_recover id={}", self.id);

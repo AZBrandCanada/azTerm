@@ -31,7 +31,13 @@ pub const DEFAULT_ROWS: u16 = 40;
 ///
 /// History:
 ///   1  initial versioned protocol (SshSpec.profile_id, Shutdown)
-pub const PROTO_VERSION: u32 = 2;
+///   2  unused — placeholder bump during daemon development
+///   3  daemon no longer drops input or output bytes under
+///      backpressure (try_send -> blocking send). Clients refuse
+///      to attach to a v2 daemon: the fix is invisible on the
+///      wire, so the only way to guarantee users get it is to
+///      force a fresh daemon on next launch.
+pub const PROTO_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {

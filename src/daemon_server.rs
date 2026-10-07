@@ -317,7 +317,25 @@ fn stream_output(stream: UnixStream, sess: Arc<DaemonSession>) -> std::io::Resul
             Request::Input { bytes_b64 } => {
                 let bytes = b64_decode(&bytes_b64);
                 if !bytes.is_empty() {
-                    let _ = sess.writer_tx.try_send(bytes);
+                    // BLOCKING send. Do not change this back to
+                    // try_send().
+                    //
+                    // The channel to the PTY writer is bounded. If
+                    // it is full — which happens the moment nano,
+                    // vim, or any TUI is slow to drain its stdin —
+                    // try_send() returns Err(Full) and the keystroke
+                    // is silently thrown away. From the user's side
+                    // the cursor "moves less than I pressed", or a
+                    // whole sequence of arrows is dropped, and
+                    // eventually they are editing at a different
+                    // position than the display shows.
+                    //
+                    // Blocking here backpressures the client's
+                    // writer thread, which backpressures the UI's
+                    // input channel. Input is never lost. The
+                    // observed effect during a slow redraw is a
+                    // momentary lag, which is correct.
+                    let _ = sess.writer_tx.send(bytes);
                 }
             }
             Request::Resize { cols, rows } => {
@@ -347,7 +365,10 @@ fn spawn_session_workers(
     mut writer: Box<dyn Write + Send>,
     shared: Shared,
 ) {
-    let (writer_tx, writer_rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(4096);
+    // Large input buffer so a momentarily slow PTY write does not
+    // cause try_send (in handle_client's Request::Input branch) to
+    // silently drop keystrokes.
+    let (writer_tx, writer_rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = sync_channel(65536);
 
     thread::spawn(move || {
         while let Ok(bytes) = writer_rx.recv() {
@@ -395,12 +416,31 @@ fn spawn_session_workers(
                             r.pop_front();
                         }
                     }
+                    // BLOCKING broadcast. Do not change this back to
+                    // try_send().
+                    //
+                    // The subscriber channel is bounded. try_send()
+                    // silently DROPS the chunk when the buffer is
+                    // full, which punches a hole in the byte stream
+                    // the client feeds to its vt100 parser. If that
+                    // hole lands mid-escape-sequence, the parser's
+                    // cursor state silently diverges from the app's
+                    // real cursor — the "cursor loses its spot in
+                    // nano and edits land on the wrong row" bug.
+                    //
+                    // Blocking instead backpressures the PTY reader,
+                    // which backpressures the child process (nano,
+                    // vim, htop...). Slightly slower, never wrong.
+                    //
+                    // We hold subs_r across the send; that also
+                    // delays new Attach requests while a slow
+                    // subscriber is being backpressured, which is
+                    // acceptable — the alternative (snapshot,
+                    // unlock, send, reacquire) would need sender
+                    // tagging to avoid losing subscribers that
+                    // attached mid-broadcast.
                     let mut subs = subs_r.lock().unwrap();
-                    subs.retain(|tx| match tx.try_send(bytes.clone()) {
-                        Ok(_) => true,
-                        Err(std::sync::mpsc::TrySendError::Full(_)) => true,
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
-                    });
+                    subs.retain(|tx| tx.send(bytes.clone()).is_ok());
                 }
                 Err(_) => break,
             }
