@@ -894,27 +894,58 @@ impl TerminalSession {
             let rows = self.rows as i64;
             let cols = self.cols;
 
-            // Extract directly from the grid, not from
-            // renderable_content().display_iter. display_iter only
-            // covers the CURRENT viewport, so a drag-and-scroll
-            // selection that spans more than one screen silently
-            // blanked everything outside the visible window — which
-            // is why "select then scroll up" only copied what was on
-            // screen at the moment of release.
-            //
-            // Grid Line coordinate: Line(0) is the top of the screen
-            // when display_offset == 0; Line(rows - 1) is the bottom;
-            // negative values reach into scrollback. A content line
-            // at age `a` from the newest lives at Line(rows - 1 - a),
-            // independent of the current display_offset. So any age
-            // can be pulled in one pass, no scrolling required.
+            // ALT-SCREEN: use the same source the renderer uses
+            // (renderable_content's display_iter, via visible_cells).
+            // Term::grid() returns the PRIMARY grid buffer regardless
+            // of mode, so reading through it while a TUI is on the alt
+            // screen pulls the shell prompt sitting *behind* nano —
+            // which is why copy-on-select silently broke for nano/vim
+            // /htop/btop after the parser switch. Alt-screen has no
+            // scrollback, so the viewport is the entire selection
+            // space; display_iter covers every line the user could
+            // have picked.
+            if self.term.mode().contains(TermMode::ALT_SCREEN) {
+                let cells = self.visible_cells();
+                for age in (bot_age..=top_age).rev() {
+                    let vp_row = rows - 1 - age;
+                    let start_c = if age == top_age { top_col } else { 0 };
+                    let end_c = if age == bot_age {
+                        bot_col
+                    } else {
+                        cols.saturating_sub(1)
+                    };
+                    let mut line = String::new();
+                    for c in start_c..=end_c {
+                        if let Some((ch, _, _, flags)) =
+                            cells.get(&(vp_row as i32, c as usize))
+                        {
+                            if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                                continue;
+                            }
+                            line.push(if *ch == '\0' { ' ' } else { *ch });
+                        } else {
+                            line.push(' ');
+                        }
+                    }
+                    result.push_str(line.trim_end());
+                    if age != bot_age {
+                        result.push('\n');
+                    }
+                }
+                return result;
+            }
+
+            // PRIMARY: read straight out of the grid so a drag that
+            // reaches back into scrollback can fetch every line, not
+            // just the currently visible window. Grid Line(0) is the
+            // top of the screen at display_offset == 0; negative
+            // values reach into scrollback; a content line at age `a`
+            // from the newest lives at Line(rows - 1 - a), which is
+            // independent of the current display_offset.
             let history = self.term.history_size() as i64;
             let grid = self.term.grid();
             for age in (bot_age..=top_age).rev() {
                 let line_idx = rows - 1 - age;
-                // Bounds guard: a stale selection_end left over from
-                // before a resize could otherwise index past the
-                // available history.
                 if line_idx > rows - 1 || line_idx < -history {
                     if age != bot_age {
                         result.push('\n');
@@ -1324,6 +1355,24 @@ impl TerminalSession {
         let app_wants_mouse = has_mouse;
         let tui_in_primary = !has_mouse && !in_alt && self.looks_like_primary_screen_tui();
         let show_scrollback_bar = !app_wants_mouse && !in_alt && !tui_in_primary;
+
+        // Accumulate TUI frames during drag: every time the screen
+        // content changes (nano paged, user wheel-scrolled while
+        // holding, app redrew), snapshot and push. On release,
+        // combine_tui_frames stitches the accumulated list into one
+        // multi-screen string. Without this, tui_drag_frames only
+        // ever held the final screen at release time, so a drag
+        // spanning several pages copied just the last page.
+        if self.is_dragging_selection && (in_alt || tui_in_primary) {
+            if !self.tui_drag_frames.is_empty() {
+                let snap = self.snapshot_visible_lines();
+                if snap != self.tui_drag_last_snapshot {
+                    self.tui_drag_frames.push(snap.clone());
+                    self.tui_drag_last_snapshot = snap;
+                }
+            }
+        }
+
         const SCROLLBAR_RESERVE: f32 = 12.0;
         let scrollbar_width = if show_scrollback_bar { SCROLLBAR_RESERVE } else { 0.0 };
 
@@ -1552,6 +1601,15 @@ impl TerminalSession {
                     for _ in 0..count {
                         self.send_input(seq);
                     }
+                    // Track the first scroll direction so the TUI
+                    // drag accumulator can order its stitched frames.
+                    // Without this, wheel-scroll-while-dragging never
+                    // set direction and used_tui_accumulator stayed
+                    // false, so the wheel path fell through to plain
+                    // single-screen selection.
+                    if self.is_dragging_selection && self.tui_drag_direction.is_none() {
+                        self.tui_drag_direction = Some(scroll_y > 0.0);
+                    }
                     ui.ctx().request_repaint();
                 }
             }
@@ -1626,7 +1684,11 @@ impl TerminalSession {
                 self.tui_drag_frames.clear();
                 self.tui_drag_direction = None;
                 if in_alt || tui_in_primary {
+                    // Seed the accumulator with the drag-start
+                    // snapshot so the first page of content is not
+                    // lost when combine_tui_frames stitches the rest.
                     self.tui_drag_last_snapshot = self.snapshot_visible_lines();
+                    self.tui_drag_frames.push(self.tui_drag_last_snapshot.clone());
                 } else {
                     self.tui_drag_last_snapshot.clear();
                 }
