@@ -1,0 +1,426 @@
+// src/backup.rs
+//
+// Encrypted backup/restore of AZTerm's config directory.
+//
+// Design:
+//   * Archive: `tar czf` of ~/.config/azterm/ (subsets controlled by
+//     the caller — azterm.db always, keys/ and scrollback/ optional).
+//   * Encryption: gpg symmetric, AES256, passphrase supplied on stdin
+//     via --pinentry-mode loopback. No GPG keyring required; the
+//     passphrase IS the key.
+//   * Transport: rclone. We look for a remote named "gdrive"; if none
+//     exists we fall back to the first configured remote and let the
+//     UI surface the mismatch. This avoids shelling out to OAuth
+//     machinery we don't control.
+//
+// Everything is blocking and shelled out, so all public functions are
+// meant to be called from a worker thread. The UI holds the password
+// in AppState and passes a &str; we never persist it.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::io::Write;
+
+pub const GDRIVE_FOLDER: &str = "AZTerm-files";
+
+/// Which remote name we try first. Users set this up once via:
+///   rclone config → n → name "gdrive" → storage "drive" → ...
+pub const PREFERRED_REMOTE: &str = "gdrive";
+
+pub fn gpg_available() -> bool {
+    Command::new("gpg")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn rclone_available() -> bool {
+    Command::new("rclone")
+        .arg("version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn configured_remotes() -> Vec<String> {
+    let out = match Command::new("rclone").arg("listremotes").output() {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().trim_end_matches(':').to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Prefer a remote literally named "gdrive"; otherwise fall back to
+/// the first one configured so the user isn't dead in the water if
+/// they named it differently.
+pub fn has_gdrive_remote() -> Option<String> {
+    let remotes = configured_remotes();
+    if remotes.iter().any(|r| r == PREFERRED_REMOTE) {
+        return Some(PREFERRED_REMOTE.to_string());
+    }
+    remotes.into_iter().next()
+}
+
+fn config_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config/azterm")
+}
+
+fn timestamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Build the tar.gz → gpg pipeline. Returns the path to the encrypted
+/// archive in /tmp.
+fn build_encrypted_archive(
+    password: &str,
+    include_keys: bool,
+    include_scrollback: bool,
+) -> Result<PathBuf, String> {
+    let cfg = config_dir();
+    if !cfg.exists() {
+        return Err(format!("config directory not found: {}", cfg.display()));
+    }
+
+    // Build the tar member list explicitly so we can toggle sections
+    // without extracting into a temp tree.
+    let mut members: Vec<&str> = vec!["azterm.db"];
+    if include_keys {
+        members.push("keys");
+    }
+    if include_scrollback {
+        members.push("scrollback");
+    }
+    // active_theme / custom_themes live inside azterm.db, so no extra
+    // files are needed for settings.
+
+    let plain = std::env::temp_dir().join(format!("azterm-backup-{}.tar.gz", timestamp()));
+    let mut tar = Command::new("tar");
+    tar.arg("czf").arg(&plain).arg("-C").arg(&cfg);
+    for m in &members {
+        tar.arg(m);
+    }
+    // Ignore missing optional members (keys/, scrollback/) so the
+    // archive still succeeds on a fresh install.
+    tar.arg("--ignore-failed-read");
+    let status = tar
+        .status()
+        .map_err(|e| format!("tar spawn failed: {}", e))?;
+    if !status.success() {
+        return Err("tar failed — see stderr".into());
+    }
+
+    let enc = std::env::temp_dir().join(format!("azterm-backup-{}.tar.gz.gpg", timestamp()));
+    let mut gpg = Command::new("gpg")
+        .args([
+            "--symmetric",
+            "--cipher-algo", "AES256",
+            "--batch",
+            "--yes",
+            "--pinentry-mode", "loopback",
+            "--passphrase-fd", "0",
+            "--output",
+        ])
+        .arg(&enc)
+        .arg(&plain)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("gpg spawn failed: {}", e))?;
+
+    if let Some(mut stdin) = gpg.stdin.take() {
+        let _ = stdin.write_all(password.as_bytes());
+        let _ = stdin.write_all(b"\n");
+        // stdin drops here → EOF, gpg proceeds.
+    }
+    let out = gpg
+        .wait_with_output()
+        .map_err(|e| format!("gpg wait failed: {}", e))?;
+    let _ = std::fs::remove_file(&plain);
+
+    if !out.status.success() {
+        return Err(format!(
+            "gpg encryption failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(enc)
+}
+
+/// Create the encrypted archive and upload it to the configured
+/// Google Drive remote. Returns a human-readable path on success.
+pub fn create_and_upload_backup(
+    password: &str,
+    include_keys: bool,
+    include_scrollback: bool,
+) -> Result<String, String> {
+    if password.is_empty() {
+        return Err("password must not be empty".into());
+    }
+    let remote = has_gdrive_remote().ok_or_else(|| {
+        "no rclone remote configured — run `rclone config` and add one named \"gdrive\"".to_string()
+    })?;
+
+    let enc = build_encrypted_archive(password, include_keys, include_scrollback)?;
+    let file_name = enc
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "backup.tar.gz.gpg".into());
+
+    let dest = format!("{}:{}/{}", remote, GDRIVE_FOLDER, file_name);
+    let status = Command::new("rclone")
+        .args(["copyto"])
+        .arg(&enc)
+        .arg(&dest)
+        .status()
+        .map_err(|e| format!("rclone spawn failed: {}", e))?;
+
+    // Clean up temp file regardless.
+    let _ = std::fs::remove_file(&enc);
+
+    if !status.success() {
+        return Err("rclone upload failed — see stderr".into());
+    }
+    Ok(dest)
+}
+
+/// Create the encrypted archive at a caller-chosen path. If `dest` is a
+/// directory, a timestamped filename is generated inside it; if it
+/// already ends in `.gpg` (or has a file extension), it is used as-is.
+/// Uses rename to move the temp file into place — atomic on the same
+/// filesystem, and cheap enough on cross-device moves for a backup.
+pub fn create_backup_to_file(
+    password: &str,
+    dest: &Path,
+    include_keys: bool,
+    include_scrollback: bool,
+) -> Result<PathBuf, String> {
+    if password.is_empty() {
+        return Err("password must not be empty".into());
+    }
+
+    // Decide the final path.
+    let final_path: PathBuf = if dest.is_dir() {
+        let name = format!("azterm-backup-{}.tar.gz.gpg", timestamp());
+        dest.join(name)
+    } else {
+        // If the user typed a bare name with no extension, add one so
+        // it's obvious what the file is.
+        match dest.extension().and_then(|s| s.to_str()) {
+            Some(_) => dest.to_path_buf(),
+            None => {
+                let mut p = dest.to_path_buf();
+                let existing = p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "azterm-backup".into());
+                p.set_file_name(format!("{}.tar.gz.gpg", existing));
+                p
+            }
+        }
+    };
+
+    // Refuse to clobber. Backups should never silently overwrite an
+    // earlier backup — the whole point of keeping old ones around.
+    if final_path.exists() {
+        return Err(format!(
+            "refusing to overwrite existing file: {}",
+            final_path.display()
+        ));
+    }
+
+    // Make sure the parent directory exists.
+    if let Some(parent) = final_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {}", parent.display(), e))?;
+        }
+    }
+
+    let temp = build_encrypted_archive(password, include_keys, include_scrollback)?;
+
+    // Try a rename first (fast when same filesystem); fall back to copy
+    // for cross-device (e.g. /tmp → /mnt/usb).
+    if std::fs::rename(&temp, &final_path).is_err() {
+        std::fs::copy(&temp, &final_path)
+            .map_err(|e| format!("failed to write {}: {}", final_path.display(), e))?;
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    // Best-effort: lock down permissions. 0600 so a backup with keys
+    // in it isn't world-readable in a shared home or /tmp scenario.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&final_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&final_path, perms);
+        }
+    }
+
+    Ok(final_path)
+}
+
+/// List file names in the remote backup folder. Returns bare file
+/// names, not full remote paths.
+pub fn list_gdrive_backups() -> Vec<String> {
+    let remote = match has_gdrive_remote() {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    let path = format!("{}:{}/", remote, GDRIVE_FOLDER);
+    let out = match Command::new("rclone")
+        .args(["lsf", "--files-only"])
+        .arg(&path)
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.ends_with(".gpg"))
+        .collect()
+}
+
+/// Download a specific remote backup into /tmp and restore it.
+pub fn restore_from_gdrive(file_name: &str, password: &str) -> Result<(), String> {
+    let remote = has_gdrive_remote().ok_or_else(|| {
+        "no rclone remote configured".to_string()
+    })?;
+    let src = format!("{}:{}/{}", remote, GDRIVE_FOLDER, file_name);
+    let dest = std::env::temp_dir().join(file_name);
+
+    let status = Command::new("rclone")
+        .args(["copyto"])
+        .arg(&src)
+        .arg(&dest)
+        .status()
+        .map_err(|e| format!("rclone spawn failed: {}", e))?;
+    if !status.success() {
+        return Err("rclone download failed".into());
+    }
+    restore_from_local(&dest, password)
+}
+
+/// Decrypt and extract a local .gpg backup. Replaces azterm.db and,
+/// if present in the archive, the keys/ directory. Caller is expected
+/// to tell the user to restart afterwards — we do not attempt a live
+/// reload of in-memory state.
+pub fn restore_from_local(enc: &Path, password: &str) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("password must not be empty".into());
+    }
+    if !enc.exists() {
+        return Err(format!("file not found: {}", enc.display()));
+    }
+
+    let staging = std::env::temp_dir().join(format!("azterm-restore-{}", timestamp()));
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| format!("cannot create staging dir: {}", e))?;
+
+    let tar_path = staging.join("backup.tar.gz");
+
+    // gpg --decrypt
+    let mut gpg = Command::new("gpg")
+        .args([
+            "--decrypt",
+            "--batch",
+            "--yes",
+            "--pinentry-mode", "loopback",
+            "--passphrase-fd", "0",
+            "--output",
+        ])
+        .arg(&tar_path)
+        .arg(enc)
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("gpg spawn failed: {}", e))?;
+    if let Some(mut stdin) = gpg.stdin.take() {
+        let _ = stdin.write_all(password.as_bytes());
+        let _ = stdin.write_all(b"\n");
+    }
+    let out = gpg
+        .wait_with_output()
+        .map_err(|e| format!("gpg wait failed: {}", e))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "decryption failed (wrong password?): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    // tar -xzf into staging
+    let status = Command::new("tar")
+        .args(["xzf"])
+        .arg(&tar_path)
+        .arg("-C")
+        .arg(&staging)
+        .status()
+        .map_err(|e| format!("tar spawn failed: {}", e))?;
+    if !status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err("tar extract failed".into());
+    }
+
+    let cfg = config_dir();
+    std::fs::create_dir_all(&cfg).map_err(|e| e.to_string())?;
+
+    // Replace the DB.
+    let restored_db = staging.join("azterm.db");
+    if restored_db.exists() {
+        // Move the current one aside so a failed copy doesn't lose
+        // the user's data.
+        let backup_db = cfg.join("azterm.db.pre-restore");
+        let _ = std::fs::rename(cfg.join("azterm.db"), &backup_db);
+        std::fs::copy(&restored_db, cfg.join("azterm.db"))
+            .map_err(|e| format!("failed to write azterm.db: {}", e))?;
+    }
+
+    // Replace keys if the archive had them.
+    let restored_keys = staging.join("keys");
+    if restored_keys.exists() {
+        let _ = std::fs::rename(cfg.join("keys"), cfg.join("keys.pre-restore"));
+        copy_dir_all(&restored_keys, &cfg.join("keys"))
+            .map_err(|e| format!("failed to restore keys: {}", e))?;
+    }
+
+    // Restore scrollback if present.
+    let restored_sb = staging.join("scrollback");
+    if restored_sb.exists() {
+        let _ = std::fs::remove_dir_all(cfg.join("scrollback"));
+        copy_dir_all(&restored_sb, &cfg.join("scrollback"))
+            .map_err(|e| format!("failed to restore scrollback: {}", e))?;
+    }
+
+    let _ = std::fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}

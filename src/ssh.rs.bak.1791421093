@@ -117,31 +117,11 @@ impl SshProfile {
     }
 }
 
-/// Where a keypair physically lives. AZTerm-managed keys are safe to
-/// delete from inside the app; system keys under ~/.ssh are shared with
-/// every other SSH client on the machine, so the delete flow warns
-/// about that explicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyLocation {
-    Managed,    // ~/.config/azterm/keys/
-    SystemSsh,  // ~/.ssh/
-}
-
-impl KeyLocation {
-    pub fn short_label(&self) -> &'static str {
-        match self {
-            Self::Managed => "azterm",
-            Self::SystemSsh => "~/.ssh",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct SavedKeyEntry {
     pub file_name: String,
     pub priv_path: PathBuf,
     pub pub_key_content: Option<String>,
-    pub location: KeyLocation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -235,121 +215,37 @@ impl SshStore {
         Database::save_profiles(&self.profiles);
     }
 
-    /// The user's conventional SSH directory. Read-only from AZTerm's
-    /// point of view — we list keys here, we never write to it, and
-    /// deleting a key from here requires an explicit typed confirmation.
-    pub fn system_ssh_dir() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".ssh")
-    }
-
-    /// Enumerate every loadable private key from both AZTerm-managed
-    /// storage and the user's ~/.ssh. Managed keys sort first, then
-    /// system keys, each group alphabetised.
     pub fn list_saved_keys() -> Vec<SavedKeyEntry> {
-        let mut list = Self::scan_keys_in(&Self::keys_dir(), KeyLocation::Managed);
-        list.extend(Self::scan_keys_in(&Self::system_ssh_dir(), KeyLocation::SystemSsh));
-        list.sort_by(|a, b| {
-            let order = |l: KeyLocation| match l {
-                KeyLocation::Managed => 0,
-                KeyLocation::SystemSsh => 1,
-            };
-            order(a.location)
-                .cmp(&order(b.location))
-                .then_with(|| a.file_name.cmp(&b.file_name))
-        });
-        list
-    }
-
-    fn scan_keys_in(dir: &Path, location: KeyLocation) -> Vec<SavedKeyEntry> {
+        let dir = Self::keys_dir();
         let mut list = Vec::new();
-        let entries = match fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return list,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    if ext != "pub" && ext != "sock" {
+                        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let pub_path = dir.join(format!("{}.pub", file_name));
+                        let pub_content = fs::read_to_string(&pub_path).ok();
+                        list.push(SavedKeyEntry {
+                            file_name,
+                            priv_path: path,
+                            pub_key_content: pub_content,
+                        });
+                    }
+                }
             }
-            let file_name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-
-            // Skip obvious non-keys without opening the file. Covers
-            // ~/.ssh/{config, known_hosts, authorized_keys, *.pub, *.sock}
-            // and anything hidden (.DS_Store, editor backups, ...).
-            if file_name.starts_with('.') {
-                continue;
-            }
-            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-            if ext.eq_ignore_ascii_case("pub") || ext.eq_ignore_ascii_case("sock") {
-                continue;
-            }
-            if matches!(
-                file_name.as_str(),
-                "config" | "known_hosts" | "known_hosts.old" | "authorized_keys"
-            ) {
-                continue;
-            }
-
-            // Content sniff: only list files whose first non-blank line
-            // is a PEM private-key armor header. This is what stops us
-            // from listing a random text file someone dropped into
-            // ~/.ssh, and it matches the validation we now apply to
-            // pasted keys.
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if !Self::looks_like_private_key(&content) {
-                continue;
-            }
-
-            let pub_path = dir.join(format!("{}.pub", file_name));
-            let pub_content = fs::read_to_string(&pub_path).ok();
-
-            list.push(SavedKeyEntry {
-                file_name,
-                priv_path: path,
-                pub_key_content: pub_content,
-                location,
-            });
         }
+        list.sort_by(|a, b| a.file_name.cmp(&b.file_name));
         list
     }
 
-    /// Delete a managed keypair from ~/.config/azterm/keys/.
-    /// Deliberately does NOT touch ~/.ssh — the caller must use
-    /// delete_system_key() for that, and only after typed confirmation.
     pub fn delete_key_files(file_name: &str) {
         let dir = Self::keys_dir();
         let priv_path = dir.join(file_name);
         let pub_path = dir.join(format!("{}.pub", file_name));
         let _ = fs::remove_file(&priv_path);
         let _ = fs::remove_file(&pub_path);
-    }
-
-    /// Delete a keypair from the user's ~/.ssh. This is a destructive
-    /// action against the system SSH install — every other client on
-    /// the machine loses the key too. Callers must gate this behind
-    /// an explicit typed confirmation.
-    pub fn delete_system_key(file_name: &str) {
-        let dir = Self::system_ssh_dir();
-        let priv_path = dir.join(file_name);
-        let pub_path = dir.join(format!("{}.pub", file_name));
-        let _ = fs::remove_file(&priv_path);
-        let _ = fs::remove_file(&pub_path);
-    }
-
-    /// Location-aware delete. Routes to the right directory.
-    pub fn delete_key_at(location: KeyLocation, file_name: &str) {
-        match location {
-            KeyLocation::Managed => Self::delete_key_files(file_name),
-            KeyLocation::SystemSsh => Self::delete_system_key(file_name),
-        }
     }
 
     /// Does `s` plausibly look like an armored PEM private key?

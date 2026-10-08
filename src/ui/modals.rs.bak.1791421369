@@ -642,3 +642,295 @@ pub fn render_key_delete_modal(app: &mut AppState, ctx: &egui::Context) {
         app.key_delete_input.clear();
     }
 }
+
+/// Backup / restore modal. Everything runs on a worker thread and
+/// reports progress via `app.backup_status`.
+pub fn render_backup_modal(app: &mut AppState, ctx: &egui::Context) {
+    use crate::backup;
+
+    let gpg_ok = backup::gpg_available();
+    let rclone_ok = backup::rclone_available();
+    let remote = backup::has_gdrive_remote();
+
+    let mut close = false;
+
+    egui::Window::new("Backup & Restore")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(560.0)
+        .max_height(620.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // ---------------- Environment check ----------------
+                    ui.label(
+                        egui::RichText::new("Tool availability")
+                            .strong()
+                            .color(app.theme.accent_color()),
+                    );
+                    ui.add_space(4.0);
+                    let status_row = |ui: &mut egui::Ui, name: &str, ok: bool, hint: &str| {
+                        ui.horizontal(|ui| {
+                            let (mark, col) = if ok {
+                                ("[OK]", app.theme.success_color())
+                            } else {
+                                ("[MISSING]", app.theme.danger_color())
+                            };
+                            ui.label(egui::RichText::new(mark).small().strong().color(col));
+                            ui.label(egui::RichText::new(name).strong());
+                            if !ok {
+                                ui.label(
+                                    egui::RichText::new(hint)
+                                        .small()
+                                        .color(app.theme.text_muted_color()),
+                                );
+                            }
+                        });
+                    };
+                    status_row(ui, "gpg", gpg_ok, "install gnupg");
+                    status_row(ui, "rclone", rclone_ok, "install rclone");
+                    ui.horizontal(|ui| {
+                        let (mark, col) = if remote.is_some() {
+                            ("[OK]", app.theme.success_color())
+                        } else {
+                            ("[NOT SET]", app.theme.danger_color())
+                        };
+                        ui.label(egui::RichText::new(mark).small().strong().color(col));
+                        ui.label(egui::RichText::new("Google Drive remote").strong());
+                        if let Some(ref r) = remote {
+                            ui.label(
+                                egui::RichText::new(format!("using remote \"{}\"", r))
+                                    .small()
+                                    .color(app.theme.text_muted_color()),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "run: rclone config  (add a remote named \"gdrive\", type = drive)",
+                                )
+                                .small()
+                                .color(app.theme.text_muted_color()),
+                            );
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+
+                    // ---------------- Create backup ----------------
+                    ui.label(
+                        egui::RichText::new("Create a backup")
+                            .strong()
+                            .color(app.theme.accent_color()),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Packages azterm.db and (optionally) your keypairs into a \
+                             gpg-encrypted archive, then uploads it to \
+                             Google Drive → AZTerm-files/.",
+                        )
+                        .small()
+                        .color(app.theme.text_muted_color()),
+                    );
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Password:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut app.backup_password)
+                                .password(true)
+                                .desired_width(220.0),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Confirm: ");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut app.backup_confirm_password)
+                                .password(true)
+                                .desired_width(220.0),
+                        );
+                    });
+                    ui.checkbox(&mut app.backup_include_keys, "Include keypairs from ~/.config/azterm/keys/");
+                    ui.checkbox(&mut app.backup_include_scrollback, "Include terminal scrollback history");
+
+                    ui.add_space(8.0);
+                    let pw_ok = !app.backup_password.is_empty()
+                        && app.backup_password == app.backup_confirm_password;
+                    let can_backup = gpg_ok && rclone_ok && remote.is_some() && pw_ok;
+
+                    ui.horizontal(|ui| {
+                        let btn = crate::modern::Button3D::new("Encrypt & Upload Backup")
+                            .fill(if can_backup {
+                                app.theme.accent_color()
+                            } else {
+                                crate::modern::darken(app.theme.bg_card_color(), 10)
+                            })
+                            .edge(crate::modern::darken(app.theme.accent_color(), 55))
+                            .text_color(if can_backup {
+                                app.theme.on_accent_color()
+                            } else {
+                                app.theme.text_muted_color()
+                            });
+                        if btn.show(ui, &app.theme).clicked() && can_backup {
+                            let pw = app.backup_password.clone();
+                            let keys = app.backup_include_keys;
+                            let scroll = app.backup_include_scrollback;
+                            app.backup_status = Some(("Creating archive…".into(), false));
+                            let ctx2 = ctx.clone();
+                            // Status channel back to the UI thread.
+                            let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+                            app.backup_rx = Some(rx);
+                            std::thread::spawn(move || {
+                                let r = backup::create_and_upload_backup(&pw, keys, scroll);
+                                let _ = tx.send(match r {
+                                    Ok(path) => (format!("Backup complete: {}", path), false),
+                                    Err(e) => (format!("Backup failed: {}", e), true),
+                                });
+                                ctx2.request_repaint();
+                            });
+                        }
+                        if !pw_ok {
+                            ui.label(
+                                egui::RichText::new("passwords must match and be non-empty")
+                                    .small()
+                                    .color(app.theme.danger_color()),
+                            );
+                        }
+                    });
+
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(14.0);
+
+                    // ---------------- Restore ----------------
+                    ui.label(
+                        egui::RichText::new("Restore from backup")
+                            .strong()
+                            .color(app.theme.accent_color()),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Pick a backup from Google Drive, or browse to a .gpg file on \
+                             disk. Restoring replaces azterm.db and (if included) the key \
+                             store, so restart AZTerm afterwards.",
+                        )
+                        .small()
+                        .color(app.theme.text_muted_color()),
+                    );
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        if crate::modern::toolbar_button(ui, &app.theme, "Refresh Drive list").clicked()
+                            && rclone_ok
+                            && remote.is_some()
+                        {
+                            app.backup_remote_list = backup::list_gdrive_backups();
+                        }
+                    });
+                    ui.add_space(4.0);
+
+                    if app.backup_remote_list.is_empty() {
+                        ui.label(
+                            egui::RichText::new("(no remote backups listed yet — click Refresh)")
+                                .small()
+                                .color(app.theme.text_muted_color()),
+                        );
+                    } else {
+                        let mut chosen: Option<String> = None;
+                        for name in &app.backup_remote_list {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(name).monospace().small());
+                                if crate::modern::accent_button_small(ui, &app.theme, "Restore").clicked() {
+                                    chosen = Some(name.clone());
+                                }
+                            });
+                        }
+                        if let Some(remote_name) = chosen {
+                            if app.backup_password.is_empty() {
+                                app.backup_status = Some(("Enter the backup password above first".into(), true));
+                            } else {
+                                let pw = app.backup_password.clone();
+                                let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+                                app.backup_rx = Some(rx);
+                                app.backup_status = Some((format!("Downloading {}…", remote_name), false));
+                                let ctx2 = ctx.clone();
+                                std::thread::spawn(move || {
+                                    let r = backup::restore_from_gdrive(&remote_name, &pw);
+                                    let _ = tx.send(match r {
+                                        Ok(()) => ("Restore complete — restart AZTerm now".into(), false),
+                                        Err(e) => (format!("Restore failed: {}", e), true),
+                                    });
+                                    ctx2.request_repaint();
+                                });
+                            }
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("…or restore from a local .gpg file:")
+                            .small()
+                            .color(app.theme.text_muted_color()),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut app.backup_restore_local_path)
+                                .hint_text("/path/to/backup.gpg")
+                                .desired_width(340.0),
+                        );
+                        if crate::modern::toolbar_button(ui, &app.theme, "Restore from file").clicked() {
+                            if app.backup_password.is_empty() {
+                                app.backup_status = Some(("Enter the backup password above first".into(), true));
+                            } else {
+                                let pw = app.backup_password.clone();
+                                let path = std::path::PathBuf::from(app.backup_restore_local_path.trim());
+                                let (tx, rx) = std::sync::mpsc::channel::<(String, bool)>();
+                                app.backup_rx = Some(rx);
+                                app.backup_status = Some(("Restoring…".into(), false));
+                                let ctx2 = ctx.clone();
+                                std::thread::spawn(move || {
+                                    let r = backup::restore_from_local(&path, &pw);
+                                    let _ = tx.send(match r {
+                                        Ok(()) => ("Restore complete — restart AZTerm now".into(), false),
+                                        Err(e) => (format!("Restore failed: {}", e), true),
+                                    });
+                                    ctx2.request_repaint();
+                                });
+                            }
+                        }
+                    });
+
+                    if let Some((ref msg, is_err)) = app.backup_status {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new(msg)
+                                .small()
+                                .color(if is_err {
+                                    app.theme.danger_color()
+                                } else {
+                                    app.theme.success_color()
+                                }),
+                        );
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if crate::modern::button(ui, &app.theme, "Close").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+        });
+
+    if close {
+        app.show_backup_modal = false;
+        // Best-effort scrub of password strings.
+        app.backup_password.clear();
+        app.backup_confirm_password.clear();
+        app.backup_status = None;
+    }
+}

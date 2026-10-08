@@ -390,22 +390,11 @@ pub struct AppState {
     /// Available remote backups, populated on demand.
     pub backup_remote_list: Vec<String>,
     pub backup_remote_refreshing: bool,
-    /// Destination path for "Save backup to file". Editable text field
-    /// in Settings → Backup.
-    pub backup_local_path: String,
     /// Receiver for background backup/restore status. Drained every
     /// frame in update(); the backup UI lives in Settings → Backup.
     pub backup_rx: Option<Receiver<(String, bool)>>,
 }
 
-
-/// Where "Save backup to file" defaults to. Just a sensible
-/// starting point the user can edit — no assumptions about their
-/// backup habits.
-fn default_backup_local_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{}/azterm-backups/", home)
-}
 
 fn modal_open_flag(app: &AppState) -> bool {
     app.show_update_modal
@@ -526,7 +515,6 @@ impl AppState {
             backup_restore_local_path: String::new(),
             backup_remote_list: Vec::new(),
             backup_remote_refreshing: false,
-            backup_local_path: default_backup_local_path(),
             backup_rx: None,
         };
 

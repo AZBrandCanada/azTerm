@@ -1,5 +1,4 @@
 // src/main.rs
-mod backup;
 mod daemon;
 mod daemon_client;
 mod daemon_server;
@@ -51,7 +50,6 @@ pub enum SettingsCategory {
     ShellEnv,
     Sftp,
     System,
-    Backup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,52 +366,14 @@ pub struct AppState {
     pub keygen_status: String,
 
     pub ssh_auth_modal: Option<SshAuthModalState>,
-
-    /// Pending "delete this keypair" confirmation. Carries
-    /// (file_name, path, location) so we know whether we're about to
-    /// touch ~/.ssh or only AZTerm's own key store. The modal requires
-    /// the user to type "delete" before the action fires.
-    pub pending_key_delete: Option<(String, std::path::PathBuf, ssh::KeyLocation)>,
-    pub key_delete_input: String,
-
-    /// Backup / restore modal state. Passwords are held as plain
-    /// Strings because they have to reach gpg on stdin; they are
-    /// zeroed on modal close.
-    pub show_backup_modal: bool,
-    pub backup_password: String,
-    pub backup_confirm_password: String,
-    pub backup_include_keys: bool,
-    pub backup_include_scrollback: bool,
-    pub backup_status: Option<(String, bool)>,
-    /// Set when the user picks "Restore from local file…".
-    pub backup_restore_local_path: String,
-    /// Available remote backups, populated on demand.
-    pub backup_remote_list: Vec<String>,
-    pub backup_remote_refreshing: bool,
-    /// Destination path for "Save backup to file". Editable text field
-    /// in Settings → Backup.
-    pub backup_local_path: String,
-    /// Receiver for background backup/restore status. Drained every
-    /// frame in update(); the backup UI lives in Settings → Backup.
-    pub backup_rx: Option<Receiver<(String, bool)>>,
 }
 
-
-/// Where "Save backup to file" defaults to. Just a sensible
-/// starting point the user can edit — no assumptions about their
-/// backup habits.
-fn default_backup_local_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    format!("{}/azterm-backups/", home)
-}
 
 fn modal_open_flag(app: &AppState) -> bool {
     app.show_update_modal
         || app.show_profile_modal
         || app.show_keygen_modal
         || app.ssh_auth_modal.is_some()
-        || app.pending_key_delete.is_some()
-        || app.show_backup_modal
         || app.sftp.has_open_modal()
 }
 
@@ -513,21 +473,6 @@ impl AppState {
             keygen_status: String::new(),
 
             ssh_auth_modal: None,
-
-            pending_key_delete: None,
-            key_delete_input: String::new(),
-
-            show_backup_modal: false,
-            backup_password: String::new(),
-            backup_confirm_password: String::new(),
-            backup_include_keys: true,
-            backup_include_scrollback: false,
-            backup_status: None,
-            backup_restore_local_path: String::new(),
-            backup_remote_list: Vec::new(),
-            backup_remote_refreshing: false,
-            backup_local_path: default_backup_local_path(),
-            backup_rx: None,
         };
 
         app.schedule_boot_update_check(cc.egui_ctx.clone());
@@ -2147,30 +2092,6 @@ impl eframe::App for AppState {
         // as the rest of the UI. Cheap: mutates the style in place.
         self.theme.apply_to_egui(ctx);
 
-        // Drain pending backup/restore worker messages. The Backup
-        // panel lives in Settings → Backup; this runs every frame so
-        // status updates aren't missed when the panel is closed.
-        if let Some(rx) = self.backup_rx.take() {
-            let mut last: Option<(String, bool)> = None;
-            let mut disconnected = false;
-            loop {
-                match rx.try_recv() {
-                    Ok(m) => last = Some(m),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-            if let Some(m) = last {
-                self.backup_status = Some(m);
-            }
-            if !disconnected {
-                self.backup_rx = Some(rx);
-            }
-        }
-
         // Promote last frame's in-flight preview set. By the time we
         // run again, egui has rebuilt the atlas at the start of this
         // pass with whatever we handed to set_fonts last frame — so
@@ -2240,11 +2161,6 @@ impl eframe::App for AppState {
         if self.ssh_auth_modal.is_some() {
             ui::modals::render_ssh_auth_modal(self, ctx);
         }
-
-        if self.pending_key_delete.is_some() {
-            ui::modals::render_key_delete_modal(self, ctx);
-        }
-
 
         if self.show_disable_daemon_modal {
             ui::modals::render_disable_daemon_modal(self, ctx);

@@ -103,6 +103,7 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                         ui.label(egui::RichText::new("No SSH keys stored in ~/.config/azterm/keys yet.").color(app.theme.text_muted_color()));
                     });
                 } else {
+                    let mut key_to_delete: Option<String> = None;
                     let mut key_to_create_profile: Option<std::path::PathBuf> = None;
                     let mut key_name_for_profile: Option<String> = None;
 
@@ -110,32 +111,13 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                         app.theme.card_frame().show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(&key.file_name).strong().color(app.theme.accent_color()));
-                                        // Source badge: managed keys are safe to
-                                        // delete from here; ~/.ssh keys are
-                                        // shared with every other SSH client.
-                                        let (badge, col) = match key.location {
-                                            crate::ssh::KeyLocation::Managed => {
-                                                ("[azterm]", app.theme.text_muted_color())
-                                            }
-                                            crate::ssh::KeyLocation::SystemSsh => {
-                                                ("[~/.ssh]", app.theme.accent_color())
-                                            }
-                                        };
-                                        ui.label(egui::RichText::new(badge).small().color(col));
-                                    });
+                                    ui.label(egui::RichText::new(&key.file_name).strong().color(app.theme.accent_color()));
                                     ui.label(egui::RichText::new(format!("Path: {}", key.priv_path.display())).small().color(app.theme.text_muted_color()));
                                 });
 
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     if crate::modern::button_danger(ui, &app.theme, "Delete Key").clicked() {
-                                        app.pending_key_delete = Some((
-                                            key.file_name.clone(),
-                                            key.priv_path.clone(),
-                                            key.location,
-                                        ));
-                                        app.key_delete_input.clear();
+                                        key_to_delete = Some(key.file_name.clone());
                                     }
                                     if let Some(ref pub_k) = key.pub_key_content {
                                         if crate::modern::button_small(ui, &app.theme, "Copy Public Key").clicked() {
@@ -169,7 +151,10 @@ pub fn render_ssh_view(app: &mut AppState, ctx: &egui::Context, ui: &mut egui::U
                         }
                     }
 
-
+                    if let Some(name) = key_to_delete {
+                        SshStore::delete_key_files(&name);
+                        app.set_toast("Key files removed");
+                    }
                 }
             }
         }
