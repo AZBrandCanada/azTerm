@@ -20,6 +20,7 @@ use std::thread;
 
 use azterm_parser::event::{Event as AlacTermEvent, EventListener};
 use azterm_parser::grid::{Dimensions, Scroll};
+use azterm_parser::index::{Column, Line};
 use azterm_parser::term::cell::Flags as CellFlags;
 use azterm_parser::term::test::TermSize;
 use azterm_parser::term::{Config as TermConfig, Term, TermMode};
@@ -872,7 +873,7 @@ impl TerminalSession {
         let mut map = std::collections::HashMap::new();
         let content = self.term.renderable_content();
         for indexed in content.display_iter {
-            let row = indexed.point.line.0;
+            let row = indexed.point.line.0 + self.scroll_offset as i32;
             let col = indexed.point.column.0;
             let cell = indexed.cell;
             map.insert((row, col), (cell.c, cell.fg, cell.bg, cell.flags));
@@ -890,12 +891,38 @@ impl TerminalSession {
                     (end.0, end.1, start.0, start.1)
                 };
 
-            let cells = self.visible_cells();
             let rows = self.rows as i64;
             let cols = self.cols;
 
+            // Extract directly from the grid, not from
+            // renderable_content().display_iter. display_iter only
+            // covers the CURRENT viewport, so a drag-and-scroll
+            // selection that spans more than one screen silently
+            // blanked everything outside the visible window — which
+            // is why "select then scroll up" only copied what was on
+            // screen at the moment of release.
+            //
+            // Grid Line coordinate: Line(0) is the top of the screen
+            // when display_offset == 0; Line(rows - 1) is the bottom;
+            // negative values reach into scrollback. A content line
+            // at age `a` from the newest lives at Line(rows - 1 - a),
+            // independent of the current display_offset. So any age
+            // can be pulled in one pass, no scrolling required.
+            let history = self.term.history_size() as i64;
+            let grid = self.term.grid();
             for age in (bot_age..=top_age).rev() {
-                let screen_r = rows - 1 - age;
+                let line_idx = rows - 1 - age;
+                // Bounds guard: a stale selection_end left over from
+                // before a resize could otherwise index past the
+                // available history.
+                if line_idx > rows - 1 || line_idx < -history {
+                    if age != bot_age {
+                        result.push('\n');
+                    }
+                    continue;
+                }
+                let row = &grid[Line(line_idx as i32)];
+
                 let start_c = if age == top_age { top_col } else { 0 };
                 let end_c = if age == bot_age {
                     bot_col
@@ -905,17 +932,14 @@ impl TerminalSession {
 
                 let mut line = String::new();
                 for c in start_c..=end_c {
-                    if let Some((ch, _, _, flags)) = cells.get(&(screen_r as i32, c as usize)) {
-                        if flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                            continue;
-                        }
-                        if *ch == '\0' || *ch == ' ' {
-                            line.push(' ');
-                        } else {
-                            line.push(*ch);
-                        }
-                    } else {
+                    let cell = &row[Column(c as usize)];
+                    if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+                    if cell.c == '\0' || cell.c == ' ' {
                         line.push(' ');
+                    } else {
+                        line.push(cell.c);
                     }
                 }
                 result.push_str(line.trim_end());
@@ -1784,7 +1808,7 @@ impl TerminalSession {
                 std::collections::HashMap::new();
             for indexed in content.display_iter {
                 let cell = indexed.cell;
-                let row = indexed.point.line.0;
+                let row = indexed.point.line.0 + self.scroll_offset as i32;
                 let col = indexed.point.column.0;
                 cell_map.insert((row, col), (cell.c, cell.fg, cell.bg, cell.flags));
             }
@@ -2006,7 +2030,7 @@ impl TerminalSession {
         let mut lines: Vec<Vec<char>> = vec![vec![' '; self.cols as usize]; self.rows as usize];
 
         for indexed in content.display_iter {
-            let row = indexed.point.line.0;
+            let row = indexed.point.line.0 + self.scroll_offset as i32;
             let col = indexed.point.column.0;
             if row >= 0 && row < self.rows as i32 && col < self.cols as usize {
                 let ch = indexed.cell.c;

@@ -23,3 +23,4 @@ fix_debug_derive.sh
 release.sh
 revert_installer_clipboard_deps.sh
 src/terminal.rs.bak
+src/terminal.rs.bak.1791419064
