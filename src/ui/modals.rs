@@ -350,13 +350,34 @@ pub fn render_profile_modal(app: &mut AppState, ctx: &egui::Context) {
                 ui.horizontal(|ui| {
                     if crate::modern::button_accent(ui, &app.theme, "Save Profile").clicked() {
                         let port = app.new_ssh_port.parse().unwrap_or(22);
+
+                        // Pre-validate the pasted key BEFORE building the
+                        // profile. Previously a bad paste silently wrote a
+                        // malformed .pem and the profile pointed at it; the
+                        // user only saw the failure much later as ssh's
+                        // cryptic "Load key ...: invalid format".
+                        if app.new_ssh_auth_choice == 2
+                            && !app.new_ssh_pasted_key.trim().is_empty()
+                            && !SshStore::looks_like_private_key(&app.new_ssh_pasted_key)
+                        {
+                            app.set_toast(
+                                "Pasted text is not a PEM private key — expected a -----BEGIN ... PRIVATE KEY----- header",
+                            );
+                            return;
+                        }
+
                         let auth_type = if app.new_ssh_auth_choice == 1 && !app.new_ssh_key_path.trim().is_empty() {
                             SshStore::ensure_secure_permissions(&app.new_ssh_key_path);
                             SshAuthType::KeyFile(app.new_ssh_key_path.clone())
                         } else if app.new_ssh_auth_choice == 2 && !app.new_ssh_pasted_key.trim().is_empty() {
                             let key_id = format!("{}_{}", app.new_ssh_host, port);
-                            let _ = SshStore::save_pasted_key(&key_id, &app.new_ssh_pasted_key);
-                            SshAuthType::PastedKey { key_id }
+                            match SshStore::save_pasted_key(&key_id, &app.new_ssh_pasted_key) {
+                                Ok(_) => SshAuthType::PastedKey { key_id },
+                                Err(e) => {
+                                    app.set_toast(format!("Failed to save pasted key: {}", e));
+                                    return;
+                                }
+                            }
                         } else {
                             SshAuthType::PasswordOrAgent
                         };

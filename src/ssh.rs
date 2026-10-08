@@ -248,10 +248,98 @@ impl SshStore {
         let _ = fs::remove_file(&pub_path);
     }
 
+    /// Does `s` plausibly look like an armored PEM private key?
+    /// Used to reject obvious paste mistakes (a public key, a shell
+    /// transcript, a PuTTY .ppk, markdown junk) before we write a
+    /// file that ssh will later reject with "invalid format".
+    pub fn looks_like_private_key(s: &str) -> bool {
+        let t = s.trim_start_matches('\u{FEFF}').trim_start();
+        // Accept both modern OpenSSH armor and legacy RSA/EC/DSA armor.
+        t.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+            || t.starts_with("-----BEGIN RSA PRIVATE KEY-----")
+            || t.starts_with("-----BEGIN EC PRIVATE KEY-----")
+            || t.starts_with("-----BEGIN DSA PRIVATE KEY-----")
+            || t.starts_with("-----BEGIN PRIVATE KEY-----")
+            || t.starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+    }
+
+    /// Normalize a pasted key so OpenSSH's PEM parser accepts it.
+    ///
+    /// Handles the damage that a plain clipboard paste actually
+    /// introduces in the wild:
+    ///   * Windows / browser CRLF inside the body (ssh 8.x rejects
+    ///     stray CRs in the base64 payload);
+    ///   * a leading UTF-8 BOM from certain web pages (Rust's
+    ///     str::trim does NOT strip U+FEFF);
+    ///   * markdown ``` or ~~~ fences when copying from docs;
+    ///   * a missing trailing newline (ssh-keygen always emits one).
+    pub fn normalize_pasted_key(raw: &str) -> String {
+        // 1. Strip BOM, then optional markdown fence.
+        let mut s = raw.trim_start_matches('\u{FEFF}').trim();
+
+        for fence in ["```", "~~~"] {
+            if s.starts_with(fence) {
+                if let Some(rest) = s.strip_prefix(fence) {
+                    // Drop the remainder of the opening line (may be
+                    // a language tag, e.g. ```openssh).
+                    let body = rest.split_once('\n').map(|(_, b)| b).unwrap_or(rest);
+                    if let Some(idx) = body.rfind(fence) {
+                        s = body[..idx].trim();
+                    } else {
+                        s = body.trim();
+                    }
+                }
+                break;
+            }
+        }
+
+        // 2. Line endings: CRLF -> LF, lone CR -> LF.
+        let mut out = String::with_capacity(s.len() + 1);
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\r' {
+                out.push('\n');
+                if it.peek() == Some(&'\n') {
+                    it.next();
+                }
+            } else {
+                out.push(c);
+            }
+        }
+
+        // 3. Trailing newline. ssh tolerates its absence, but every
+        //    ssh-keygen output ends with one, and some tooling (and
+        //    any user who later `cat`s the file) expects it.
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+
+        out
+    }
+
     pub fn save_pasted_key(key_id: &str, content: &str) -> std::io::Result<PathBuf> {
         let dir = Self::keys_dir();
         let key_file = dir.join(format!("{}.pem", key_id));
-        fs::write(&key_file, content.trim())?;
+
+        let normalized = Self::normalize_pasted_key(content);
+
+        if !Self::looks_like_private_key(&normalized) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Pasted text does not look like a PEM private key \
+                 (expected a -----BEGIN ... PRIVATE KEY----- header)",
+            ));
+        }
+
+        crate::dbg_log!(
+            "save_pasted_key key_id={} raw_len={} normalized_len={} lines={}",
+            key_id,
+            content.len(),
+            normalized.len(),
+            normalized.lines().count()
+        );
+
+        fs::write(&key_file, &normalized)?;
         Self::ensure_secure_permissions(&key_file.to_string_lossy());
         Ok(key_file)
     }
