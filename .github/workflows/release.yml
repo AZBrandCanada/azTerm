@@ -11,8 +11,53 @@ permissions:
   contents: write
 
 jobs:
+  # ==========================================================
+  # CACHE WARMING — runs only on main-branch pushes.
+  # Compiles the release binary so the default-branch cache
+  # stays fresh. No packaging, no uploads.
+  # ==========================================================
+  warm-linux:
+    name: Warm Linux cache
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile (cache seed only)
+        run: cargo build --release
+
+  warm-macos:
+    name: Warm macOS cache
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile (cache seed only)
+        run: cargo build --release
+
+  # ==========================================================
+  # RELEASE — runs only on v* tag pushes.
+  # Restores from the main-branch cache, builds real artifacts,
+  # uploads to the GitHub Release.
+  # ==========================================================
   build-linux:
     name: Linux Packages (.AppImage, .deb, .tar.gz)
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
@@ -26,21 +71,13 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Restores from the main-branch cache on every run.
-      # Only writes back when running on main, so tags don't
-      # spawn their own unreachable per-tag caches.
       - name: Cache Rust Dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
       - name: Build All Linux Packages
-        # Only do the packaging work on tag pushes. On main pushes we
-        # just want to compile once so the cache gets populated.
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           mkdir -p dist target/stage-linux target/AppDir/usr/bin target/AppDir/usr/lib target/AppDir/usr/share/applications target/AppDir/usr/share/icons/hicolor/scalable/apps target/AppDir/usr/share/icons/hicolor/256x256/apps
 
@@ -72,15 +109,7 @@ jobs:
           chmod +x target/appimagetool
           ARCH=x86_64 ./target/appimagetool --appimage-extract-and-run target/AppDir dist/AZTerm-x86_64.AppImage
 
-      - name: Warm cache on main
-        # On main pushes, just compile so the cache gets populated.
-        # No packaging, no artifacts — this exists only to seed the
-        # default-branch cache that tag builds will restore from.
-        if: github.ref == 'refs/heads/main'
-        run: cargo build --release
-
       - name: Upload Linux Release Assets
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -90,6 +119,7 @@ jobs:
 
   build-macos:
     name: macOS Package (.tar.gz)
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-latest
     steps:
       - name: Checkout Repository
@@ -100,20 +130,16 @@ jobs:
 
       - name: Cache Rust Dependencies
         uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build macOS Binary
         run: cargo build --release
 
       - name: Package macOS Tarball
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           mkdir -p dist
           tar -czf dist/azterm-macos-universal.tar.gz -C target/release azterm
 
       - name: Upload macOS Release Assets
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/azterm-macos-universal.tar.gz
