@@ -34,12 +34,16 @@ Run this command in your terminal to automatically install dependencies, compile
 > 
 >
 
-Or using `wget`:
+### Alternative: Using `wget`
+
+If you prefer `wget` over `curl`:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash
+/bin/bash -c "$(wget -qO- https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh)"
+
 ```
 
+> **Note for macOS users:** `curl` comes pre-installed on macOS by default, whereas `wget` requires Homebrew (`brew install wget`). The `curl` command is recommended on macOS unless you already have `wget` installed.
 ---
 
 ## Direct Downloads (Precompiled Releases)
