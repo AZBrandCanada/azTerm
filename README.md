@@ -10,13 +10,29 @@ Built with hardware-accelerated immediate-mode GPU graphics, AZTerm provides a f
 
 ---
 
-## One-Line Install (Pipe to Bash)
+## One-Line Universal Install
 
-Run this command in your terminal to automatically compile, install, and configure AZTerm with full desktop integration:
+Run this command in your terminal to automatically install dependencies, compile, and configure AZTerm across **Linux** and **macOS**:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh | bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/AZBrandCanada/azTerm/main/install.sh)"
+
 ```
+
+### Supported Systems
+
+* **Arch Linux / Manjaro / EndeavourOS** (`pacman`)
+* **Debian / Ubuntu / Pop!_OS / Mint** (`apt`)
+* **Fedora / RHEL / CentOS** (`dnf`)
+* **openSUSE** (`zypper`)
+* **macOS** (Intel & Apple Silicon)
+
+> **What the installer does automatically:**
+> * Detects missing system libraries and installs the Rust toolchain (`cargo`) if not present.
+> * Compiles and places the active `azterm` binary into your system `PATH`.
+> * **Linux Integration:** Installs `.desktop` menu launchers, high-res icons, and right-click context menu actions for **KDE Dolphin** and **Nemo**.
+> 
+>
 
 Or using `wget`:
 
