@@ -12,7 +12,6 @@ export PATH="$HOME/.cargo/bin:$PATH"
 echo "[1/5] Checking build dependencies..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
     echo "Detected macOS system."
-    # Check for Xcode Command Line Tools / compiler
     if ! command -v cc &>/dev/null; then
         echo "Xcode Command Line Tools missing. Installing..."
         xcode-select --install || true
@@ -57,16 +56,48 @@ cargo build --release
 
 echo "[4/5] Installing binary and integrations..."
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS Installation Path
+    # 1. Ensure /usr/local/bin exists and install binary for terminal use
+    sudo mkdir -p /usr/local/bin
+    sudo cp target/release/azterm /usr/local/bin/azterm
+    sudo chmod +x /usr/local/bin/azterm
+
+    # Fallback copy to user local directory
     mkdir -p "$HOME/.local/bin"
     cp target/release/azterm "$HOME/.local/bin/azterm"
-    
-    # Try copying to /usr/local/bin if user has permissions
-    if [ -w "/usr/local/bin" ]; then
-        cp target/release/azterm /usr/local/bin/azterm
-    else
-        sudo cp target/release/azterm /usr/local/bin/azterm 2>/dev/null || true
+
+    # 2. Create macOS .app bundle for Applications / Launchpad / Spotlight
+    APP_DIR="/Applications/AZTerm.app/Contents"
+    sudo mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
+    sudo cp target/release/azterm "$APP_DIR/MacOS/azterm"
+    sudo chmod +x "$APP_DIR/MacOS/azterm"
+
+    # Copy icon if available
+    if [ -f "assets/azterm.icns" ]; then
+        sudo cp assets/azterm.icns "$APP_DIR/Resources/azterm.icns"
     fi
+
+    # Create Info.plist so macOS recognizes it as a GUI application
+    cat <<EOF | sudo tee "$APP_DIR/Info.plist" > /dev/null
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>azterm</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.azbrand.azterm</string>
+    <key>CFBundleName</key>
+    <string>AZTerm</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.6.3</string>
+    <key>CFBundleIconFile</key>
+    <string>azterm</string>
+</dict>
+</plist>
+EOF
+
     echo "[5/5] macOS installation complete!"
 else
     # Linux Installation Path
@@ -151,5 +182,5 @@ hash -r 2>/dev/null || true
 
 echo "=========================================================="
 echo " AZTerm installation complete!"
-echo " Active binary: $(which azterm)"
+echo " Active binary: $(which azterm 2>/dev/null || echo '/usr/local/bin/azterm')"
 echo "=========================================================="
