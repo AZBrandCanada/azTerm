@@ -10,61 +10,60 @@ permissions:
 
 jobs:
   build-linux:
-    name: Linux Packages (.AppImage, .deb, .tar.gz)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      name: Linux Packages (.AppImage, .deb, .tar.gz)
+      runs-on: ubuntu-22.04   # Fixed: Targets GLIBC 2.35 instead of 2.39
+      steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
 
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config curl
+        - name: Install System Dependencies
+          run: |
+            sudo apt-get update
+            sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config curl
 
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        - name: Install Rust Toolchain
+          uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-deb
-        run: cargo install cargo-deb
+        - name: Install cargo-deb
+          run: cargo install cargo-deb
 
-      - name: Build All Linux Packages
-        run: |
-          mkdir -p dist target/stage-linux target/AppDir/usr/bin target/AppDir/usr/share/applications target/AppDir/usr/share/icons/hicolor/scalable/apps target/AppDir/usr/share/icons/hicolor/256x256/apps
-          
-          # 1. Compile Release Binary
-          cargo build --release
-          
-          # 2. Build .deb Package
-          cargo deb -o dist/azterm_0.1.0_amd64.deb
-          
-          # 3. Build Tarball
-          cp target/release/azterm target/stage-linux/
-          cp assets/azterm.desktop target/stage-linux/
-          cp assets/azterm.svg target/stage-linux/
-          tar -czf dist/azterm-linux-x86_64.tar.gz -C target/stage-linux .
-          
-          # 4. Build AppImage
-          cp target/release/azterm target/AppDir/usr/bin/azterm
-          cp assets/azterm.desktop target/AppDir/azterm.desktop
-          cp assets/azterm.desktop target/AppDir/usr/share/applications/azterm.desktop
-          cp assets/azterm.svg target/AppDir/azterm.svg
-          cp assets/azterm.svg target/AppDir/usr/share/icons/hicolor/scalable/apps/azterm.svg
-          
-          printf '#!/bin/sh\nSELF=$(readlink -f "$0")\nHERE=${SELF%%/*}\nexport PATH="${HERE}/usr/bin:${PATH}"\nexec "${HERE}/usr/bin/azterm" "$@"\n' > target/AppDir/AppRun
-          chmod +x target/AppDir/AppRun
-          
-          curl -sLo target/appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x target/appimagetool
-          ARCH=x86_64 ./target/appimagetool --appimage-extract-and-run target/AppDir dist/AZTerm-x86_64.AppImage
+        - name: Build All Linux Packages
+          run: |
+            mkdir -p dist target/stage-linux target/AppDir/usr/bin target/AppDir/usr/share/applications target/AppDir/usr/share/icons/hicolor/scalable/apps target/AppDir/usr/share/icons/hicolor/256x256/apps
+            
+            # 1. Compile Release Binary
+            cargo build --release
+            
+            # 2. Build .deb Package
+            cargo deb -o dist/azterm_0.1.0_amd64.deb
+            
+            # 3. Build Tarball
+            cp target/release/azterm target/stage-linux/
+            cp assets/azterm.desktop target/stage-linux/
+            cp assets/azterm.svg target/stage-linux/
+            tar -czf dist/azterm-linux-x86_64.tar.gz -C target/stage-linux .
+            
+            # 4. Build AppImage
+            cp target/release/azterm target/AppDir/usr/bin/azterm
+            cp assets/azterm.desktop target/AppDir/azterm.desktop
+            cp assets/azterm.desktop target/AppDir/usr/share/applications/azterm.desktop
+            cp assets/azterm.svg target/AppDir/azterm.svg
+            cp assets/azterm.svg target/AppDir/usr/share/icons/hicolor/scalable/apps/azterm.svg
+            
+            printf '#!/bin/sh\nSELF=$(readlink -f "$0")\nHERE=${SELF%%/*}\nexport PATH="${HERE}/usr/bin:${PATH}"\nexec "${HERE}/usr/bin/azterm" "$@"\n' > target/AppDir/AppRun
+            chmod +x target/AppDir/AppRun
+            
+            curl -sLo target/appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+            chmod +x target/appimagetool
+            ARCH=x86_64 ./target/appimagetool --appimage-extract-and-run target/AppDir dist/AZTerm-x86_64.AppImage
 
-      - name: Upload Linux Release Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/AZTerm-x86_64.AppImage
-            dist/azterm_0.1.0_amd64.deb
-            dist/azterm-linux-x86_64.tar.gz
-
+        - name: Upload Linux Release Assets
+          uses: softprops/action-gh-release@v2
+          with:
+            files: |
+              dist/AZTerm-x86_64.AppImage
+              dist/azterm_0.1.0_amd64.deb
+              dist/azterm-linux-x86_64.tar.gz
   build-windows:
     name: Windows Package (.zip)
     runs-on: windows-latest
