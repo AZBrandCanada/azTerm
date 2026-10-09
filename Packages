@@ -1,0 +1,19 @@
+Package: azterm
+Version: 0.6.4-1
+Architecture: amd64
+Maintainer: AZBrandCanada Developers
+Installed-Size: 17965
+Depends: libc6 (>= 2.39)
+Filename: ./azterm_amd64.deb
+Size: 5972500
+MD5sum: 3e214d01714a6f152742022c729175f5
+SHA1: f1660f413502d8c29ebff4f18c6b1e5f260e91fd
+SHA256: fd57fc5099a21e16130388bfa76b171640fc27eb0857ede5e6e895a347dd99be
+Section: utils
+Priority: optional
+Homepage: https://github.com/AZBrandCanada/azTerm
+Description: Fast, modern native cross-platform terminal, SSH profile manager, and SFTP
+ client
+ A fast, lightweight GPU-accelerated terminal emulator, SSH bookmark manager,
+ and SFTP client written in pure Rust.
+

@@ -1,0 +1,23 @@
+Architectures: amd64
+Components: main
+Description: Official AZTerm Debian/Ubuntu Repository
+Label: AZTerm
+Origin: AZBrandCanada
+Suite: stable
+Date: Fri, 09 Oct 2026 01:39:41 +0000
+MD5Sum:
+ a71d193a048ca9a12493b888de8ea0b3              639 Packages
+ 4f8494591c08009eecffb6ab4a1e4b57              473 Packages.gz
+ 27d220aead4a54b83d70c4a65d34f9de              180 Release
+SHA1:
+ bc948d5bfc1225aabe45a364c4574ded72f810d9              639 Packages
+ e1bc021a81b3f23618faff27c7b0153c611ea8eb              473 Packages.gz
+ b16822513accaa911f0e6a6002fe0dc58b418a71              180 Release
+SHA256:
+ 7ab93758a86e4f32e665684f57f58e21dd4834b1d070ed9fda4b8db8ce6d931a              639 Packages
+ 159752243b14e59181391203f45bf2ea38903cf0bf58fee861957f900f3e257f              473 Packages.gz
+ c88f819502b22e2c6362585103305ff6ee4a155bea877eb60c16bc7fc56e8e89              180 Release
+SHA512:
+ e505124c5dccd976e89fc7cbc0a90703b66ca5597dfc5e1530dfc4d37acca1fdfdeb38659402a14bf591da95f91ecf36bc323c388fca756f492ff399ce622eb9              639 Packages
+ 4d5d5557a07e2e6c13b1d28f34f9435cbdd40bb2d5b0a8297bdd0739991239e5f18f3123c2ac508058e776622327f0348da85c12e0e22260b1fa99b7e56851dc              473 Packages.gz
+ a96e166587fa444ba8bcf9ab2c735f3b292e06275891d79fa400f2314532d138e7af547970c901db88fb77ddfa36f2eeb3a0bacd610fbdf8198fb19dd5987f3c              180 Release
