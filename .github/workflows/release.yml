@@ -24,6 +24,9 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Install cargo-deb
         run: cargo install cargo-deb
 
@@ -67,7 +70,6 @@ jobs:
             dist/azterm_0.1.0_amd64.deb
             dist/azterm-linux-x86_64.tar.gz
 
-
   build-macos:
     name: macOS Package (.tar.gz)
     runs-on: macos-latest
@@ -77,6 +79,9 @@ jobs:
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust Dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Build macOS Binary
         run: cargo build --release
