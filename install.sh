@@ -1,4 +1,3 @@
-# //install.sh
 #!/usr/bin/env bash
 set -e
 
@@ -11,17 +10,27 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 
 echo "[1/5] Checking build dependencies..."
-if command -v pacman &>/dev/null; then
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    echo "Detected macOS system."
+    # Check for Xcode Command Line Tools / compiler
+    if ! command -v cc &>/dev/null; then
+        echo "Xcode Command Line Tools missing. Installing..."
+        xcode-select --install || true
+    fi
+elif command -v pacman &>/dev/null; then
     sudo pacman -S --needed --noconfirm base-devel git libxkbcommon openssl libxcb libx11 wayland mesa
 elif command -v apt-get &>/dev/null; then
     sudo apt-get update -qq
     sudo apt-get install -y -qq build-essential git pkg-config libxkbcommon-dev libssl-dev libxcb1-dev libx11-dev libwayland-dev libgl1-mesa-dev
 elif command -v dnf &>/dev/null; then
     sudo dnf install -y git gcc gcc-c++ make pkgconf-pkg-config libxkbcommon-devel openssl-devel libxcb-devel libX11-devel wayland-devel mesa-libGL-devel
+elif command -v zypper &>/dev/null; then
+    sudo zypper install -y git gcc gcc-c++ make pkg-config libxkbcommon-devel libopenssl-devel libxcb-devel libX11-devel wayland-devel Mesa-libGL-devel
 fi
 
+# Ensure Rust/Cargo is available
 if ! command -v cargo &>/dev/null; then
-    echo "Installing Rust toolchain..."
+    echo "Installing Rust toolchain via rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
     export PATH="$HOME/.cargo/bin:$PATH"
@@ -43,90 +52,99 @@ else
     cd "$BUILD_DIR"
 fi
 
-if [ ! -f "$BUILD_DIR/Cargo.toml" ]; then
-    echo "Refreshing build repository..."
-    rm -rf "$BUILD_DIR"
-    git clone --depth 1 "$REPO_URL" "$BUILD_DIR"
-    cd "$BUILD_DIR"
-fi
-
-echo "[3/5] Compiling AZTerm in release mode..."
+echo "[3/5] Compiling AZTerm..."
 cargo build --release
 
-echo "[4/5] Installing binary, desktop files, and context menu integrations..."
-sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/kio/servicemenus /usr/share/nemo/actions
-sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
+echo "[4/5] Installing binary and integrations..."
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS Installation Path
+    mkdir -p "$HOME/.local/bin"
+    cp target/release/azterm "$HOME/.local/bin/azterm"
+    
+    # Try copying to /usr/local/bin if user has permissions
+    if [ -w "/usr/local/bin" ]; then
+        cp target/release/azterm /usr/local/bin/azterm
+    else
+        sudo cp target/release/azterm /usr/local/bin/azterm 2>/dev/null || true
+    fi
+    echo "[5/5] macOS installation complete!"
+else
+    # Linux Installation Path
+    sudo mkdir -p /usr/local/bin /usr/share/applications /usr/share/icons/hicolor/scalable/apps /usr/share/kio/servicemenus /usr/share/nemo/actions
+    sudo install -Dm755 target/release/azterm /usr/local/bin/azterm
 
-declare -A SEEN_LOCS
-LOCATIONS=(
-    "/usr/local/bin/azterm"
-    "/usr/bin/azterm"
-    "$HOME/.local/bin/azterm"
-    "$HOME/.cargo/bin/azterm"
-    "$HOME/bin/azterm"
-)
+    declare -A SEEN_LOCS
+    LOCATIONS=(
+        "/usr/local/bin/azterm"
+        "/usr/bin/azterm"
+        "$HOME/.local/bin/azterm"
+        "$HOME/.cargo/bin/azterm"
+        "$HOME/bin/azterm"
+    )
 
-if command -v which &>/dev/null; then
-    while IFS= read -r path; do
-        if [ -n "$path" ]; then
-            LOCATIONS+=("$path")
-        fi
-    done < <(which -a azterm 2>/dev/null || true)
-fi
+    if command -v which &>/dev/null; then
+        while IFS= read -r path; do
+            if [ -n "$path" ]; then
+                LOCATIONS+=("$path")
+            fi
+        done < <(which -a azterm 2>/dev/null || true)
+    fi
 
-for loc in "${LOCATIONS[@]}"; do
-    if [ -n "$loc" ] && [ -z "${SEEN_LOCS[$loc]}" ]; then
-        SEEN_LOCS["$loc"]=1
-        if [ -e "$loc" ] || [ -L "$loc" ] || [ "$loc" = "$HOME/.local/bin/azterm" ]; then
-            dir_name=$(dirname "$loc")
-            if [ -w "$dir_name" ]; then
-                install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
-            else
-                sudo install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+    for loc in "${LOCATIONS[@]}"; do
+        if [ -n "$loc" ] && [ -z "${SEEN_LOCS[$loc]}" ]; then
+            SEEN_LOCS["$loc"]=1
+            if [ -e "$loc" ] || [ -L "$loc" ] || [ "$loc" = "$HOME/.local/bin/azterm" ]; then
+                dir_name=$(dirname "$loc")
+                if [ -w "$dir_name" ]; then
+                    install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+                else
+                    sudo install -Dm755 target/release/azterm "$loc" 2>/dev/null || true
+                fi
             fi
         fi
+    done
+
+    # Desktop Entry & Icon
+    if [ -f "assets/azterm.desktop" ]; then
+        sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
+        mkdir -p "$HOME/.local/share/applications"
+        install -Dm644 assets/azterm.desktop "$HOME/.local/share/applications/azterm.desktop"
     fi
-done
+    if [ -f "assets/azterm.svg" ]; then
+        sudo install -Dm644 assets/azterm.svg /usr/share/icons/hicolor/scalable/apps/azterm.svg
+        mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
+        install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
+    fi
 
-if [ -f "assets/azterm.desktop" ]; then
-    sudo install -Dm644 assets/azterm.desktop /usr/share/applications/azterm.desktop
-    mkdir -p "$HOME/.local/share/applications"
-    install -Dm644 assets/azterm.desktop "$HOME/.local/share/applications/azterm.desktop"
-fi
-if [ -f "assets/azterm.svg" ]; then
-    sudo install -Dm644 assets/azterm.svg /usr/share/icons/hicolor/scalable/apps/azterm.svg
-    mkdir -p "$HOME/.local/share/icons/hicolor/scalable/apps"
-    install -Dm644 assets/azterm.svg "$HOME/.local/share/icons/hicolor/scalable/apps/azterm.svg"
-fi
+    # KDE Dolphin Context Menu
+    if [ -f "assets/servicemenus/azterm_open.desktop" ]; then
+        sudo install -Dm755 assets/servicemenus/azterm_open.desktop /usr/share/kio/servicemenus/azterm_open.desktop
+        mkdir -p "$HOME/.local/share/kio/servicemenus"
+        install -Dm755 assets/servicemenus/azterm_open.desktop "$HOME/.local/share/kio/servicemenus/azterm_open.desktop"
+        chmod +x "$HOME/.local/share/kio/servicemenus/azterm_open.desktop"
+    fi
 
-# KDE Dolphin ServiceMenu (755 executable)
-if [ -f "assets/servicemenus/azterm_open.desktop" ]; then
-    sudo install -Dm755 assets/servicemenus/azterm_open.desktop /usr/share/kio/servicemenus/azterm_open.desktop
-    mkdir -p "$HOME/.local/share/kio/servicemenus"
-    install -Dm755 assets/servicemenus/azterm_open.desktop "$HOME/.local/share/kio/servicemenus/azterm_open.desktop"
-    chmod +x "$HOME/.local/share/kio/servicemenus/azterm_open.desktop"
-fi
+    # Nemo File Manager Action
+    if [ -f "assets/nemo/azterm.nemo_action" ]; then
+        mkdir -p "$HOME/.local/share/nemo/actions"
+        install -Dm644 assets/nemo/azterm.nemo_action "$HOME/.local/share/nemo/actions/azterm.nemo_action"
+        sudo install -Dm644 assets/nemo/azterm.nemo_action /usr/share/nemo/actions/azterm.nemo_action 2>/dev/null || true
+    fi
 
-# Nemo File Manager Action
-if [ -f "assets/nemo/azterm.nemo_action" ]; then
-    mkdir -p "$HOME/.local/share/nemo/actions"
-    install -Dm644 assets/nemo/azterm.nemo_action "$HOME/.local/share/nemo/actions/azterm.nemo_action"
-    sudo install -Dm644 assets/nemo/azterm.nemo_action /usr/share/nemo/actions/azterm.nemo_action 2>/dev/null || true
-fi
+    echo "[5/5] Updating Linux desktop database and caches..."
+    if command -v update-desktop-database &>/dev/null; then
+        sudo update-desktop-database -q /usr/share/applications 2>/dev/null || true
+        update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
+    fi
+    if command -v gtk-update-icon-cache &>/dev/null; then
+        sudo gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
+    fi
 
-echo "[5/5] Updating desktop, icon, and KDE servicemenu caches..."
-if command -v update-desktop-database &>/dev/null; then
-    sudo update-desktop-database -q /usr/share/applications 2>/dev/null || true
-    update-desktop-database -q "$HOME/.local/share/applications" 2>/dev/null || true
-fi
-if command -v gtk-update-icon-cache &>/dev/null; then
-    sudo gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
-fi
-
-if command -v kbuildsycoca6 &>/dev/null; then
-    kbuildsycoca6 --noincremental 2>/dev/null || true
-elif command -v kbuildsycoca5 &>/dev/null; then
-    kbuildsycoca5 --noincremental 2>/dev/null || true
+    if command -v kbuildsycoca6 &>/dev/null; then
+        kbuildsycoca6 --noincremental 2>/dev/null || true
+    elif command -v kbuildsycoca5 &>/dev/null; then
+        kbuildsycoca5 --noincremental 2>/dev/null || true
+    fi
 fi
 
 hash -r 2>/dev/null || true
