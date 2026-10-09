@@ -69,6 +69,9 @@ impl InstallMethod {
         if cfg!(windows) {
             return InstallMethod::Windows;
         }
+        if cfg!(target_os = "macos") {
+            return InstallMethod::MacOS;
+        }
         if std::env::var_os("APPIMAGE").is_some() {
             return InstallMethod::AppImage;
         }
@@ -93,24 +96,8 @@ impl InstallMethod {
             }
         }
 
-        // install.sh drops the binary at /usr/local/bin/azterm on BOTH
-        // Linux and macOS, and at ~/.local/bin for non-root installs.
-        // Check this BEFORE the macOS fallback so script-installed
-        // macOS users get the in-app updater button, not just a link
-        // to GitHub.
-        if exe_str.starts_with("/usr/local/bin")
-            || exe_str.contains("/.local/bin")
-            || exe_str == "/usr/bin/azterm"
-        {
+        if exe_str.starts_with("/usr/local/bin") || exe_str.contains("/.local/bin") || exe_str == "/usr/bin/azterm" {
             return InstallMethod::ScriptInstalled;
-        }
-
-        // macOS .app bundle (Spotlight/Launchpad launch) -- no writable
-        // install path we can script-update from without sudo, but the
-        // installer script itself does reinstall the bundle, so we
-        // still expose the update button for this case.
-        if cfg!(target_os = "macos") {
-            return InstallMethod::MacOS;
         }
 
         InstallMethod::ManualBuild

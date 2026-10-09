@@ -109,7 +109,9 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
                     ui.add_space(10.0);
 
                     match &app.install_method {
-                        InstallMethod::ScriptInstalled | InstallMethod::PackageManager(_) => {
+                        InstallMethod::ScriptInstalled
+                        | InstallMethod::PackageManager(_)
+                        | InstallMethod::MacOS => {
                             ui.label("Would you like to run the official updater script in a new terminal session?");
                             ui.add_space(6.0);
                             egui::Frame::none()
@@ -126,9 +128,6 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
                         InstallMethod::Windows => {
                             ui.label("Download the latest Windows ZIP archive from GitHub:");
                         }
-                        InstallMethod::MacOS => {
-                            ui.label("Download the latest macOS universal package from GitHub:");
-                        }
                         InstallMethod::ManualBuild => {
                             ui.label("You can recompile with cargo or run the installer script:");
                         }
@@ -137,7 +136,9 @@ pub fn render_update_modal(app: &mut AppState, ctx: &egui::Context) {
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
                         match &app.install_method {
-                            InstallMethod::ScriptInstalled | InstallMethod::ManualBuild => {
+                            InstallMethod::ScriptInstalled
+                            | InstallMethod::ManualBuild
+                            | InstallMethod::MacOS => {
                                 if crate::modern::button_accent(ui, &app.theme, "Update Now (Run in Shell)").clicked() {
                                     app.run_script_update_in_terminal(ctx.clone());
                                 }

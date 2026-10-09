@@ -1,5 +1,5 @@
 // src/ui/modals.rs
-use crate::ssh::{SshAuthType, SshKeyAlgorithm, SshProfile, SshStore};
+use crate::ssh::{KeyLocation, SshAuthType, SshKeyAlgorithm, SshProfile, SshStore};
 use crate::{AppState, InstallMethod};
 use eframe::egui;
 use std::io::Write;
@@ -531,5 +531,114 @@ pub fn render_ssh_auth_modal(app: &mut AppState, ctx: &egui::Context) {
 
     if should_close {
         app.ssh_auth_modal = None;
+    }
+}
+
+
+/// Typed-confirmation delete. Requires the user to type "delete"
+/// (case-insensitive) before the destructive button arms. Warns
+/// differently depending on whether the key is AZTerm-managed or a
+/// shared system key in ~/.ssh.
+pub fn render_key_delete_modal(app: &mut AppState, ctx: &egui::Context) {
+    let info = match &app.pending_key_delete {
+        Some(t) => t.clone(),
+        None => return,
+    };
+    let (file_name, priv_path, location) = info;
+
+    let mut confirm = false;
+    let mut cancel = false;
+
+    egui::Window::new("Confirm Key Deletion")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(460.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Delete keypair \"{}\"?", file_name))
+                        .strong()
+                        .size(15.0)
+                        .color(app.theme.danger_color()),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!("Path: {}", priv_path.display()))
+                        .small()
+                        .monospace()
+                        .color(app.theme.text_muted_color()),
+                );
+                ui.add_space(8.0);
+
+                match location {
+                    KeyLocation::Managed => {
+                        ui.label(
+                            "This key is managed by AZTerm in ~/.config/azterm/keys/. \
+                             The private key and its .pub companion will be removed.",
+                        );
+                    }
+                    KeyLocation::SystemSsh => {
+                        ui.label(
+                            egui::RichText::new(
+                                "This key lives in ~/.ssh and is shared with every other \
+                                 SSH client on this machine (ssh, git, scp, VS Code Remote, …). \
+                                 Deleting it here deletes it for all of them.",
+                            )
+                            .color(app.theme.danger_color()),
+                        );
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.label("Type \"delete\" to confirm:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut app.key_delete_input)
+                        .hint_text("delete")
+                        .desired_width(200.0),
+                );
+                if ui.memory(|m| m.focused().is_none()) {
+                    resp.request_focus();
+                }
+
+                let armed = app.key_delete_input.trim().eq_ignore_ascii_case("delete");
+                let enter = resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    && armed;
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let btn = crate::modern::Button3D::new("Delete Keypair")
+                        .fill(if armed {
+                            app.theme.danger_color()
+                        } else {
+                            crate::modern::darken(app.theme.danger_color(), 40)
+                        })
+                        .edge(crate::modern::darken(app.theme.danger_color(), 70))
+                        .text_color(egui::Color32::WHITE);
+                    if btn.show(ui, &app.theme).clicked() && armed {
+                        confirm = true;
+                    } else if enter {
+                        confirm = true;
+                    }
+                    if crate::modern::button(ui, &app.theme, "Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+
+    if confirm {
+        SshStore::delete_key_at(location, &file_name);
+        app.set_toast(format!("Deleted keypair: {}", file_name));
+        app.pending_key_delete = None;
+        app.key_delete_input.clear();
+    }
+    if cancel {
+        app.pending_key_delete = None;
+        app.key_delete_input.clear();
     }
 }
