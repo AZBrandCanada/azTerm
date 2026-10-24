@@ -8,10 +8,11 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SftpTarget {
@@ -99,6 +100,25 @@ pub struct SftpSudoPrompt {
     pub needs_focus: bool,
     pub tx_reply: Arc<Mutex<Option<Sender<Option<String>>>>>,
     pub verify_rx: Option<Receiver<bool>>,
+}
+
+// ---------------------------------------------------------------------------
+// Shared transfer log & ID counter
+// ---------------------------------------------------------------------------
+
+fn shared_transfers() -> &'static Arc<Mutex<Vec<FileTransferRecord>>> {
+    static SHARED: OnceLock<Arc<Mutex<Vec<FileTransferRecord>>>> = OnceLock::new();
+    SHARED.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+}
+
+fn next_transfer_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn edit_watchers() -> &'static Mutex<HashMap<PathBuf, Arc<AtomicBool>>> {
+    static WATCHERS: OnceLock<Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> = OnceLock::new();
+    WATCHERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub struct PaneBrowser {
@@ -341,12 +361,10 @@ pub fn fit_filename_to_width(
     best
 }
 
-
 // ---------------------------------------------------------------------------
-// External editor integration (right-click → Open in Editor / VS Code)
+// External editor integration
 // ---------------------------------------------------------------------------
 
-/// Is `bin` on PATH? Uses `command -v` (POSIX) so we don't depend on `which`.
 fn command_exists(bin: &str) -> bool {
     Command::new("sh")
         .arg("-c")
@@ -358,18 +376,7 @@ fn command_exists(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Pick an editor binary. `prefer_vscode` restricts to the VS Code family.
-/// Otherwise we honour $EDITOR / $VISUAL, then fall back to common GUI and
-/// terminal editors.
-fn find_editor_binary(prefer_vscode: bool) -> Option<String> {
-    if prefer_vscode {
-        for bin in ["code", "codium", "code-insiders", "cursor"] {
-            if command_exists(bin) {
-                return Some(bin.to_string());
-            }
-        }
-        return None;
-    }
+fn find_editor_binary() -> Option<String> {
     for var in ["EDITOR", "VISUAL"] {
         if let Ok(v) = std::env::var(var) {
             let v = v.trim().to_string();
@@ -389,39 +396,11 @@ fn find_editor_binary(prefer_vscode: bool) -> Option<String> {
     None
 }
 
-/// Spawn `editor` on `path`. `remote` is only consulted for the VS Code
-/// family, where we can hand off to Remote-SSH for a true remote edit.
-fn launch_editor_with(
-    path: &Path,
-    prefer_vscode: bool,
-    remote: Option<(&SshProfile, &str)>,
-) -> Result<(), String> {
-    let editor = find_editor_binary(prefer_vscode).ok_or_else(|| {
-        if prefer_vscode {
-            "VS Code not found on PATH (looked for code, codium, code-insiders, cursor)"
-                .to_string()
-        } else {
-            "No editor found. Set $EDITOR or install VS Code / nano / vim.".to_string()
-        }
+fn launch_editor_with(path: &Path) -> Result<(), String> {
+    let editor = find_editor_binary().ok_or_else(|| {
+        "No editor found. Set $EDITOR or install VS Code / nano / vim.".to_string()
     })?;
 
-    // VS Code + remote: use Remote-SSH so saves round-trip to the server.
-    if prefer_vscode {
-        if let Some((profile, remote_path)) = remote {
-            let target = format!("ssh-remote+{}@{}", profile.username, profile.host);
-            let mut cmd = Command::new(&editor);
-            cmd.arg("--remote").arg(target).arg(remote_path);
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            if cmd.spawn().is_ok() {
-                return Ok(());
-            }
-            // Fall through to local-temp launch if Remote-SSH spawn failed.
-        }
-    }
-
-    // Split $EDITOR-style strings ("code --wait") into argv.
     let mut parts = editor.split_whitespace();
     let bin = parts.next().unwrap_or(&editor);
     let mut cmd = Command::new(bin);
@@ -437,17 +416,192 @@ fn launch_editor_with(
     Ok(())
 }
 
-/// Open `dir/name` in the user's preferred editor.
-///
-/// Local files are launched directly. Remote files: "Open in VS Code" uses
-/// the Remote-SSH protocol so the file stays on the server; the generic
-/// "Open in Editor" streams the file to a temp location first, which means
-/// edits there do NOT sync back automatically.
+fn fetch_remote_perms(profile: &SshProfile, remote_path: &str) -> Option<String> {
+    let escaped = remote_path.replace('\'', "'\\''");
+    let cmd_str = format!(
+        "stat -c '%a' '{}' 2>/dev/null || stat -f '%Lp' '{}' 2>/dev/null",
+        escaped, escaped
+    );
+    let mut cmd = build_ssh_base_command(profile);
+    cmd.arg(&cmd_str);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() || s.len() > 6 || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(s)
+}
+
+fn upload_edited_file(
+    local_path: &Path,
+    profile: &SshProfile,
+    remote_path: &str,
+    perms: &str,
+) -> Result<u64, String> {
+    let file = fs::File::open(local_path)
+        .map_err(|e| format!("Cannot open local file: {}", e))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+    let tmp_remote = format!("{}.azterm-tmp-{}", remote_path, std::process::id());
+    let escaped_tmp = tmp_remote.replace('\'', "'\\''");
+    let escaped_dest = remote_path.replace('\'', "'\\''");
+    let escaped_perms = perms.replace('\'', "'\\''");
+
+    let shell_cmd = format!(
+        "sh -c 'cat > \"$1\" && chmod \"$2\" \"$1\" && mv -f \"$1\" \"$3\"' sh '{}' '{}' '{}'",
+        escaped_tmp, escaped_perms, escaped_dest
+    );
+
+    let mut cmd = build_ssh_base_command(profile);
+    cmd.arg(&shell_cmd);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("SSH spawn failed: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let mut file = file;
+        if let Err(e) = std::io::copy(&mut file, &mut stdin) {
+            drop(stdin);
+            let _ = child.wait();
+            let escaped_tmp2 = tmp_remote.replace('\'', "'\\''");
+            let _ = run_remote_ssh_cmd(profile, &format!("rm -f '{}'", escaped_tmp2));
+            return Err(format!("Failed to pipe file to SSH: {}", e));
+        }
+    }
+
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!("Upload failed: {}", err.trim()));
+    }
+
+    Ok(size)
+}
+
+fn spawn_edit_watcher(
+    local_path: PathBuf,
+    profile: SshProfile,
+    remote_path: String,
+    remote_perms: String,
+    initial_mtime: SystemTime,
+    initial_size: u64,
+    ctx: egui::Context,
+) {
+    let stop = Arc::new(AtomicBool::new(false));
+
+    if let Ok(mut map) = edit_watchers().lock() {
+        if let Some(old_stop) = map.insert(local_path.clone(), stop.clone()) {
+            old_stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let transfers = shared_transfers().clone();
+    let file_name = remote_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(&remote_path)
+        .to_string();
+
+    thread::spawn(move || {
+        let mut last_mtime = initial_mtime;
+        let mut last_size = initial_size;
+        let started = Instant::now();
+        let max_duration = Duration::from_secs(24 * 60 * 60);
+
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if started.elapsed() > max_duration {
+                break;
+            }
+
+            thread::sleep(Duration::from_millis(500));
+
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let meta = match fs::metadata(&local_path) {
+                Ok(m) => m,
+                // File temporarily missing during VS Code atomic save
+                Err(_) => continue,
+            };
+            let mtime = match meta.modified() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let size = meta.len();
+
+            if mtime == last_mtime && size == last_size {
+                continue;
+            }
+
+            last_mtime = mtime;
+            last_size = size;
+
+            let transfer_id = next_transfer_id();
+            let from_str = format!("[editor] {}", remote_path);
+            let to_str = format!("{}@{}:{}", profile.username, profile.host, remote_path);
+
+            if let Ok(mut list) = transfers.lock() {
+                list.insert(
+                    0,
+                    FileTransferRecord {
+                        id: transfer_id,
+                        file_name: file_name.clone(),
+                        direction: TransferDirection::Upload,
+                        from: from_str,
+                        to: to_str,
+                        file_size: size,
+                        transferred_bytes: 0,
+                        speed_bytes_sec: 0,
+                        batch_index: 1,
+                        batch_total: 1,
+                        status: TransferStatus::InProgress,
+                        time: chrono::Local::now(),
+                    },
+                );
+            }
+            ctx.request_repaint();
+
+            let upload_start = Instant::now();
+            let result =
+                upload_edited_file(&local_path, &profile, &remote_path, &remote_perms);
+            let elapsed = upload_start.elapsed().as_secs_f64().max(0.001);
+
+            if let Ok(mut list) = transfers.lock() {
+                if let Some(item) = list.iter_mut().find(|t| t.id == transfer_id) {
+                    match result {
+                        Ok(bytes) => {
+                            item.transferred_bytes = bytes;
+                            item.file_size = bytes;
+                            item.speed_bytes_sec =
+                                (bytes as f64 / elapsed).round() as u64;
+                            item.status = TransferStatus::Completed;
+                        }
+                        Err(e) => {
+                            item.status = TransferStatus::Failed(e);
+                        }
+                    }
+                }
+            }
+            ctx.request_repaint();
+        }
+    });
+}
+
 pub fn open_in_editor_at(
     target: &SftpTarget,
     dir: &str,
     name: &str,
-    prefer_vscode: bool,
+    ctx: egui::Context,
 ) -> Result<(), String> {
     match target {
         SftpTarget::Local => {
@@ -455,7 +609,7 @@ pub fn open_in_editor_at(
             if !path.exists() {
                 return Err(format!("File not found: {}", path.display()));
             }
-            launch_editor_with(&path, prefer_vscode, None)
+            launch_editor_with(&path)
         }
         SftpTarget::RemoteSsh(profile) => {
             let remote_path = if dir.ends_with('/') {
@@ -464,23 +618,15 @@ pub fn open_in_editor_at(
                 format!("{}/{}", dir, name)
             };
 
-            // Try true remote editing first when VS Code is requested.
-            if prefer_vscode && find_editor_binary(true).is_some() {
-                if launch_editor_with(
-                    Path::new(&remote_path),
-                    true,
-                    Some((profile, &remote_path)),
-                )
-                .is_ok()
-                {
-                    return Ok(());
-                }
-            }
+            let perms =
+                fetch_remote_perms(profile, &remote_path).unwrap_or_else(|| "644".to_string());
 
-            // Fall back: download to a temp file and open locally.
-            let temp_dir = std::env::temp_dir().join("azterm_editor");
-            let _ = fs::create_dir_all(&temp_dir);
-            let local_path = temp_dir.join(name);
+            let temp_root = std::env::temp_dir().join("azterm_editor");
+            let profile_temp = temp_root.join(&profile.id);
+            let _ = fs::create_dir_all(&profile_temp);
+
+            let sanitized = remote_path.replace('/', "_").trim_start_matches('_').to_string();
+            let local_path = profile_temp.join(sanitized);
 
             let escaped = remote_path.replace('\'', "'\\''");
             let mut cmd = build_ssh_base_command(profile);
@@ -501,7 +647,26 @@ pub fn open_in_editor_at(
                 return Err(format!("Failed to fetch remote file: {}", remote_path));
             }
 
-            launch_editor_with(&local_path, false, None)
+            launch_editor_with(&local_path)?;
+
+            let initial_meta = fs::metadata(&local_path)
+                .map_err(|e| format!("Cannot stat temp file: {}", e))?;
+            let initial_mtime = initial_meta
+                .modified()
+                .map_err(|e| format!("Cannot read mtime: {}", e))?;
+            let initial_size = initial_meta.len();
+
+            spawn_edit_watcher(
+                local_path,
+                profile.clone(),
+                remote_path,
+                perms,
+                initial_mtime,
+                initial_size,
+                ctx,
+            );
+
+            Ok(())
         }
     }
 }
@@ -1374,7 +1539,7 @@ impl PaneBrowser {
 
                 let mut toggled_item: Option<(String, bool)> = None;
                 let mut nav_to: Option<String> = None;
-                let mut editor_req: Option<(String, bool)> = None;
+                let mut editor_req: Option<String> = None;
                 let is_ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift);
                 let font_id = egui::TextStyle::Body.resolve(ui.style());
 
@@ -1435,11 +1600,7 @@ impl PaneBrowser {
                                     ui.set_min_width(165.0);
                                     if !entry.is_dir {
                                         if ui.button("Open in Editor").clicked() {
-                                            editor_req = Some((entry.name.clone(), false));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Open in VS Code").clicked() {
-                                            editor_req = Some((entry.name.clone(), true));
+                                            editor_req = Some(entry.name.clone());
                                             ui.close_menu();
                                         }
                                         ui.separator();
@@ -1531,12 +1692,12 @@ impl PaneBrowser {
 
                 self.scroll_to_selected = false;
 
-                if let Some((name, use_vscode)) = editor_req {
+                if let Some(name) = editor_req {
                     if let Err(e) = open_in_editor_at(
                         &self.target,
                         &self.current_path,
                         &name,
-                        use_vscode,
+                        ui.ctx().clone(),
                     ) {
                         self.error_message = Some(e);
                     }
@@ -1625,7 +1786,6 @@ pub struct SftpManager {
     pub cancel_flags: Arc<Mutex<HashMap<usize, Arc<std::sync::atomic::AtomicBool>>>>,
     pub restart_recipes: Arc<Mutex<HashMap<usize, RestartRecipe>>>,
     last_notified_transfer_id: Option<usize>,
-    next_transfer_id: usize,
 }
 
 impl SftpManager {
@@ -1633,7 +1793,7 @@ impl SftpManager {
         Self {
             left_pane: PaneBrowser::new("sftp_left", SftpTarget::Local),
             right_pane: PaneBrowser::new("sftp_right", SftpTarget::Local),
-            transfers: Arc::new(Mutex::new(Vec::new())),
+            transfers: shared_transfers().clone(),
             show_transfer_history: false,
             transfer_status: None,
             sudo_prompt: Arc::new(Mutex::new(None)),
@@ -1641,7 +1801,6 @@ impl SftpManager {
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             restart_recipes: Arc::new(Mutex::new(HashMap::new())),
             last_notified_transfer_id: None,
-            next_transfer_id: 1,
         }
     }
 
@@ -1655,9 +1814,6 @@ impl SftpManager {
             || self.has_open_sudo_prompt()
     }
 
-    /// Aggregate state of the transfer list, for the toolbar badge dot.
-    /// Returns None when there are no transfers at all.
-    /// Red = any active or failed, green = all completed.
     pub fn transfer_indicator(&self, theme: &ThemeConfig) -> Option<egui::Color32> {
         let list = self.transfers.lock().ok()?;
         if list.is_empty() {
@@ -1739,8 +1895,7 @@ impl SftpManager {
                 SftpTarget::RemoteSsh(p) => format!("{}@{}:{}/{}", p.username, p.host, dest_dir.trim_end_matches('/'), name),
             };
 
-            let transfer_id = self.next_transfer_id;
-            self.next_transfer_id += 1;
+            let transfer_id = next_transfer_id();
 
             batch_records.push((
                 FileTransferRecord {
@@ -1843,10 +1998,6 @@ impl SftpManager {
             let file_name = rec.file_name.clone();
             let start_t = Instant::now();
 
-            // Resolve the actual transfer size. Restarts arrive with
-            // file_size == 0 because the recipe doesn't cache it, and
-            // directory estimates can be stale — re-query whenever we
-            // don't have a trustworthy number.
             let mut actual_file_size = rec.file_size;
             if is_dir || actual_file_size == 0 {
                 let stats = match &src_target {
@@ -1900,7 +2051,7 @@ impl SftpManager {
                 total_transferred = 0;
 
                 match (&src_target, &dest_target) {
-                    // REMOTE TO REMOTE: In-Memory Piped Proxy Streaming
+                    // REMOTE TO REMOTE
                     (SftpTarget::RemoteSsh(src_prof), SftpTarget::RemoteSsh(dest_prof)) => {
                         let remote_src_path = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
                         let remote_dest_path = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
@@ -2077,7 +2228,7 @@ impl SftpManager {
                         }
                     }
 
-                    // LOCAL TO REMOTE: Upload
+                    // LOCAL TO REMOTE
                     (SftpTarget::Local, SftpTarget::RemoteSsh(profile)) => {
                         let local_path = PathBuf::from(&src_dir).join(&file_name);
                         let remote_file = format!("{}/{}", dest_dir.trim_end_matches('/'), file_name);
@@ -2231,7 +2382,7 @@ impl SftpManager {
                         }
                     }
 
-                    // REMOTE TO LOCAL: Download (Using SSH stream with ControlPath)
+                    // REMOTE TO LOCAL
                     (SftpTarget::RemoteSsh(profile), SftpTarget::Local) => {
                         let local_dir = dest_dir.clone();
                         let remote_file = format!("{}/{}", src_dir.trim_end_matches('/'), file_name);
@@ -2456,8 +2607,7 @@ impl SftpManager {
             }
         };
 
-        let new_id = self.next_transfer_id;
-        self.next_transfer_id += 1;
+        let new_id = next_transfer_id();
 
         let new_rec = FileTransferRecord {
             id: new_id,
