@@ -230,8 +230,8 @@ pub fn run_remote_ssh_cmd(profile: &SshProfile, remote_cmd: &str) -> Result<(), 
 pub fn verify_remote_sudo_password(profile: &SshProfile, password: &str) -> bool {
     let t0 = std::time::Instant::now();
     crate::dbg_log!("sudo_verify begin host={}", profile.host);
-    let b64 = to_base64(password.as_bytes());
-    let cmd_str = format!("sh -c \"echo '{}' | base64 -d | sudo -S -v -p ''\"", b64);
+    let safe_pw = password.replace('\\', "\\\\").replace('\'', "'\\''");
+    let cmd_str = format!("sh -c \"printf '%s\n' '{}' | sudo -S -v -p ''\"", safe_pw);
     let ok = run_remote_ssh_cmd(profile, &cmd_str).is_ok();
     crate::dbg_log!(
         "sudo_verify end host={} ok={} elapsed_ms={}",
@@ -243,34 +243,40 @@ pub fn verify_remote_sudo_password(profile: &SshProfile, password: &str) -> bool
 }
 
 pub fn wrap_read_with_remote_sudo(file_path: &str, password: &str) -> String {
-    let b64 = to_base64(password.as_bytes());
+    let safe_pw = password.replace('\\', "\\\\").replace('\'', "'\\''");
     format!(
-        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n cat '{}'\"",
-        b64, file_path
+        r#"printf '%s
+' '{}' | sudo -S -p '' sh -c 'cat "$1"' -- '{}'"#,
+        safe_pw, file_path
     )
 }
 
 pub fn wrap_write_with_remote_sudo(dest_dir: &str, dest_file: &str, password: &str) -> String {
-    let b64 = to_base64(password.as_bytes());
+    let safe_pw = password.replace('\', "\\").replace('\'', "'\''");
+    let tmp_path = format!("/tmp/azterm-tmp-{}", std::process::id());
     format!(
-        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n sh -c 'cat > \\\"$1\\\"' -- '{}'\"",
-        b64, dest_dir, dest_file
+        r#"cat > '{}' && printf '%s
+' '{}' | sudo -S -p '' sh -c 'mkdir -p "$1" && chmod 644 "$3" && mv -f "$3" "$2"' -- '{}' '{}' '{}'"#,
+        tmp_path, safe_pw, dest_dir, dest_file, tmp_path
     )
 }
 
 pub fn wrap_tar_create_with_remote_sudo(parent_dir: &str, folder_name: &str, password: &str) -> String {
-    let b64 = to_base64(password.as_bytes());
+    let safe_pw = password.replace('\\', "\\\\").replace('\'', "'\\''");
     format!(
-        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n tar -czf - -C '{}' '{}'\"",
-        b64, parent_dir, folder_name
+        r#"printf '%s
+' '{}' | sudo -S -p '' sh -c 'tar -czf - -C "$1" "$2"' -- '{}' '{}'"#,
+        safe_pw, parent_dir, folder_name
     )
 }
 
 pub fn wrap_tar_extract_with_remote_sudo(dest_dir: &str, password: &str) -> String {
-    let b64 = to_base64(password.as_bytes());
+    let safe_pw = password.replace('\', "\\").replace('\'', "'\''");
+    let tmp_path = format!("/tmp/azterm-tar-{}", std::process::id());
     format!(
-        "sh -c \"echo '{}' | base64 -d | sudo -S -v -p '' && sudo -n mkdir -p '{}' && sudo -n tar -xzf - -C '{}'\"",
-        b64, dest_dir, dest_dir
+        r#"cat > '{}' && printf '%s
+' '{}' | sudo -S -p '' sh -c 'mkdir -p "$1" && tar -xzf "$2" -C "$1" && rm -f "$2"' -- '{}' '{}'"#,
+        tmp_path, safe_pw, dest_dir, tmp_path
     )
 }
 
@@ -462,12 +468,11 @@ fn upload_edited_file(
         let mut cmd = build_ssh_base_command(profile);
 
         if let Some(ref pw) = sudo_pw {
-            let b64 = to_base64(pw.as_bytes());
-            // Use a raw string to avoid backslash escaping issues.
-            // Let bash parse the outer command, and the inner sh -c handle $1, $2, $3.
+            let safe_pw = pw.replace('\', "\\").replace('\'', "'\''");
             let shell_cmd = format!(
-                r#"cat > '{}' && echo '{}' | base64 -d | sudo -S -p '' sh -c 'chmod "$1" "$2" && mv -f "$2" "$3"' -- '{}' '{}' '{}'"#,
-                escaped_tmp, b64, escaped_perms, escaped_tmp, escaped_dest
+                r#"cat > '{}' && printf '%s
+' '{}' | sudo -S -p '' sh -c 'chmod "$1" "$2" && mv -f "$2" "$3"' -- '{}' '{}' '{}'"#,
+                escaped_tmp, safe_pw, escaped_perms, escaped_tmp, escaped_dest
             );
             cmd.arg(shell_cmd);
         } else {
@@ -758,12 +763,11 @@ fn run_remote_cmd_with_sudo(
 
     loop {
         let actual_cmd = if let Some(ref pw) = sudo_pw {
-            let pw_b64 = to_base64(pw.as_bytes());
-            let cmd_b64 = to_base64(cmd.as_bytes());
-            // Pipe the PASSWORD to sudo, then run the COMMAND inside bash -c
+            let safe_pw = pw.replace('\\', "\\\\").replace('\'', "'\\''");
+            let safe_cmd = cmd.replace('\'', "'\''");
             format!(
-                "echo '{}' | base64 -d | sudo -S -p '' bash -c \"echo '{}' | base64 -d | bash\"",
-                pw_b64, cmd_b64
+                "printf '%s\n' '{}' | sudo -S -p '' bash -c '{}'",
+                safe_pw, safe_cmd
             )
         } else {
             cmd.to_string()
