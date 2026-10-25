@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.6.7"
+VERSION="0.6.8"
 TAG="v${VERSION}"
 REPO="AZBrandCanada/azTerm"
 
