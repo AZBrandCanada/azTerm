@@ -147,6 +147,9 @@ pub struct PaneBrowser {
     pub move_items: Vec<String>,
     pub move_dest_path: String,
 
+    pub sudo_prompt: Arc<Mutex<Option<SftpSudoPrompt>>>,
+    pub sudo_passwords: Arc<Mutex<HashMap<String, String>>>,
+
     pub last_search_char: Option<char>,
     pub last_search_match_idx: usize,
     pub scroll_to_selected: bool,
@@ -440,47 +443,106 @@ fn upload_edited_file(
     profile: &SshProfile,
     remote_path: &str,
     perms: &str,
+    sudo_prompt_clone: Arc<Mutex<Option<SftpSudoPrompt>>>,
+    sudo_passwords_clone: Arc<Mutex<HashMap<String, String>>>,
+    ctx: &egui::Context,
 ) -> Result<u64, String> {
-    let file = fs::File::open(local_path)
-        .map_err(|e| format!("Cannot open local file: {}", e))?;
-    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let size = fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
 
-    let tmp_remote = format!("{}.azterm-tmp-{}", remote_path, std::process::id());
-    let escaped_tmp = tmp_remote.replace('\'', "'\\''");
-    let escaped_dest = remote_path.replace('\'', "'\\''");
-    let escaped_perms = perms.replace('\'', "'\\''");
+    // Write to /tmp first (no sudo needed), then sudo move it to the destination
+    let tmp_remote = format!("/tmp/azterm-tmp-{}", std::process::id());
+    let escaped_tmp = tmp_remote.replace('\'', "'\''");
+    let escaped_dest = remote_path.replace('\'', "'\''");
+    let escaped_perms = perms.replace('\'', "'\''");
 
-    let shell_cmd = format!(
-        "sh -c 'cat > \"$1\" && chmod \"$2\" \"$1\" && mv -f \"$1\" \"$3\"' sh '{}' '{}' '{}'",
-        escaped_tmp, escaped_perms, escaped_dest
-    );
+    let mut sudo_pw = sudo_passwords_clone.lock().unwrap().get(&profile.id).cloned();
 
-    let mut cmd = build_ssh_base_command(profile);
-    cmd.arg(&shell_cmd);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::piped());
+    loop {
+        let mut file = fs::File::open(local_path).map_err(|e| format!("Cannot open local file: {}", e))?;
+        let mut cmd = build_ssh_base_command(profile);
 
-    let mut child = cmd.spawn().map_err(|e| format!("SSH spawn failed: {}", e))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let mut file = file;
-        if let Err(e) = std::io::copy(&mut file, &mut stdin) {
-            drop(stdin);
-            let _ = child.wait();
-            let escaped_tmp2 = tmp_remote.replace('\'', "'\\''");
-            let _ = run_remote_ssh_cmd(profile, &format!("rm -f '{}'", escaped_tmp2));
-            return Err(format!("Failed to pipe file to SSH: {}", e));
+        if let Some(ref pw) = sudo_pw {
+            let b64 = to_base64(pw.as_bytes());
+            // Use a raw string to avoid backslash escaping issues.
+            // Let bash parse the outer command, and the inner sh -c handle $1, $2, $3.
+            let shell_cmd = format!(
+                r#"cat > '{}' && echo '{}' | base64 -d | sudo -S -p '' sh -c 'chmod "$1" "$2" && mv -f "$2" "$3"' -- '{}' '{}' '{}'"#,
+                escaped_tmp, b64, escaped_perms, escaped_tmp, escaped_dest
+            );
+            cmd.arg(shell_cmd);
+        } else {
+            // No password yet: try normal upload
+            let shell_cmd = format!(
+                "cat > '{}' && chmod '{}' '{}' && mv -f '{}' '{}'",
+                escaped_tmp, escaped_perms, escaped_tmp, escaped_tmp, escaped_dest
+            );
+            cmd.arg(shell_cmd);
         }
-    }
 
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("SSH spawn failed: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = std::io::copy(&mut file, &mut stdin) {
+                drop(stdin);
+                let _ = child.wait();
+                let _ = run_remote_ssh_cmd(profile, &format!("rm -f '{}'", escaped_tmp));
+                return Err(format!("Failed to pipe file to SSH: {}", e));
+            }
+        }
+
+        let output = child.wait_with_output().map_err(|e| e.to_string())?;
+        if output.status.success() {
+            return Ok(size);
+        }
+
         let err = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let mut need_prompt = false;
+        if sudo_pw.is_none() && err.contains("Permission denied") {
+            need_prompt = true;
+        } else if sudo_pw.is_some() && (err.contains("a password is required") || err.contains("Sorry, try again") || err.contains("incorrect password")) {
+            sudo_pw = None;
+            sudo_passwords_clone.lock().unwrap().remove(&profile.id);
+            need_prompt = true;
+        }
+
+        if need_prompt {
+            let (tx_r, rx_r) = channel::<Option<String>>();
+            {
+                let mut p_lock = sudo_prompt_clone.lock().unwrap();
+                *p_lock = Some(SftpSudoPrompt {
+                    host_label: format!("{}:{}", profile.host, profile.port),
+                    username: profile.username.clone(),
+                    item_name: remote_path.to_string(),
+                    is_source: false,
+                    profile_opt: Some(profile.clone()),
+                    password_input: String::new(),
+                    show_plain: false,
+                    error_msg: None,
+                    needs_focus: true,
+                    tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                    verify_rx: None,
+                });
+            }
+            ctx.request_repaint();
+
+            if let Ok(Some(pw)) = rx_r.recv() {
+                sudo_passwords_clone.lock().unwrap().insert(profile.id.clone(), pw.clone());
+                sudo_pw = Some(pw);
+                continue;
+            } else {
+                let _ = run_remote_ssh_cmd(profile, &format!("rm -f '{}'", escaped_tmp));
+                return Err("Upload cancelled by user".to_string());
+            }
+        }
+
+        let _ = run_remote_ssh_cmd(profile, &format!("rm -f '{}'", escaped_tmp));
         return Err(format!("Upload failed: {}", err.trim()));
     }
-
-    Ok(size)
 }
 
 fn spawn_edit_watcher(
@@ -491,6 +553,8 @@ fn spawn_edit_watcher(
     initial_mtime: SystemTime,
     initial_size: u64,
     ctx: egui::Context,
+    sudo_prompt_clone: Arc<Mutex<Option<SftpSudoPrompt>>>,
+    sudo_passwords_clone: Arc<Mutex<HashMap<String, String>>>,
 ) {
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -572,8 +636,15 @@ fn spawn_edit_watcher(
             ctx.request_repaint();
 
             let upload_start = Instant::now();
-            let result =
-                upload_edited_file(&local_path, &profile, &remote_path, &remote_perms);
+            let result = upload_edited_file(
+                &local_path,
+                &profile,
+                &remote_path,
+                &remote_perms,
+                sudo_prompt_clone.clone(),
+                sudo_passwords_clone.clone(),
+                &ctx,
+            );
             let elapsed = upload_start.elapsed().as_secs_f64().max(0.001);
 
             if let Ok(mut list) = transfers.lock() {
@@ -601,6 +672,8 @@ pub fn open_in_editor_at(
     target: &SftpTarget,
     dir: &str,
     name: &str,
+    sudo_prompt_clone: Arc<Mutex<Option<SftpSudoPrompt>>>,
+    sudo_passwords_clone: Arc<Mutex<HashMap<String, String>>>,
     ctx: egui::Context,
 ) -> Result<(), String> {
     match target {
@@ -664,6 +737,8 @@ pub fn open_in_editor_at(
                 initial_mtime,
                 initial_size,
                 ctx,
+                sudo_prompt_clone,
+                sudo_passwords_clone,
             );
 
             Ok(())
@@ -672,7 +747,12 @@ pub fn open_in_editor_at(
 }
 
 impl PaneBrowser {
-    pub fn new(id: impl Into<String>, target: SftpTarget) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        target: SftpTarget,
+        sudo_prompt: Arc<Mutex<Option<SftpSudoPrompt>>>,
+        sudo_passwords: Arc<Mutex<HashMap<String, String>>>,
+    ) -> Self {
         let id = id.into();
         let initial_path = match &target {
             SftpTarget::Local => std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
@@ -710,6 +790,9 @@ impl PaneBrowser {
             show_move_modal: false,
             move_items: Vec::new(),
             move_dest_path: String::new(),
+
+            sudo_prompt,
+            sudo_passwords,
 
             last_search_char: None,
             last_search_match_idx: 0,
@@ -1697,6 +1780,8 @@ impl PaneBrowser {
                         &self.target,
                         &self.current_path,
                         &name,
+                        self.sudo_prompt.clone(),
+                        self.sudo_passwords.clone(),
                         ui.ctx().clone(),
                     ) {
                         self.error_message = Some(e);
@@ -1790,14 +1875,16 @@ pub struct SftpManager {
 
 impl SftpManager {
     pub fn new() -> Self {
+        let sudo_prompt = Arc::new(Mutex::new(None));
+        let sudo_passwords = Arc::new(Mutex::new(HashMap::new()));
         Self {
-            left_pane: PaneBrowser::new("sftp_left", SftpTarget::Local),
-            right_pane: PaneBrowser::new("sftp_right", SftpTarget::Local),
+            left_pane: PaneBrowser::new("sftp_left", SftpTarget::Local, sudo_prompt.clone(), sudo_passwords.clone()),
+            right_pane: PaneBrowser::new("sftp_right", SftpTarget::Local, sudo_prompt.clone(), sudo_passwords.clone()),
             transfers: shared_transfers().clone(),
             show_transfer_history: false,
             transfer_status: None,
-            sudo_prompt: Arc::new(Mutex::new(None)),
-            sudo_passwords: Arc::new(Mutex::new(HashMap::new())),
+            sudo_prompt,
+            sudo_passwords,
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
             restart_recipes: Arc::new(Mutex::new(HashMap::new())),
             last_notified_transfer_id: None,
@@ -2791,7 +2878,7 @@ impl SftpManager {
         if let Some((valid, err)) = verification_result {
             let mut p_lock = self.sudo_prompt.lock().unwrap();
             if valid {
-                if let Some(prompt) = p_lock.take() {
+                if let Some(ref mut prompt) = *p_lock {
                     sudo_to_submit = Some(prompt.password_input.clone());
                 }
             } else if let Some(ref mut prompt) = *p_lock {
