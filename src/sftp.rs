@@ -746,6 +746,81 @@ pub fn open_in_editor_at(
     }
 }
 
+
+fn run_remote_cmd_with_sudo(
+    profile: &SshProfile,
+    cmd: &str,
+    sudo_prompt_clone: Arc<Mutex<Option<SftpSudoPrompt>>>,
+    sudo_passwords_clone: Arc<Mutex<HashMap<String, String>>>,
+    ctx: &egui::Context,
+) -> Result<(), String> {
+    let mut sudo_pw = sudo_passwords_clone.lock().unwrap().get(&profile.id).cloned();
+
+    loop {
+        let actual_cmd = if let Some(ref pw) = sudo_pw {
+            let pw_b64 = to_base64(pw.as_bytes());
+            let cmd_b64 = to_base64(cmd.as_bytes());
+            // Pipe the PASSWORD to sudo, then run the COMMAND inside bash -c
+            format!(
+                "echo '{}' | base64 -d | sudo -S -p '' bash -c \"echo '{}' | base64 -d | bash\"",
+                pw_b64, cmd_b64
+            )
+        } else {
+            cmd.to_string()
+        };
+
+        let mut ssh_cmd = build_ssh_base_command(profile);
+        ssh_cmd.arg(&actual_cmd);
+        let output = ssh_cmd.output().map_err(|e| format!("SSH command failed: {}", e))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        let mut need_prompt = false;
+
+        if sudo_pw.is_none() && (err.contains("Permission denied") || err.contains("Operation not permitted")) {
+            need_prompt = true;
+        } else if sudo_pw.is_some() && (err.contains("a password is required") || err.contains("Sorry, try again") || err.contains("incorrect password")) {
+            sudo_pw = None;
+            sudo_passwords_clone.lock().unwrap().remove(&profile.id);
+            need_prompt = true;
+        }
+
+        if need_prompt {
+            let (tx_r, rx_r) = channel::<Option<String>>();
+            {
+                let mut p_lock = sudo_prompt_clone.lock().unwrap();
+                *p_lock = Some(SftpSudoPrompt {
+                    host_label: format!("{}:{}", profile.host, profile.port),
+                    username: profile.username.clone(),
+                    item_name: "File Operation".to_string(),
+                    is_source: false,
+                    profile_opt: Some(profile.clone()),
+                    password_input: String::new(),
+                    show_plain: false,
+                    error_msg: None,
+                    needs_focus: true,
+                    tx_reply: Arc::new(Mutex::new(Some(tx_r))),
+                    verify_rx: None,
+                });
+            }
+            ctx.request_repaint();
+
+            if let Ok(Some(pw)) = rx_r.recv() {
+                sudo_passwords_clone.lock().unwrap().insert(profile.id.clone(), pw.clone());
+                sudo_pw = Some(pw);
+                continue;
+            } else {
+                return Err("Operation cancelled by user".to_string());
+            }
+        }
+
+        return Err(err);
+    }
+}
+
 impl PaneBrowser {
     pub fn new(
         id: impl Into<String>,
@@ -928,7 +1003,7 @@ impl PaneBrowser {
         self.apply_sorting();
     }
 
-    pub fn create_directory(&mut self, dir_name: String) {
+    pub fn create_directory(&mut self, dir_name: String, ctx: egui::Context) {
         let clean_name = dir_name.trim().to_string();
         if clean_name.is_empty() {
             return;
@@ -957,8 +1032,10 @@ impl PaneBrowser {
                 self.rx = Some(rx);
                 let path_clone = self.current_path.clone();
 
+                let sudo_prompt = self.sudo_prompt.clone();
+                let sudo_passwords = self.sudo_passwords.clone();
                 thread::spawn(move || {
-                    let _ = run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    let _ = run_remote_cmd_with_sudo(&profile_clone, &remote_cmd, sudo_prompt, sudo_passwords, &ctx);
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
                 });
@@ -966,7 +1043,7 @@ impl PaneBrowser {
         }
     }
 
-    pub fn delete_items(&mut self, items: Vec<String>) {
+    pub fn delete_items(&mut self, items: Vec<String>, ctx: egui::Context) {
         if items.is_empty() {
             return;
         }
@@ -1000,6 +1077,8 @@ impl PaneBrowser {
                 self.rx = Some(rx);
                 let path_clone = active_dir.clone();
 
+                let sudo_prompt = self.sudo_prompt.clone();
+                let sudo_passwords = self.sudo_passwords.clone();
                 thread::spawn(move || {
                     for name in items {
                         let full_path = if current_dir.ends_with('/') {
@@ -1009,7 +1088,7 @@ impl PaneBrowser {
                         };
                         let escaped = full_path.replace('\'', "'\\''");
                         let remote_cmd = format!("rm -rf '{}'", escaped);
-                        let _ = run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                        let _ = run_remote_cmd_with_sudo(&profile_clone, &remote_cmd, sudo_prompt.clone(), sudo_passwords.clone(), &ctx);
                     }
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
@@ -1020,7 +1099,7 @@ impl PaneBrowser {
         }
     }
 
-    pub fn rename_item(&mut self, old_name: String, new_name: String) {
+    pub fn rename_item(&mut self, old_name: String, new_name: String, ctx: egui::Context) {
         let clean_new = new_name.trim().to_string();
         if clean_new.is_empty() || clean_new == old_name {
             return;
@@ -1048,8 +1127,10 @@ impl PaneBrowser {
                 self.rx = Some(rx);
                 let path_clone = self.current_path.clone();
 
+                let sudo_prompt = self.sudo_prompt.clone();
+                let sudo_passwords = self.sudo_passwords.clone();
                 thread::spawn(move || {
-                    let _ = run_remote_ssh_cmd(&profile_clone, &remote_cmd);
+                    let _ = run_remote_cmd_with_sudo(&profile_clone, &remote_cmd, sudo_prompt, sudo_passwords, &ctx);
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
                 });
@@ -1057,7 +1138,7 @@ impl PaneBrowser {
         }
     }
 
-    pub fn move_items_to_dest(&mut self, items: Vec<String>, dest_dir: String) {
+    pub fn move_items_to_dest(&mut self, items: Vec<String>, dest_dir: String, ctx: egui::Context) {
         let clean_dest = dest_dir.trim().to_string();
         if items.is_empty() || clean_dest.is_empty() || clean_dest == self.current_path {
             return;
@@ -1083,15 +1164,19 @@ impl PaneBrowser {
                 self.rx = Some(rx);
                 let path_clone = self.current_path.clone();
 
+                let sudo_prompt = self.sudo_prompt.clone();
+                let sudo_passwords = self.sudo_passwords.clone();
                 thread::spawn(move || {
                     let safe_dest = clean_dest.trim_end_matches('/').replace('\'', "'\\''");
-                    let _ = run_remote_ssh_cmd(&profile_clone, &format!("mkdir -p '{}'", safe_dest));
+                    let mkdir_cmd = format!("mkdir -p '{}'", safe_dest);
+                    let _ = run_remote_cmd_with_sudo(&profile_clone, &mkdir_cmd, sudo_prompt.clone(), sudo_passwords.clone(), &ctx);
                     for name in items {
                         let src = format!("{}/{}", current_dir.trim_end_matches('/'), name);
                         let dst = format!("{}/{}", clean_dest.trim_end_matches('/'), name);
                         let escaped_src = src.replace('\'', "'\\''");
                         let escaped_dst = dst.replace('\'', "'\\''");
-                        let _ = run_remote_ssh_cmd(&profile_clone, &format!("mv '{}' '{}'", escaped_src, escaped_dst));
+                        let mv_cmd = format!("mv '{}' '{}'", escaped_src, escaped_dst);
+                        let _ = run_remote_cmd_with_sudo(&profile_clone, &mv_cmd, sudo_prompt.clone(), sudo_passwords.clone(), &ctx);
                     }
                     let res = Self::fetch_remote_listing(&profile_clone, &path_clone);
                     let _ = tx.send(res);
@@ -1300,7 +1385,7 @@ impl PaneBrowser {
                 });
 
             if let Some(name) = create_dir_target {
-                self.create_directory(name);
+                self.create_directory(name, ctx.clone());
                 self.new_dir_name = "new_folder".to_string();
             }
             if close_modal {
@@ -1344,7 +1429,7 @@ impl PaneBrowser {
                 });
 
             if let Some((old_n, new_n)) = execute_rename {
-                self.rename_item(old_n, new_n);
+                self.rename_item(old_n, new_n, ctx.clone());
             }
             if close_modal {
                 self.show_rename_modal = false;
@@ -1387,7 +1472,7 @@ impl PaneBrowser {
                 });
 
             if let Some((items, dest)) = execute_move {
-                self.move_items_to_dest(items, dest);
+                self.move_items_to_dest(items, dest, ctx.clone());
             }
             if close_modal {
                 self.show_move_modal = false;
@@ -1443,7 +1528,7 @@ impl PaneBrowser {
 
             if execute_delete {
                 let items = self.items_to_delete.clone();
-                self.delete_items(items);
+                self.delete_items(items, ctx.clone());
                 self.selected_items.clear();
             }
             if close_modal {
