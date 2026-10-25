@@ -252,7 +252,7 @@ pub fn wrap_read_with_remote_sudo(file_path: &str, password: &str) -> String {
 }
 
 pub fn wrap_write_with_remote_sudo(dest_dir: &str, dest_file: &str, password: &str) -> String {
-    let safe_pw = password.replace('\', "\\").replace('\'', "'\''");
+    let safe_pw = password.replace('\\', "\\\\").replace('\'', "'\\''");
     let tmp_path = format!("/tmp/azterm-tmp-{}", std::process::id());
     format!(
         r#"cat > '{}' && printf '%s
@@ -271,7 +271,7 @@ pub fn wrap_tar_create_with_remote_sudo(parent_dir: &str, folder_name: &str, pas
 }
 
 pub fn wrap_tar_extract_with_remote_sudo(dest_dir: &str, password: &str) -> String {
-    let safe_pw = password.replace('\', "\\").replace('\'', "'\''");
+    let safe_pw = password.replace('\\', "\\\\").replace('\'', "'\\''");
     let tmp_path = format!("/tmp/azterm-tar-{}", std::process::id());
     format!(
         r#"cat > '{}' && printf '%s
@@ -457,9 +457,9 @@ fn upload_edited_file(
 
     // Write to /tmp first (no sudo needed), then sudo move it to the destination
     let tmp_remote = format!("/tmp/azterm-tmp-{}", std::process::id());
-    let escaped_tmp = tmp_remote.replace('\'', "'\''");
-    let escaped_dest = remote_path.replace('\'', "'\''");
-    let escaped_perms = perms.replace('\'', "'\''");
+    let escaped_tmp = tmp_remote.replace('\'', "'\\''");
+    let escaped_dest = remote_path.replace('\'', "'\\''");
+    let escaped_perms = perms.replace('\'', "'\\''");
 
     let mut sudo_pw = sudo_passwords_clone.lock().unwrap().get(&profile.id).cloned();
 
@@ -468,7 +468,7 @@ fn upload_edited_file(
         let mut cmd = build_ssh_base_command(profile);
 
         if let Some(ref pw) = sudo_pw {
-            let safe_pw = pw.replace('\', "\\").replace('\'', "'\''");
+            let safe_pw = pw.replace('\\', "\\\\").replace('\'', "'\\''");
             let shell_cmd = format!(
                 r#"cat > '{}' && printf '%s
 ' '{}' | sudo -S -p '' sh -c 'chmod "$1" "$2" && mv -f "$2" "$3"' -- '{}' '{}' '{}'"#,
@@ -764,7 +764,7 @@ fn run_remote_cmd_with_sudo(
     loop {
         let actual_cmd = if let Some(ref pw) = sudo_pw {
             let safe_pw = pw.replace('\\', "\\\\").replace('\'', "'\\''");
-            let safe_cmd = cmd.replace('\'', "'\''");
+            let safe_cmd = cmd.replace('\'', "'\\''");
             format!(
                 "printf '%s\n' '{}' | sudo -S -p '' bash -c '{}'",
                 safe_pw, safe_cmd
